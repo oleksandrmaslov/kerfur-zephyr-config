@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_NICE_NANO
+
+config ARM_MPU
+	default y
+
+config PINCTRL
+	default y
+
+config GPIO
+	default y
+
+config USE_DT_CODE_PARTITION
+	default y
+
+config FLASH
+	default y
+
+config FLASH_PAGE_LAYOUT
+	default y
+
+config FLASH_MAP
+	default y
+
+endif

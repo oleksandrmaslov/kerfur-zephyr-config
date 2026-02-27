@@ -1,0 +1,46 @@
+source "Kconfig.zephyr"
+
+menu "Kerfur Firmware"
+
+config KERFUR_ENABLE_BLE
+	bool "Enable BLE debug event injection service"
+	default y
+	help
+	  Enables a small custom GATT write characteristic used to inject
+	  mock events (pet, shake, notification, wake, sleep request).
+
+config KERFUR_ENABLE_MOCK_INPUTS
+	bool "Enable periodic mock external events"
+	default y
+	help
+	  Keeps the pet behavior active before all real sensors are added.
+
+config KERFUR_IDLE_TIMEOUT_S
+	int "Idle timeout (seconds)"
+	range 5 3600
+	default 45
+	help
+	  Time without real user interaction before APP_EVENT_IDLE_TIMEOUT.
+
+config KERFUR_DISPLAY_BLANK_TIMEOUT_S
+	int "Display blank timeout (seconds)"
+	range 10 7200
+	default 90
+	help
+	  Time without real user interaction before display blanking.
+
+config KERFUR_SLEEP_REQUEST_TIMEOUT_S
+	int "Sleep request timeout (seconds)"
+	range 20 14400
+	default 180
+	help
+	  Time without real user interaction before APP_EVENT_SLEEP_REQUEST.
+
+config KERFUR_UI_FRAME_MS
+	int "UI frame period (milliseconds)"
+	range 50 1000
+	default 120
+	help
+	  Controls renderer update cadence. Lower is smoother and costs power.
+
+endmenu

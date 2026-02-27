@@ -1,0 +1,45 @@
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	chosen {
+		zephyr,display = &ssd1306;
+	};
+
+	aliases {
+		sw0 = &pet_button0;
+		sw1 = &pet_button1;
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+
+		pet_button0: pet_button_0 {
+			label = "PET_BUTTON_0";
+			gpios = <&gpio0 2 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		};
+
+		pet_button1: pet_button_1 {
+			label = "PET_BUTTON_1";
+			gpios = <&gpio0 29 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		};
+	};
+};
+
+&i2c0 {
+	status = "okay";
+
+	ssd1306: ssd1306@3c {
+		compatible = "solomon,ssd1306fb";
+		reg = <0x3c>;
+		width = <128>;
+		height = <64>;
+		segment-offset = <0>;
+		page-offset = <0>;
+		display-offset = <0>;
+		multiplex-ratio = <63>;
+		segment-remap;
+		com-invdir;
+		prechargep = <0x22>;
+		status = "okay";
+	};
+};

@@ -1,6 +1,8 @@
 #include <zephyr/kernel.h>
 
+#include "app/app.h"
+
 int main(void)
 {
-        return 0;
+	return app_run();
 }

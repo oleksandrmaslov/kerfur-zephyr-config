@@ -1,0 +1,9 @@
+/*
+ * Local shim for nice!nano board DTS include.
+ *
+ * Some external board definitions include this file to describe a UF2
+ * boot-mode GPIO. For this firmware base we do not depend on that node yet.
+ *
+ * TODO: Replace with a proper UF2 boot-mode node if/when bootloader mode
+ * control is required by your flashing workflow.
+ */
