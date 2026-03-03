@@ -55,6 +55,10 @@ static void tick_timer_handler(struct k_timer *timer_id)
 {
 	ARG_UNUSED(timer_id);
 	publish_with_best_effort(APP_EVENT_TICK_1S);
+
+	if (IS_ENABLED(CONFIG_KERFUR_TRACE_EVENTS)) {
+		LOG_DBG("Tick 1s");
+	}
 }
 
 K_TIMER_DEFINE(g_tick_timer, tick_timer_handler, NULL);
@@ -67,8 +71,10 @@ static void mock_timer_handler(struct k_timer *timer_id)
 
 	if ((g_periodic_mock_phase % 2U) == 0U) {
 		publish_with_best_effort(APP_EVENT_MOCK_NOTIFICATION);
+		LOG_INF("Mock timer -> MOCK_NOTIFICATION");
 	} else {
 		publish_with_best_effort(APP_EVENT_MOCK_SHAKE);
+		LOG_INF("Mock timer -> MOCK_SHAKE");
 	}
 }
 
@@ -108,8 +114,10 @@ static void button0_isr(const struct device *dev, struct gpio_callback *cb, uint
 	publish_with_best_effort(APP_EVENT_USER_BUTTON_PRESS);
 	if (held_ms >= LONG_PRESS_MS) {
 		publish_with_best_effort(APP_EVENT_MOCK_NOTIFICATION);
+		LOG_INF("sw0 long press (%lld ms) -> MOCK_NOTIFICATION", (long long)held_ms);
 	} else {
 		publish_with_best_effort(APP_EVENT_MOCK_PET);
+		LOG_INF("sw0 short press (%lld ms) -> MOCK_PET", (long long)held_ms);
 	}
 }
 #endif
@@ -123,6 +131,7 @@ static void button1_isr(const struct device *dev, struct gpio_callback *cb, uint
 
 	if (gpio_is_active(&g_button1)) {
 		publish_with_best_effort(APP_EVENT_MOCK_SHAKE);
+		LOG_INF("sw1 active -> MOCK_SHAKE");
 	}
 }
 #endif
@@ -171,6 +180,9 @@ int mock_inputs_init(void)
 		LOG_ERR("sw0 callback failed (%d)", err);
 		return err;
 	}
+
+	LOG_INF("sw0 ready: port=%s pin=%d flags=0x%x", g_button0.port->name, g_button0.pin,
+		g_button0.dt_flags);
 #else
 	LOG_WRN("sw0 alias not found; button short/long press disabled");
 #endif
@@ -199,6 +211,9 @@ int mock_inputs_init(void)
 		LOG_ERR("sw1 callback failed (%d)", err2);
 		return err2;
 	}
+
+	LOG_INF("sw1 ready: port=%s pin=%d flags=0x%x", g_button1.port->name, g_button1.pin,
+		g_button1.dt_flags);
 #endif
 
 	LOG_INF("Mock inputs initialized");

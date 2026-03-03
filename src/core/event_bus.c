@@ -1,9 +1,12 @@
 #include <stddef.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
 
 #include "core/app_event.h"
 #include "core/event_bus.h"
+
+LOG_MODULE_REGISTER(event_bus, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define APP_EVENT_QUEUE_LEN 32
 
@@ -26,6 +29,7 @@ static const char *const g_event_names[APP_EVENT_COUNT] = {
 int app_event_bus_init(void)
 {
 	k_msgq_purge(&g_event_queue);
+	LOG_INF("Event bus initialized (queue=%d)", APP_EVENT_QUEUE_LEN);
 	return 0;
 }
 
@@ -36,8 +40,17 @@ int app_event_publish_with_timestamp(enum app_event_type type, int32_t param, in
 		.timestamp_ms = timestamp_ms,
 		.param = param,
 	};
+	int err;
 
-	return k_msgq_put(&g_event_queue, &event, K_NO_WAIT);
+	err = k_msgq_put(&g_event_queue, &event, K_NO_WAIT);
+	if (err != 0) {
+		LOG_WRN("Event drop: %s param=%d ts=%lld (err=%d)",
+			app_event_type_str(type), param, (long long)timestamp_ms, err);
+	} else if (IS_ENABLED(CONFIG_KERFUR_TRACE_EVENTS) && (type != APP_EVENT_TICK_1S)) {
+		LOG_INF("Event pub: %s param=%d", app_event_type_str(type), param);
+	}
+
+	return err;
 }
 
 int app_event_publish(enum app_event_type type, int32_t param)

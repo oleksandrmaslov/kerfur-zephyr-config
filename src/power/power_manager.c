@@ -1,8 +1,11 @@
 #include <stdbool.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
 
 #include "power/power_manager.h"
+
+LOG_MODULE_REGISTER(power_manager, CONFIG_LOG_DEFAULT_LEVEL);
 
 struct power_state {
 	int64_t last_real_interaction_ms;
@@ -37,6 +40,9 @@ void power_manager_init(int64_t now_ms)
 	g_power.idle_timeout_sent = false;
 	g_power.sleep_request_sent = false;
 	g_power.display_blanked = false;
+	LOG_INF("Power manager init: idle=%ds blank=%ds sleep=%ds",
+		CONFIG_KERFUR_IDLE_TIMEOUT_S, CONFIG_KERFUR_DISPLAY_BLANK_TIMEOUT_S,
+		CONFIG_KERFUR_SLEEP_REQUEST_TIMEOUT_S);
 }
 
 void power_manager_on_event(const struct app_event *event, const struct pet_state *state)
@@ -48,14 +54,17 @@ void power_manager_on_event(const struct app_event *event, const struct pet_stat
 		g_power.idle_timeout_sent = false;
 		g_power.sleep_request_sent = false;
 		g_power.display_blanked = false;
+		LOG_INF("Power reset by interaction (%s)", app_event_type_str(event->type));
 	}
 
 	if (event->type == APP_EVENT_WAKE) {
 		g_power.display_blanked = false;
+		LOG_INF("Power wake event");
 	}
 
 	if (event->type == APP_EVENT_SLEEP_REQUEST) {
 		g_power.sleep_request_sent = true;
+		LOG_INF("Power sleep request acknowledged");
 	}
 }
 
@@ -69,12 +78,14 @@ bool power_manager_poll(int64_t now_ms, struct app_event *out_event)
 		out_event->type = APP_EVENT_IDLE_TIMEOUT;
 		out_event->timestamp_ms = now_ms;
 		out_event->param = 0;
+		LOG_INF("Power emitted IDLE_TIMEOUT after %lld ms", (long long)idle_ms);
 		return true;
 	}
 
 	if (!g_power.display_blanked &&
 	    idle_ms >= ((int64_t)CONFIG_KERFUR_DISPLAY_BLANK_TIMEOUT_S * MSEC_PER_SEC)) {
 		g_power.display_blanked = true;
+		LOG_INF("Power display blanked after %lld ms", (long long)idle_ms);
 	}
 
 	if (!g_power.sleep_request_sent &&
@@ -84,6 +95,7 @@ bool power_manager_poll(int64_t now_ms, struct app_event *out_event)
 		out_event->type = APP_EVENT_SLEEP_REQUEST;
 		out_event->timestamp_ms = now_ms;
 		out_event->param = 0;
+		LOG_INF("Power emitted SLEEP_REQUEST after %lld ms", (long long)idle_ms);
 		return true;
 	}
 

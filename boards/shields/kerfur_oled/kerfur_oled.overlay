@@ -1,0 +1,31 @@
+/*
+ * Kerfur OLED shield (ZMK-style shield layout):
+ * - references the board connector bus label (`pro_micro_i2c`)
+ * - provides zephyr,display chosen node
+ */
+
+/ {
+	chosen {
+		zephyr,display = &kerfur_oled_ssd1306;
+	};
+};
+
+&pro_micro_i2c {
+	status = "okay";
+
+	kerfur_oled_ssd1306: ssd1306@3c {
+		compatible = "solomon,ssd1306";
+		reg = <0x3c>;
+		width = <128>;
+		height = <64>;
+		segment-offset = <0>;
+		page-offset = <0>;
+		display-offset = <0>;
+		multiplex-ratio = <63>;
+		segment-remap;
+		com-invdir;
+		prechargep = <0x22>;
+		/* TODO: add reset-gpios / supply-gpios if your module requires it */
+		status = "okay";
+	};
+};

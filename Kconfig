@@ -43,4 +43,11 @@ config KERFUR_UI_FRAME_MS
 	help
 	  Controls renderer update cadence. Lower is smoother and costs power.
 
+config KERFUR_TRACE_EVENTS
+	bool "Verbose app event/state tracing"
+	default y
+	help
+	  Adds extra runtime logs in app/core/behavior/power paths for
+	  easier bring-up and troubleshooting.
+
 endmenu

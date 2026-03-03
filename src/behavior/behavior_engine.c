@@ -1,8 +1,11 @@
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
 
 #include "behavior/behavior_engine.h"
+
+LOG_MODULE_REGISTER(behavior_engine, CONFIG_LOG_DEFAULT_LEVEL);
 
 static int16_t clamp_0_100(int value)
 {
@@ -140,10 +143,16 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->last_interaction_timestamp_ms = now_ms;
 	state->current_mode = PET_MODE_AWAKE;
 	state->expression = PET_EXPR_IDLE;
+
+	LOG_INF("Behavior init: mode=%s expr=%s", pet_mode_str(state->current_mode),
+		pet_expression_str(state->expression));
 }
 
 void behavior_engine_handle_event(struct pet_state *state, const struct app_event *event)
 {
+	enum pet_mode prev_mode = state->current_mode;
+	enum pet_expression prev_expr = state->expression;
+
 	switch (event->type) {
 	case APP_EVENT_TICK_1S:
 		apply_tick_update(state, event->timestamp_ms);
@@ -203,6 +212,22 @@ void behavior_engine_handle_event(struct pet_state *state, const struct app_even
 	clamp_state(state);
 	update_mode_transitions(state);
 	state->expression = compute_expression(state, event->timestamp_ms);
+
+	if (prev_mode != state->current_mode) {
+		LOG_INF("Mode: %s -> %s (event=%s)", pet_mode_str(prev_mode),
+			pet_mode_str(state->current_mode), app_event_type_str(event->type));
+	}
+
+	if (prev_expr != state->expression) {
+		LOG_INF("Expr: %s -> %s (event=%s)", pet_expression_str(prev_expr),
+			pet_expression_str(state->expression), app_event_type_str(event->type));
+	}
+
+	if (IS_ENABLED(CONFIG_KERFUR_TRACE_EVENTS) && (event->type != APP_EVENT_TICK_1S)) {
+		LOG_INF("State: E=%d Sl=%d At=%d Bo=%d St=%d Ar=%d So=%d",
+			state->energy, state->sleepiness, state->attachment, state->boredom,
+			state->stress, state->arousal, state->social_load);
+	}
 }
 
 const char *pet_mode_str(enum pet_mode mode)

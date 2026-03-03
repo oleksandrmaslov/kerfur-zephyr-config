@@ -4,7 +4,7 @@ This is a minimal-but-extensible firmware foundation for a "smart pet" keychain.
 
 Current first version goals achieved:
 - boots on Zephyr
-- initializes SSD1306 display over I2C
+- initializes SSD1306 display over I2C via shield
 - renders an animated alive face
 - central event queue
 - behavior/state engine with internal variables and utility-based expression selection
@@ -14,14 +14,15 @@ Current first version goals achieved:
 
 ## Assumptions
 
-- Board: `nice_nano` (local board definition in this repo) or `nrf52840dk/nrf52840`
+- Board: `nice_nano` (local board definition in this repo)
 - OLED: SSD1306-compatible on I2C address `0x3C`
-- Overlays:
+- Display wiring/config is handled by custom shield:
+  - [boards/shields/kerfur_oled/kerfur_oled.overlay](boards/shields/kerfur_oled/kerfur_oled.overlay)
+- Board app overlay:
   - [boards/nice_nano.overlay](boards/nice_nano.overlay)
-  - [boards/nrf52840dk_nrf52840.overlay](boards/nrf52840dk_nrf52840.overlay)
 - `sw0` exists for short/long-press test input; `sw1` optional for mock shake.
 
-If your wiring/board is different, edit the overlay first.
+If your OLED uses another address or needs reset/supply GPIOs, edit the shield overlay first.
 
 ## Folder Structure
 
@@ -29,6 +30,7 @@ If your wiring/board is different, edit the overlay first.
 .
 |-- boards/
 |   |-- nice_nano.overlay
+|   |-- shields/kerfur_oled/...
 |   |-- nicekeyboards/nice_nano/...
 |   `-- nrf52840dk_nrf52840.overlay
 |-- dts/common/nordic/nrf52840_uf2_boot_mode.dtsi
@@ -77,7 +79,8 @@ If your wiring/board is different, edit the overlay first.
 
 4. UI Renderer (`src/ui/ui_renderer.c`)
 - Separate from behavior logic.
-- Renders simple animated face primitives to display.
+- Uses LVGL to render and animate the face.
+- Keeps display access via Zephyr display API (blank on/off).
 - Uses periodic blink and mouth movement for "alive" effect.
 - Includes anti-burn-in pixel shift foundation.
 
@@ -107,24 +110,17 @@ If your wiring/board is different, edit the overlay first.
 
 ## Build / Flash
 
-From Zephyr workspace shell:
+From Zephyr workspace shell (`nice!nano` + shield):
 
 ```bash
-west build -p always -b nrf52840dk_nrf52840
-west flash
-```
-
-For `nice!nano` (local vendored board support in this repo):
-
-```bash
-west build -p always -b nice_nano -s c:/Users/Alexandr/kerfur -d c:/Users/Alexandr/kerfur/build/nice_nano
+west build -p always -b nice_nano -d build/nice_nano_local -- -DSHIELD=kerfur_oled
 west flash
 ```
 
 UF2 output is generated at:
 
 ```text
-build/nice_nano/zephyr/zephyr.uf2
+build/nice_nano_local/zephyr/zephyr.uf2
 ```
 
 Monitor logs:
@@ -136,8 +132,8 @@ west build -t run
 ## What To Edit First For Your Hardware
 
 1. Display wiring and bus:
-- [boards/nice_nano.overlay](boards/nice_nano.overlay) or [boards/nrf52840dk_nrf52840.overlay](boards/nrf52840dk_nrf52840.overlay)
-- Change I2C bus node, address, and SSD1306 parameters if needed.
+- [boards/shields/kerfur_oled/kerfur_oled.overlay](boards/shields/kerfur_oled/kerfur_oled.overlay)
+- Change I2C address and SSD1306 parameters if needed.
 
 2. Input mapping:
 - [src/drivers/mock_inputs.c](src/drivers/mock_inputs.c)

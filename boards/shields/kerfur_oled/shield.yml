@@ -1,0 +1,6 @@
+shields:
+  - name: kerfur_oled
+    full_name: Kerfur SSD1306 OLED Shield
+    vendor: kerfur
+    supported_features:
+      - display

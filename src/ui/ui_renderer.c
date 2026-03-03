@@ -1,186 +1,109 @@
 #include <errno.h>
 #include <stdbool.h>
-#include <stddef.h>
-#include <string.h>
+#include <stdint.h>
 
-#include <zephyr/devicetree.h>
+#include <lvgl.h>
 #include <zephyr/device.h>
+#include <zephyr/devicetree.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/util.h>
 
 #include "ui/ui_renderer.h"
 
 LOG_MODULE_REGISTER(ui_renderer, CONFIG_LOG_DEFAULT_LEVEL);
 
 #if !DT_HAS_CHOSEN(zephyr_display)
-#error "No zephyr,display chosen node. Add it in board overlay."
+#error "No zephyr,display chosen node. Select a display shield."
 #endif
 
-#define SCREEN_WIDTH_MAX 128
-#define SCREEN_HEIGHT_MAX 64
-#define FB_SIZE_MAX ((SCREEN_WIDTH_MAX * SCREEN_HEIGHT_MAX) / 8)
+struct face_nodes {
+	lv_obj_t *root;
+	lv_obj_t *eye_l;
+	lv_obj_t *eye_r;
+	lv_obj_t *mouth;
+	lv_obj_t *mouth_aux;
+	lv_obj_t *brow_l;
+	lv_obj_t *brow_r;
+	lv_obj_t *icon_ble;
+	lv_obj_t *icon_bat_body;
+	lv_obj_t *icon_bat_tip;
+};
 
 static const struct device *g_display;
-static uint8_t g_fb[FB_SIZE_MAX];
-static uint16_t g_width = SCREEN_WIDTH_MAX;
-static uint16_t g_height = SCREEN_HEIGHT_MAX;
+static struct face_nodes g_face;
 static bool g_blanked;
+static int16_t g_width;
+static int16_t g_height;
+static uint32_t g_frame_id;
 static uint8_t g_shift_x;
 static uint8_t g_shift_y;
-static uint32_t g_frame_id;
 
-static int iabs(int value)
+static void ui_rect_style(lv_obj_t *obj, lv_color_t color)
 {
-	return (value < 0) ? -value : value;
+	lv_obj_remove_style_all(obj);
+	lv_obj_set_style_bg_color(obj, color, LV_PART_MAIN);
+	lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN);
+	lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
+	lv_obj_set_style_radius(obj, 0, LV_PART_MAIN);
 }
 
-static void fb_clear(void)
+static lv_obj_t *ui_make_rect(lv_obj_t *parent, lv_color_t color)
 {
-	(void)memset(g_fb, 0, sizeof(g_fb));
+	lv_obj_t *obj = lv_obj_create(parent);
+
+	ui_rect_style(obj, color);
+	return obj;
 }
 
-static void fb_set_pixel(int x, int y, bool on)
+static void ui_set_hidden(lv_obj_t *obj, bool hidden)
 {
-	size_t index;
-	uint8_t bit;
-
-	x += g_shift_x;
-	y += g_shift_y;
-
-	if ((x < 0) || (y < 0) || (x >= g_width) || (y >= g_height)) {
-		return;
-	}
-
-	index = (size_t)x + ((size_t)y / 8U) * g_width;
-	bit = BIT(y & 0x7);
-
-	if (on) {
-		g_fb[index] |= bit;
+	if (hidden) {
+		lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
 	} else {
-		g_fb[index] &= ~bit;
+		lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
 	}
 }
 
-static void fb_fill_rect(int x, int y, int w, int h)
+static void ui_create_scene(void)
 {
-	int ix;
-	int iy;
+	lv_obj_t *screen = lv_screen_active();
+	lv_color_t white = lv_color_hex(0xffffff);
+	lv_color_t black = lv_color_hex(0x000000);
 
-	for (iy = y; iy < (y + h); iy++) {
-		for (ix = x; ix < (x + w); ix++) {
-			fb_set_pixel(ix, iy, true);
-		}
-	}
+	g_face.root = lv_obj_create(screen);
+	ui_rect_style(g_face.root, black);
+	lv_obj_set_size(g_face.root, g_width, g_height);
+	lv_obj_set_pos(g_face.root, 0, 0);
+	lv_obj_clear_flag(g_face.root, LV_OBJ_FLAG_SCROLLABLE);
+
+	g_face.eye_l = ui_make_rect(g_face.root, white);
+	g_face.eye_r = ui_make_rect(g_face.root, white);
+	g_face.mouth = ui_make_rect(g_face.root, white);
+	g_face.mouth_aux = ui_make_rect(g_face.root, white);
+	g_face.brow_l = ui_make_rect(g_face.root, white);
+	g_face.brow_r = ui_make_rect(g_face.root, white);
+	g_face.icon_ble = ui_make_rect(g_face.root, white);
+	g_face.icon_bat_body = ui_make_rect(g_face.root, white);
+	g_face.icon_bat_tip = ui_make_rect(g_face.root, white);
 }
 
-static void fb_draw_line(int x0, int y0, int x1, int y1)
+static void ui_update_icons(const struct pet_state *state)
 {
-	int dx = iabs(x1 - x0);
-	int sx = (x0 < x1) ? 1 : -1;
-	int dy = -iabs(y1 - y0);
-	int sy = (y0 < y1) ? 1 : -1;
-	int err = dx + dy;
+	ui_set_hidden(g_face.icon_ble, !state->ble_connected);
+	ui_set_hidden(g_face.icon_bat_body, !state->battery_low);
+	ui_set_hidden(g_face.icon_bat_tip, !state->battery_low);
 
-	while (true) {
-		fb_set_pixel(x0, y0, true);
-		if ((x0 == x1) && (y0 == y1)) {
-			break;
-		}
-
-		if ((2 * err) >= dy) {
-			err += dy;
-			x0 += sx;
-		}
-		if ((2 * err) <= dx) {
-			err += dx;
-			y0 += sy;
-		}
-	}
-}
-
-static void draw_eyes(enum pet_expression expression, bool blink)
-{
-	int eye_y = (int)(g_height / 2U) - 10;
-	int left_x = (int)(g_width / 2U) - 26;
-	int right_x = (int)(g_width / 2U) + 14;
-	int eye_w = 12;
-	int eye_h = blink ? 2 : 8;
-
-	if (expression == PET_EXPR_SLEEPY) {
-		eye_h = 3;
-	}
-
-	if (expression == PET_EXPR_ASLEEP) {
-		fb_draw_line(left_x, eye_y + 2, left_x + eye_w, eye_y + 2);
-		fb_draw_line(right_x, eye_y + 2, right_x + eye_w, eye_y + 2);
-		return;
-	}
-
-	fb_fill_rect(left_x, eye_y, eye_w, eye_h);
-	fb_fill_rect(right_x, eye_y, eye_w, eye_h);
-
-	if ((expression == PET_EXPR_CURIOUS) && !blink) {
-		fb_fill_rect(right_x + 3, eye_y - 2, eye_w - 6, 3);
-	}
-
-	if ((expression == PET_EXPR_STRESSED) && !blink) {
-		fb_set_pixel(left_x - 2, eye_y - 2, true);
-		fb_set_pixel(left_x - 1, eye_y - 1, true);
-		fb_set_pixel(right_x + eye_w + 1, eye_y - 2, true);
-		fb_set_pixel(right_x + eye_w, eye_y - 1, true);
-	}
-}
-
-static void draw_mouth(enum pet_expression expression, int64_t now_ms)
-{
-	int base_x = (int)(g_width / 2U) - 12;
-	int base_y = (int)(g_height / 2U) + 10;
-	bool phase = ((now_ms / 350) % 2) == 0;
-
-	switch (expression) {
-	case PET_EXPR_HAPPY:
-		fb_draw_line(base_x, base_y, base_x + 10, base_y + 4);
-		fb_draw_line(base_x + 10, base_y + 4, base_x + 24, base_y);
-		break;
-	case PET_EXPR_SLEEPY:
-		fb_draw_line(base_x, base_y + 2, base_x + 24, base_y + 2);
-		break;
-	case PET_EXPR_CURIOUS:
-		fb_fill_rect(base_x + 10, base_y + (phase ? 0 : 1), 4, 4);
-		break;
-	case PET_EXPR_NEEDY:
-		fb_draw_line(base_x, base_y + 3, base_x + 24, base_y + 3);
-		fb_fill_rect(base_x + 10, base_y + 1, 4, 2);
-		break;
-	case PET_EXPR_STRESSED:
-		fb_draw_line(base_x, base_y + 2, base_x + 6, base_y);
-		fb_draw_line(base_x + 6, base_y, base_x + 12, base_y + 4);
-		fb_draw_line(base_x + 12, base_y + 4, base_x + 18, base_y);
-		fb_draw_line(base_x + 18, base_y, base_x + 24, base_y + 2);
-		break;
-	case PET_EXPR_ASLEEP:
-		fb_draw_line(base_x + 6, base_y + 2, base_x + 18, base_y + 2);
-		break;
-	case PET_EXPR_IDLE:
-	default:
-		fb_draw_line(base_x, base_y + (phase ? 1 : 2), base_x + 24, base_y + (phase ? 1 : 2));
-		break;
-	}
-}
-
-static void draw_status_icons(const struct pet_state *state)
-{
 	if (state->ble_connected) {
-		fb_fill_rect(g_width - 8, 2, 4, 4);
+		lv_obj_set_pos(g_face.icon_ble, g_width - 8, 2);
+		lv_obj_set_size(g_face.icon_ble, 4, 4);
 	}
+
 	if (state->battery_low) {
-		fb_draw_line(3, 3, 8, 3);
-		fb_draw_line(3, 3, 3, 6);
-		fb_draw_line(8, 3, 8, 6);
-		fb_draw_line(3, 6, 8, 6);
-		fb_set_pixel(9, 4, true);
+		lv_obj_set_pos(g_face.icon_bat_body, 2, 2);
+		lv_obj_set_size(g_face.icon_bat_body, 6, 4);
+		lv_obj_set_pos(g_face.icon_bat_tip, 8, 3);
+		lv_obj_set_size(g_face.icon_bat_tip, 1, 2);
 	}
 }
 
@@ -196,79 +119,167 @@ int ui_renderer_init(void)
 	}
 
 	display_get_capabilities(g_display, &caps);
-	g_width = MIN((uint16_t)caps.x_resolution, (uint16_t)SCREEN_WIDTH_MAX);
-	g_height = MIN((uint16_t)caps.y_resolution, (uint16_t)SCREEN_HEIGHT_MAX);
+	g_width = (int16_t)caps.x_resolution;
+	g_height = (int16_t)caps.y_resolution;
 
-	err = display_set_pixel_format(g_display, PIXEL_FORMAT_MONO10);
-	if (err) {
-		LOG_WRN("Could not set MONO10 pixel format (%d)", err);
-	}
+	ui_create_scene();
+	lv_timer_handler();
 
 	err = display_blanking_off(g_display);
-	if (err) {
+	if (err < 0 && err != -ENOSYS) {
 		LOG_WRN("display_blanking_off failed (%d)", err);
 	}
 
 	g_blanked = false;
-	g_shift_x = 0;
-	g_shift_y = 0;
-	g_frame_id = 0;
-	fb_clear();
+	g_frame_id = 0U;
+	g_shift_x = 0U;
+	g_shift_y = 0U;
 
-	LOG_INF("UI ready (%ux%u)", g_width, g_height);
+	LOG_INF("LVGL renderer ready (%dx%d)", g_width, g_height);
 	return 0;
 }
 
 void ui_renderer_set_blanked(bool blanked)
 {
-	if (g_display == NULL) {
-		return;
-	}
+	int err;
 
-	if (blanked == g_blanked) {
+	if ((g_display == NULL) || (g_face.root == NULL) || (blanked == g_blanked)) {
 		return;
 	}
 
 	g_blanked = blanked;
+	ui_set_hidden(g_face.root, blanked);
+
 	if (blanked) {
-		(void)display_blanking_on(g_display);
+		err = display_blanking_on(g_display);
+		if (err < 0 && err != -ENOSYS) {
+			LOG_WRN("display_blanking_on failed (%d)", err);
+		}
 	} else {
-		(void)display_blanking_off(g_display);
+		err = display_blanking_off(g_display);
+		if (err < 0 && err != -ENOSYS) {
+			LOG_WRN("display_blanking_off failed (%d)", err);
+		}
+		lv_timer_handler();
 	}
 }
 
 void ui_renderer_render(const struct pet_state *state, int64_t now_ms)
 {
-	struct display_buffer_descriptor desc;
+	int16_t center_x;
+	int16_t center_y;
+	int16_t left_x;
+	int16_t right_x;
+	int16_t eye_y;
+	int16_t eye_w = 12;
+	int16_t eye_h;
+	int16_t mouth_x;
+	int16_t mouth_y;
+	int16_t mouth_w = 20;
+	int16_t mouth_h = 2;
 	bool blink;
-	int err;
+	bool phase;
 
-	if ((g_display == NULL) || g_blanked) {
+	if ((g_face.root == NULL) || g_blanked) {
 		return;
 	}
 
 	g_frame_id++;
 	if ((g_frame_id % 70U) == 0U) {
-		/* Slow pixel shifting as anti-burn-in foundation. */
+		/* Anti-burn-in baseline: shift the face slowly by a few pixels. */
 		g_shift_x = (g_shift_x + 1U) % 3U;
 		g_shift_y = (g_shift_y + 1U) % 2U;
 	}
+	lv_obj_set_pos(g_face.root, (int16_t)g_shift_x, (int16_t)g_shift_y);
 
 	blink = (((now_ms / 120) % 28) == 0) || (((now_ms / 120) % 28) == 1);
+	phase = ((now_ms / 350) % 2) == 0;
 
-	fb_clear();
-	draw_eyes(state->expression, blink);
-	draw_mouth(state->expression, now_ms);
-	draw_status_icons(state);
+	center_x = g_width / 2;
+	center_y = g_height / 2;
+	eye_y = center_y - 10;
+	left_x = center_x - 26;
+	right_x = center_x + 14;
+	eye_h = blink ? 2 : 8;
 
-	desc.buf_size = (g_width * g_height) / 8U;
-	desc.width = g_width;
-	desc.height = g_height;
-	desc.pitch = g_width;
-	desc.frame_incomplete = false;
+	ui_set_hidden(g_face.brow_l, true);
+	ui_set_hidden(g_face.brow_r, true);
+	ui_set_hidden(g_face.mouth_aux, true);
 
-	err = display_write(g_display, 0, 0, &desc, g_fb);
-	if (err) {
-		LOG_WRN("display_write failed (%d)", err);
+	switch (state->expression) {
+	case PET_EXPR_SLEEPY:
+		eye_h = 3;
+		mouth_w = 24;
+		mouth_h = 1;
+		break;
+	case PET_EXPR_ASLEEP:
+		eye_h = 1;
+		mouth_w = 12;
+		mouth_h = 1;
+		break;
+	case PET_EXPR_CURIOUS:
+		mouth_w = 4;
+		mouth_h = 4;
+		break;
+	case PET_EXPR_NEEDY:
+		mouth_w = 24;
+		mouth_h = 2;
+		ui_set_hidden(g_face.mouth_aux, false);
+		break;
+	case PET_EXPR_STRESSED:
+		mouth_w = 24;
+		mouth_h = 2;
+		ui_set_hidden(g_face.brow_l, false);
+		ui_set_hidden(g_face.brow_r, false);
+		break;
+	case PET_EXPR_HAPPY:
+		mouth_w = 22;
+		mouth_h = 3;
+		break;
+	case PET_EXPR_IDLE:
+	default:
+		mouth_w = 20;
+		mouth_h = 2;
+		break;
 	}
+
+	lv_obj_set_pos(g_face.eye_l, left_x, eye_y);
+	lv_obj_set_size(g_face.eye_l, eye_w, eye_h);
+
+	if (state->expression == PET_EXPR_CURIOUS) {
+		lv_obj_set_pos(g_face.eye_r, right_x, eye_y - 1);
+		lv_obj_set_size(g_face.eye_r, eye_w, eye_h + 3);
+	} else {
+		lv_obj_set_pos(g_face.eye_r, right_x, eye_y);
+		lv_obj_set_size(g_face.eye_r, eye_w, eye_h);
+	}
+
+	if (state->expression == PET_EXPR_ASLEEP) {
+		mouth_x = center_x - (mouth_w / 2);
+		mouth_y = center_y + 11;
+	} else if (state->expression == PET_EXPR_CURIOUS) {
+		mouth_x = center_x - 2;
+		mouth_y = center_y + (phase ? 8 : 9);
+	} else {
+		mouth_x = center_x - (mouth_w / 2);
+		mouth_y = center_y + (phase ? 10 : 11);
+	}
+
+	lv_obj_set_pos(g_face.mouth, mouth_x, mouth_y);
+	lv_obj_set_size(g_face.mouth, mouth_w, mouth_h);
+
+	if (state->expression == PET_EXPR_NEEDY) {
+		lv_obj_set_pos(g_face.mouth_aux, center_x - 2, mouth_y - 2);
+		lv_obj_set_size(g_face.mouth_aux, 4, 1);
+	}
+
+	if (state->expression == PET_EXPR_STRESSED) {
+		lv_obj_set_pos(g_face.brow_l, left_x - 2, eye_y - 2);
+		lv_obj_set_size(g_face.brow_l, 6, 1);
+		lv_obj_set_pos(g_face.brow_r, right_x + eye_w - 4, eye_y - 2);
+		lv_obj_set_size(g_face.brow_r, 6, 1);
+	}
+
+	ui_update_icons(state);
+	lv_timer_handler();
 }

@@ -63,6 +63,7 @@ static ssize_t event_inject_write_cb(struct bt_conn *conn, const struct bt_gatt_
 		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
 
+	LOG_INF("BLE inject: code=%u -> %s", ((const uint8_t *)buf)[0], app_event_type_str(type));
 	(void)app_event_publish(type, 0);
 	return len;
 }
