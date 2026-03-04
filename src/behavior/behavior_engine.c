@@ -141,6 +141,7 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->arousal = 35;
 	state->social_load = 10;
 	state->last_interaction_timestamp_ms = now_ms;
+	state->last_phone_notification_timestamp_ms = 0;
 	state->current_mode = PET_MODE_AWAKE;
 	state->expression = PET_EXPR_IDLE;
 
@@ -178,6 +179,12 @@ void behavior_engine_handle_event(struct pet_state *state, const struct app_even
 		state->social_load += 15;
 		state->arousal += 8;
 		state->boredom -= 4;
+		break;
+	case APP_EVENT_PHONE_NOTIFICATION:
+		state->social_load += 15;
+		state->arousal += 8;
+		state->boredom -= 4;
+		state->last_phone_notification_timestamp_ms = event->timestamp_ms;
 		break;
 	case APP_EVENT_IDLE_TIMEOUT:
 		if (state->current_mode == PET_MODE_AWAKE) {

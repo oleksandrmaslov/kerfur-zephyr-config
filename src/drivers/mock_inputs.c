@@ -27,7 +27,9 @@ static const struct gpio_dt_spec g_button1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpi
 static struct gpio_callback g_button1_cb;
 #endif
 
+#if CONFIG_KERFUR_ENABLE_MOCK_INPUTS
 static uint8_t g_periodic_mock_phase;
+#endif
 
 static bool gpio_is_active(const struct gpio_dt_spec *spec)
 {

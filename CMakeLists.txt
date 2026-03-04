@@ -16,4 +16,5 @@ target_sources(app PRIVATE
     src/drivers/mock_inputs.c
     src/power/power_manager.c
     src/ble/ble_manager.c
+    src/ble/ble_shell.c
 )

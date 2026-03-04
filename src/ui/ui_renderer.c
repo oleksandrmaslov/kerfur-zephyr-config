@@ -28,6 +28,7 @@ struct face_nodes {
 	lv_obj_t *icon_ble;
 	lv_obj_t *icon_bat_body;
 	lv_obj_t *icon_bat_tip;
+	lv_obj_t *icon_notif;
 };
 
 static const struct device *g_display;
@@ -86,13 +87,19 @@ static void ui_create_scene(void)
 	g_face.icon_ble = ui_make_rect(g_face.root, white);
 	g_face.icon_bat_body = ui_make_rect(g_face.root, white);
 	g_face.icon_bat_tip = ui_make_rect(g_face.root, white);
+	g_face.icon_notif = ui_make_rect(g_face.root, white);
 }
 
-static void ui_update_icons(const struct pet_state *state)
+static void ui_update_icons(const struct pet_state *state, int64_t now_ms)
 {
+	bool notif_recent = (state->last_phone_notification_timestamp_ms > 0) &&
+			    ((now_ms - state->last_phone_notification_timestamp_ms) < (8 * MSEC_PER_SEC));
+	bool notif_pulse = ((now_ms / 250) % 2) == 0;
+
 	ui_set_hidden(g_face.icon_ble, !state->ble_connected);
 	ui_set_hidden(g_face.icon_bat_body, !state->battery_low);
 	ui_set_hidden(g_face.icon_bat_tip, !state->battery_low);
+	ui_set_hidden(g_face.icon_notif, !(notif_recent && notif_pulse));
 
 	if (state->ble_connected) {
 		lv_obj_set_pos(g_face.icon_ble, g_width - 8, 2);
@@ -104,6 +111,11 @@ static void ui_update_icons(const struct pet_state *state)
 		lv_obj_set_size(g_face.icon_bat_body, 6, 4);
 		lv_obj_set_pos(g_face.icon_bat_tip, 8, 3);
 		lv_obj_set_size(g_face.icon_bat_tip, 1, 2);
+	}
+
+	if (notif_recent && notif_pulse) {
+		lv_obj_set_pos(g_face.icon_notif, (g_width / 2) - 2, 2);
+		lv_obj_set_size(g_face.icon_notif, 4, 4);
 	}
 }
 
@@ -280,6 +292,6 @@ void ui_renderer_render(const struct pet_state *state, int64_t now_ms)
 		lv_obj_set_size(g_face.brow_r, 6, 1);
 	}
 
-	ui_update_icons(state);
+	ui_update_icons(state, now_ms);
 	lv_timer_handler();
 }

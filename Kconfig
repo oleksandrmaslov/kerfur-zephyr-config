@@ -3,11 +3,64 @@ source "Kconfig.zephyr"
 menu "Kerfur Firmware"
 
 config KERFUR_ENABLE_BLE
-	bool "Enable BLE debug event injection service"
+	bool "Enable Kerfur BLE connectivity stack"
 	default y
 	help
-	  Enables a small custom GATT write characteristic used to inject
-	  mock events (pet, shake, notification, wake, sleep request).
+	  Enables connectable advertising, Kerfur GATT services and BLE event
+	  plumbing used by iOS ANCS and Android companion integrations.
+
+config KERFUR_ENABLE_ANCS
+	bool "Enable iOS ANCS notification intake over BLE"
+	default y
+	depends on KERFUR_ENABLE_BLE
+	help
+	  Discovers and subscribes to Apple's ANCS Notification Source on
+	  paired iOS devices. Incoming ANCS "notification added" events are
+	  mapped to APP_EVENT_PHONE_NOTIFICATION.
+
+config KERFUR_ENABLE_ANS_FALLBACK
+	bool "Enable Alert Notification Service fallback client"
+	default y
+	depends on KERFUR_ENABLE_BLE
+	help
+	  Enables discovery of standard Alert Notification Service (UUID 0x1811)
+	  on connected phones when ANCS is not available. This is best-effort:
+	  many Android phones do not expose ANS at OS level.
+
+config KERFUR_ENABLE_KEYRING_PROFILE
+	bool "Enable keyring Find Me / Proximity profile"
+	default n
+	depends on KERFUR_ENABLE_BLE
+	select BT_IAS
+	select BT_TPS
+	help
+	  Enables standard BLE services typically used by key finder accessories:
+	  Immediate Alert Service (0x1802), Link Loss Service (0x1803), and
+	  TX Power Service (0x1804). This improves interoperability with generic
+	  BLE tooling and keeps the device aligned with keyring appearance.
+
+config KERFUR_ENABLE_COMPANION
+	bool "Enable custom companion BLE channel (optional)"
+	default n
+	depends on KERFUR_ENABLE_BLE
+	help
+	  Enables custom Kerfur companion RX/TX characteristics for use with an
+	  Android companion app. Keep disabled to minimize BLE footprint.
+
+config KERFUR_ENABLE_RSC_SERVICE
+	bool "Enable Running Speed and Cadence service scaffold"
+	default n
+	depends on KERFUR_ENABLE_BLE
+	help
+	  Exposes standard RSCS (UUID 0x1814) as future foundation for
+	  pedometer/step cadence telemetry without custom BLE service.
+
+config KERFUR_ENABLE_SHELL_CMDS
+	bool "Enable Kerfur USB shell BLE maintenance commands"
+	default y
+	depends on KERFUR_ENABLE_BLE && SHELL
+	help
+	  Enables `kerfur ble ...` shell commands on USB serial backend.
 
 config KERFUR_ENABLE_MOCK_INPUTS
 	bool "Enable periodic mock external events"

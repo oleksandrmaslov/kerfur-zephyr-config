@@ -30,6 +30,7 @@ struct pet_state {
 	int16_t social_load;
 
 	int64_t last_interaction_timestamp_ms;
+	int64_t last_phone_notification_timestamp_ms;
 	uint32_t uptime_seconds;
 
 	enum pet_mode current_mode;

@@ -10,7 +10,7 @@ Current first version goals achieved:
 - behavior/state engine with internal variables and utility-based expression selection
 - mock event sources (buttons + periodic mock stimuli)
 - power/sleep scaffolding
-- BLE debug scaffold for event injection
+- BLE core (advertising + iOS ANCS + Android companion scaffold)
 
 ## Assumptions
 
@@ -97,16 +97,28 @@ If your OLED uses another address or needs reset/supply GPIOs, edit the shield o
 - Controls display blanking state (UI uses it now).
 - Future extension point for deep sleep entry/wake source policy.
 
-7. BLE Scaffold (`src/ble/ble_manager.c`)
-- Minimal connectable advertiser.
-- Custom write characteristic for event injection.
+7. BLE Core (`src/ble/ble_manager.c`)
+- Connectable legacy advertiser with phone-friendly payload.
+- Device name always visible in advertising packet for easy scan-list discovery.
+- ANCS solicitation UUID is advertised for iOS ANCS pairing flow.
+- Kerfur companion UUID is exposed for Android/Gadgetbridge discovery.
+- Directed advertising is used first for bonded peers, then fast/slow undirected fallback.
+- After connection, low-power connection parameters are requested automatically.
 - Publishes `BLE_CONNECTED`/`BLE_DISCONNECTED`.
-- Write byte command mapping:
+- Keeps debug write characteristic for event injection.
+- Adds companion service for Android bridge:
+  - RX write characteristic (`PING`, Android-notification packet)
+  - TX notify/read characteristic (ACK/events back to phone app)
+- ANCS bridge for iOS (secure connection + ANCS discover/subscribe).
+- Standard ANS fallback client (best-effort; depends on phone OS exposing ANS).
+- Optional standard RSCS scaffold for future step/cadence telemetry.
+- Debug write byte command mapping:
   - `1`: `MOCK_PET`
   - `2`: `MOCK_SHAKE`
-  - `3`: `MOCK_NOTIFICATION`
+  - `3`: `PHONE_NOTIFICATION` (real-notification path test)
   - `4`: `SLEEP_REQUEST`
   - `5`: `WAKE`
+  - `6`: `MOCK_NOTIFICATION` (legacy mock path)
 
 ## Build / Flash
 
@@ -128,6 +140,14 @@ Monitor logs:
 ```bash
 west build -t run
 ```
+
+## Gadgetbridge Scaffold
+
+- Protocol and integration notes:
+  - [docs/gadgetbridge/README.md](docs/gadgetbridge/README.md)
+- Java starter files for your Gadgetbridge fork:
+  - [docs/gadgetbridge/scaffold/KerfurUuids.java](docs/gadgetbridge/scaffold/KerfurUuids.java)
+  - [docs/gadgetbridge/scaffold/KerfurDeviceSupport.java](docs/gadgetbridge/scaffold/KerfurDeviceSupport.java)
 
 ## What To Edit First For Your Hardware
 
@@ -153,7 +173,7 @@ west build -t run
 - Add real touch input module and distinguish pet quality/intensity.
 - Add IMU integration for real shake/motion events.
 - Add day/night schedule source and circadian behavior modulation.
-- Extend BLE service with readable debug state characteristic.
+- Add full Android notification payload parsing (title/body/app id) in companion RX protocol.
 - Add persistence for pet state snapshot.
 - Add deeper power states (`pm_state_force`) and wake source policy.
 - Add OLED dimming and full burn-in policy (shift + dim + blank strategy).
