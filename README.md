@@ -20,7 +20,7 @@ Current first version goals achieved:
   - [boards/shields/kerfur_oled/kerfur_oled.overlay](boards/shields/kerfur_oled/kerfur_oled.overlay)
 - Board app overlay:
   - [boards/nice_nano.overlay](boards/nice_nano.overlay)
-- `sw0` exists for short/long-press test input; `sw1` optional for mock shake.
+- `touch0` alias is used for capacitive/digital touch pet input.
 
 If your OLED uses another address or needs reset/supply GPIOs, edit the shield overlay first.
 
@@ -44,6 +44,7 @@ If your OLED uses another address or needs reset/supply GPIOs, edit the shield o
 |   |   |-- app_event.h
 |   |   `-- event_bus.h
 |   |-- drivers/mock_inputs.h
+|   |-- drivers/touch_input.h
 |   |-- power/power_manager.h
 |   `-- ui/ui_renderer.h
 |-- src/
@@ -53,6 +54,7 @@ If your OLED uses another address or needs reset/supply GPIOs, edit the shield o
 |   |-- ble/ble_manager.c
 |   |-- core/event_bus.c
 |   |-- drivers/mock_inputs.c
+|   |-- drivers/touch_input.c
 |   |-- power/power_manager.c
 |   `-- ui/ui_renderer.c
 |-- CMakeLists.txt
@@ -85,19 +87,21 @@ If your OLED uses another address or needs reset/supply GPIOs, edit the shield o
 - Includes anti-burn-in pixel shift foundation.
 
 5. Mock Inputs (`src/drivers/mock_inputs.c`)
-- `sw0` short press: `USER_BUTTON_PRESS` + `MOCK_PET`
-- `sw0` long press: `USER_BUTTON_PRESS` + `MOCK_NOTIFICATION`
-- `sw1` press (if available): `MOCK_SHAKE`
 - 1 second timer emits `TICK_1S`
-- Optional periodic mock events (Kconfig controlled)
+- Optional periodic synthetic events for early behavior bring-up (Kconfig controlled)
 
-6. Power Scaffolding (`src/power/power_manager.c`)
+6. Touch Input (`src/drivers/touch_input.c`)
+- `touch0` active edge: `USER_BUTTON_PRESS` + `MOCK_PET`
+- This interaction path resets idle timers and wakes display from blank state.
+- Pin/flags are configured in [boards/nice_nano.overlay](boards/nice_nano.overlay)
+
+7. Power Scaffolding (`src/power/power_manager.c`)
 - Tracks real interaction timeout separately from ambient events.
 - Emits `IDLE_TIMEOUT` and `SLEEP_REQUEST`.
 - Controls display blanking state (UI uses it now).
 - Future extension point for deep sleep entry/wake source policy.
 
-7. BLE Core (`src/ble/ble_manager.c`)
+8. BLE Core (`src/ble/ble_manager.c`)
 - Connectable legacy advertiser with phone-friendly payload.
 - Device name always visible in advertising packet for easy scan-list discovery.
 - ANCS solicitation UUID is advertised for iOS ANCS pairing flow.
@@ -156,8 +160,10 @@ west build -t run
 - Change I2C address and SSD1306 parameters if needed.
 
 2. Input mapping:
+- [boards/nice_nano.overlay](boards/nice_nano.overlay)
 - [src/drivers/mock_inputs.c](src/drivers/mock_inputs.c)
-- Replace `sw0/sw1` with your actual input GPIOs or touch driver events.
+- [src/drivers/touch_input.c](src/drivers/touch_input.c)
+- Change `touch0` GPIO pin/flags to match your touch module, keep it on its own pin.
 
 3. Behavior tuning:
 - [src/behavior/behavior_engine.c](src/behavior/behavior_engine.c)
@@ -170,7 +176,7 @@ west build -t run
 ## TODO (Next Steps)
 
 - Add battery monitor driver and publish `BATTERY_LOW`/recovery events.
-- Add real touch input module and distinguish pet quality/intensity.
+- Distinguish pet quality/intensity using richer touch sensing (duration/pressure/proximity).
 - Add IMU integration for real shake/motion events.
 - Add day/night schedule source and circadian behavior modulation.
 - Add full Android notification payload parsing (title/body/app id) in companion RX protocol.

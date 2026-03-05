@@ -8,6 +8,7 @@
 #include "ble/ble_manager.h"
 #include "core/event_bus.h"
 #include "drivers/mock_inputs.h"
+#include "drivers/touch_input.h"
 #include "power/power_manager.h"
 #include "ui/ui_renderer.h"
 
@@ -50,6 +51,11 @@ int app_run(void)
 	err = mock_inputs_init();
 	if (err) {
 		LOG_WRN("Mock inputs init issue (%d), continuing", err);
+	}
+
+	err = touch_input_init();
+	if (err) {
+		LOG_WRN("Touch input init issue (%d), continuing", err);
 	}
 
 	err = ble_manager_init();
