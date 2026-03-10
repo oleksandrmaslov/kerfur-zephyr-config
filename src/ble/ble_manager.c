@@ -305,17 +305,47 @@ static enum app_event_type decode_injected_event(uint8_t code)
 {
 	switch (code) {
 	case 1:
-		return APP_EVENT_MOCK_PET;
+		return APP_EVENT_USER_TAP;
 	case 2:
-		return APP_EVENT_MOCK_SHAKE;
+		return APP_EVENT_USER_PET_SOFT;
 	case 3:
-		return APP_EVENT_PHONE_NOTIFICATION;
+		return APP_EVENT_USER_PET_LONG;
 	case 4:
-		return APP_EVENT_SLEEP_REQUEST;
+		return APP_EVENT_USER_HOLD;
 	case 5:
-		return APP_EVENT_WAKE;
+		return APP_EVENT_SHAKE_LIGHT;
 	case 6:
-		return APP_EVENT_MOCK_NOTIFICATION;
+		return APP_EVENT_SHAKE_PLAY;
+	case 7:
+		return APP_EVENT_SHAKE_ROUGH;
+	case 8:
+		return APP_EVENT_WALKING_START;
+	case 9:
+		return APP_EVENT_WALKING_STOP;
+	case 10:
+		return APP_EVENT_STEP_BATCH;
+	case 11:
+		return APP_EVENT_PHONE_NOTIFICATION_SINGLE;
+	case 12:
+		return APP_EVENT_PHONE_NOTIFICATION_BURST;
+	case 13:
+		return APP_EVENT_APP_SESSION_START;
+	case 14:
+		return APP_EVENT_APP_SESSION_END;
+	case 15:
+		return APP_EVENT_CHARGER_CONNECTED;
+	case 16:
+		return APP_EVENT_BATTERY_LOW;
+	case 17:
+		return APP_EVENT_BATTERY_CRITICAL;
+	case 18:
+		return APP_EVENT_SELF_WAKE_TIMER;
+	case 19:
+		return APP_EVENT_TIME_SYNC;
+	case 20:
+		return APP_EVENT_WAKE;
+	case 21:
+		return APP_EVENT_SLEEP_REQUEST;
 	default:
 		return APP_EVENT_COUNT;
 	}
@@ -906,7 +936,9 @@ static void request_phone_notification_discovery(struct bt_conn *conn)
 static ssize_t event_inject_write_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				     const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
+	const uint8_t *payload = buf;
 	enum app_event_type type;
+	int32_t param = 0;
 
 	ARG_UNUSED(conn);
 	ARG_UNUSED(attr);
@@ -917,13 +949,25 @@ static ssize_t event_inject_write_cb(struct bt_conn *conn, const struct bt_gatt_
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 
-	type = decode_injected_event(((const uint8_t *)buf)[0]);
+	type = decode_injected_event(payload[0]);
 	if (type == APP_EVENT_COUNT) {
 		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
 
-	LOG_INF("BLE inject: code=%u -> %s", ((const uint8_t *)buf)[0], app_event_type_str(type));
-	(void)app_event_publish(type, 0);
+	if (len >= 2U) {
+		param = payload[1];
+	}
+
+	if ((type == APP_EVENT_STEP_BATCH) && (param == 0)) {
+		param = 8;
+	}
+
+	if ((type == APP_EVENT_TIME_SYNC) && (len >= 5U)) {
+		param = (int32_t)sys_get_le32(&payload[1]);
+	}
+
+	LOG_INF("BLE inject: code=%u -> %s (param=%d)", payload[0], app_event_type_str(type), param);
+	(void)app_event_publish(type, param);
 	return len;
 }
 

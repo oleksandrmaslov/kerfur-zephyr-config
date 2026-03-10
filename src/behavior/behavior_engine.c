@@ -1,11 +1,25 @@
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 
 #include "behavior/behavior_engine.h"
+#include "behavior/micro_reaction.h"
 
 LOG_MODULE_REGISTER(behavior_engine, CONFIG_LOG_DEFAULT_LEVEL);
+
+#define PET_EXPR_COUNT (PET_EXPR_ASLEEP + 1)
+
+struct behavior_runtime {
+	uint8_t arousal_decay_accum_s;
+	uint8_t ambient_energy_decay_accum;
+	uint8_t five_min_accum;
+	uint8_t thirty_min_accum;
+};
+
+static struct behavior_runtime g_runtime;
 
 static int16_t clamp_0_100(int value)
 {
@@ -27,225 +41,656 @@ static void clamp_state(struct pet_state *state)
 	state->stress = clamp_0_100(state->stress);
 	state->arousal = clamp_0_100(state->arousal);
 	state->social_load = clamp_0_100(state->social_load);
+	state->trust = clamp_0_100(state->trust);
+	state->curiosity = clamp_0_100(state->curiosity);
+	state->walk_confidence = (uint8_t)clamp_0_100(state->walk_confidence);
+	state->notification_burst_level = (uint8_t)clamp_0_100(state->notification_burst_level);
 }
 
 static void mark_real_interaction(struct pet_state *state, int64_t now_ms)
 {
-	state->last_interaction_timestamp_ms = now_ms;
+	state->last_real_interaction_timestamp_ms = now_ms;
 }
 
-static void update_mode_transitions(struct pet_state *state)
+static bool is_night_time(const struct pet_state *state, int64_t now_ms)
 {
-	if (state->current_mode == PET_MODE_ASLEEP) {
-		if ((state->arousal > 70) || (state->sleepiness < 25)) {
-			state->current_mode = PET_MODE_AWAKE;
+	int64_t elapsed_s;
+	int64_t local_s;
+	int32_t day_s;
+	int hour;
+
+	if (!state->time_valid) {
+		return false;
+	}
+
+	elapsed_s = (now_ms - state->uptime_at_sync_ms) / MSEC_PER_SEC;
+	local_s = state->unix_time_at_sync + elapsed_s + ((int64_t)state->tz_offset_minutes * 60);
+	day_s = (int32_t)(local_s % 86400);
+	if (day_s < 0) {
+		day_s += 86400;
+	}
+
+	hour = day_s / 3600;
+	return (hour < 7) || (hour >= 22);
+}
+
+static void trigger_reaction(struct pet_state *state, enum micro_reaction_type reaction, int64_t now_ms)
+{
+	if (micro_reaction_trigger(reaction, now_ms)) {
+		state->last_reaction_timestamp_ms = now_ms;
+	}
+
+	state->current_reaction = micro_reaction_get_active(now_ms);
+}
+
+static void apply_5min_drift(struct pet_state *state, int64_t now_ms)
+{
+	const int64_t no_rough_ms = now_ms - state->last_rough_event_timestamp_ms;
+	const int64_t no_interaction_ms = now_ms - state->last_real_interaction_timestamp_ms;
+
+	if ((state->current_mode == PET_MODE_ASLEEP) || state->charging) {
+		state->energy += 1;
+	}
+
+	if (state->current_display_state == DISPLAY_FOREGROUND) {
+		state->energy -= 1;
+	}
+
+	if (no_rough_ms >= (30 * 60 * MSEC_PER_SEC)) {
+		state->trust += 1;
+	}
+
+	if (no_interaction_ms >= (45 * 60 * MSEC_PER_SEC)) {
+		state->attachment -= 1;
+	}
+
+	if (is_night_time(state, now_ms)) {
+		state->sleepiness += 1;
+	}
+}
+
+static void apply_30min_drift(struct pet_state *state, int64_t now_ms)
+{
+	const int64_t no_interaction_ms = now_ms - state->last_real_interaction_timestamp_ms;
+	const int64_t no_rough_ms = now_ms - state->last_rough_event_timestamp_ms;
+
+	if (no_interaction_ms >= (2 * 60 * 60 * MSEC_PER_SEC)) {
+		state->attachment -= 1;
+	}
+
+	if (no_rough_ms >= (2 * 60 * 60 * MSEC_PER_SEC)) {
+		state->trust += 1;
+	}
+}
+
+static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
+{
+	g_runtime.arousal_decay_accum_s++;
+	if (g_runtime.arousal_decay_accum_s >= 3U) {
+		g_runtime.arousal_decay_accum_s = 0U;
+		state->arousal -= 1;
+	}
+
+	if ((state->current_mode == PET_MODE_WALK_AWAKE) &&
+	    ((now_ms - state->last_walk_timestamp_ms) > (12 * MSEC_PER_SEC))) {
+		state->walk_confidence = 0;
+	}
+}
+
+static void apply_tick_10s(struct pet_state *state, int64_t now_ms)
+{
+	if ((now_ms - state->last_phone_event_timestamp_ms) > (20 * MSEC_PER_SEC)) {
+		state->social_load -= 1;
+	}
+
+	if ((now_ms - state->last_rough_event_timestamp_ms) > (60 * MSEC_PER_SEC)) {
+		state->stress -= 1;
+	}
+
+	if ((state->current_mode != PET_MODE_ASLEEP) && !state->charging) {
+		if (state->current_display_state == DISPLAY_FOREGROUND) {
+			state->energy -= 1;
+		} else if (state->current_display_state == DISPLAY_AMBIENT) {
+			g_runtime.ambient_energy_decay_accum++;
+			if (g_runtime.ambient_energy_decay_accum >= 3U) {
+				g_runtime.ambient_energy_decay_accum = 0U;
+				state->energy -= 1;
+			}
 		}
-		return;
-	}
-
-	if ((state->energy < 10) && (state->sleepiness > 85)) {
-		state->current_mode = PET_MODE_ASLEEP;
-		return;
-	}
-
-	if ((state->energy < 20) && (state->sleepiness > 70)) {
-		state->current_mode = PET_MODE_DROWSY;
-		return;
-	}
-
-	if ((state->energy > 25) && (state->sleepiness < 65)) {
-		state->current_mode = PET_MODE_AWAKE;
 	}
 }
 
-static enum pet_expression compute_expression(const struct pet_state *state, int64_t now_ms)
+static void apply_tick_60s(struct pet_state *state, int64_t now_ms)
 {
-	int64_t idle_s = (now_ms - state->last_interaction_timestamp_ms) / MSEC_PER_SEC;
-	int idle_bonus = (idle_s > 90) ? 30 : (int)(idle_s / 3);
-	int score_idle = 20 + (state->energy / 5) - (state->arousal / 6);
-	int score_happy = state->attachment + (state->energy / 2) - state->stress - (state->sleepiness / 2);
-	int score_sleepy = state->sleepiness + ((100 - state->energy) / 2) + (state->battery_low ? 20 : 0);
-	int score_curious = state->arousal + (state->social_load / 2) + ((100 - state->boredom) / 3) - (state->sleepiness / 3);
-	int score_needy = state->boredom + ((100 - state->attachment) / 2) + idle_bonus;
-	int score_stressed = state->stress + (state->arousal / 2) + (state->battery_low ? 10 : 0);
+	const int64_t no_real_interaction_ms = now_ms - state->last_real_interaction_timestamp_ms;
 
-	enum pet_expression best = PET_EXPR_IDLE;
-	int best_score = score_idle;
-
-	if (state->current_mode == PET_MODE_ASLEEP) {
-		return PET_EXPR_ASLEEP;
-	}
-
-	if (state->current_mode == PET_MODE_DROWSY) {
-		score_sleepy += 10;
-	}
-
-	if (score_happy > best_score) {
-		best = PET_EXPR_HAPPY;
-		best_score = score_happy;
-	}
-	if (score_sleepy > best_score) {
-		best = PET_EXPR_SLEEPY;
-		best_score = score_sleepy;
-	}
-	if (score_curious > best_score) {
-		best = PET_EXPR_CURIOUS;
-		best_score = score_curious;
-	}
-	if (score_needy > best_score) {
-		best = PET_EXPR_NEEDY;
-		best_score = score_needy;
-	}
-	if (score_stressed > best_score) {
-		best = PET_EXPR_STRESSED;
-	}
-
-	return best;
-}
-
-static void apply_tick_update(struct pet_state *state, int64_t now_ms)
-{
-	int64_t idle_s = (now_ms - state->last_interaction_timestamp_ms) / MSEC_PER_SEC;
-
-	state->uptime_seconds++;
-	state->social_load -= 1;
-	state->arousal -= 1;
-
-	if (state->current_mode == PET_MODE_ASLEEP) {
-		state->energy += 2;
-		state->sleepiness -= 3;
-		state->stress -= 2;
-		state->boredom += 1;
+	if ((state->current_mode != PET_MODE_ASLEEP) && !state->charging) {
+		state->sleepiness += 1;
 	} else {
-		state->energy -= state->battery_low ? 2 : 1;
-		state->sleepiness += 2;
-		state->stress += (state->arousal > 60) ? 1 : -1;
-		state->boredom += (idle_s > 10) ? 2 : 1;
-		if (idle_s > 40) {
-			state->attachment -= 1;
-		}
+		state->sleepiness -= 1;
 	}
 
-	clamp_state(state);
+	if (state->current_mode == PET_MODE_WALK_AWAKE) {
+		state->boredom -= 1;
+	} else if (no_real_interaction_ms >= (5 * 60 * MSEC_PER_SEC)) {
+		state->boredom += 1;
+	}
+
+	if (state->notification_burst_level > 0U) {
+		state->notification_burst_level--;
+	}
+
+	g_runtime.five_min_accum++;
+	g_runtime.thirty_min_accum++;
+
+	if (g_runtime.five_min_accum >= 5U) {
+		g_runtime.five_min_accum = 0U;
+		apply_5min_drift(state, now_ms);
+	}
+
+	if (g_runtime.thirty_min_accum >= 30U) {
+		g_runtime.thirty_min_accum = 0U;
+		apply_30min_drift(state, now_ms);
+	}
 }
 
-void behavior_engine_init(struct pet_state *state, int64_t now_ms)
+static bool event_is_real_interaction(enum app_event_type type, const struct pet_state *state)
 {
-	memset(state, 0, sizeof(*state));
-
-	state->energy = 70;
-	state->sleepiness = 20;
-	state->attachment = 50;
-	state->boredom = 25;
-	state->stress = 20;
-	state->arousal = 35;
-	state->social_load = 10;
-	state->last_interaction_timestamp_ms = now_ms;
-	state->last_phone_notification_timestamp_ms = 0;
-	state->current_mode = PET_MODE_AWAKE;
-	state->expression = PET_EXPR_IDLE;
-
-	LOG_INF("Behavior init: mode=%s expr=%s", pet_mode_str(state->current_mode),
-		pet_expression_str(state->expression));
+	switch (type) {
+	case APP_EVENT_USER_TAP:
+	case APP_EVENT_USER_PET_SOFT:
+	case APP_EVENT_USER_PET_LONG:
+	case APP_EVENT_USER_HOLD:
+	case APP_EVENT_APP_SESSION_START:
+	case APP_EVENT_CHARGER_CONNECTED:
+		return true;
+	case APP_EVENT_STEP_BATCH:
+		return state->ble_connected && (state->walk_confidence >= 60U);
+	default:
+		return false;
+	}
 }
 
-void behavior_engine_handle_event(struct pet_state *state, const struct app_event *event)
+static void apply_event_deltas(struct pet_state *state, const struct app_event *event)
 {
-	enum pet_mode prev_mode = state->current_mode;
-	enum pet_expression prev_expr = state->expression;
+	int steps;
 
 	switch (event->type) {
+	case APP_EVENT_TICK_100MS:
+		micro_reaction_tick_100ms(event->timestamp_ms);
+		state->current_reaction = micro_reaction_get_active(event->timestamp_ms);
+		break;
+
 	case APP_EVENT_TICK_1S:
-		apply_tick_update(state, event->timestamp_ms);
+		apply_tick_1s(state, event->timestamp_ms);
 		break;
-	case APP_EVENT_USER_BUTTON_PRESS:
-		state->arousal += 3;
+
+	case APP_EVENT_TICK_10S:
+		apply_tick_10s(state, event->timestamp_ms);
 		break;
-	case APP_EVENT_MOCK_PET:
+
+	case APP_EVENT_TICK_60S:
+		apply_tick_60s(state, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_USER_TAP:
+		state->arousal += 2;
+		state->curiosity += 2;
+		state->boredom -= 1;
+		trigger_reaction(state, ((event->timestamp_ms / 500) % 2) ?
+				       REACTION_BLINK : REACTION_GLANCE_RIGHT,
+			       event->timestamp_ms);
+		break;
+
+	case APP_EVENT_USER_PET_SOFT:
 		state->attachment += 8;
-		state->boredom -= 8;
+		state->trust += 6;
+		state->stress -= 7;
+		state->boredom -= 5;
+		state->sleepiness -= 2;
+		state->arousal += 3;
+		state->curiosity += 1;
+		state->last_pet_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_PET_BOW, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_USER_PET_LONG:
+		state->attachment += 10;
+		state->trust += 4;
 		state->stress -= 6;
-		state->arousal += 4;
-		state->energy += 1;
-		mark_real_interaction(state, event->timestamp_ms);
+		state->boredom -= 4;
+		state->sleepiness -= 3;
+		state->arousal += 2;
+		state->last_pet_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_PET_BOW, event->timestamp_ms);
 		break;
-	case APP_EVENT_MOCK_SHAKE:
-		state->arousal += 18;
-		state->stress += 10;
+
+	case APP_EVENT_USER_HOLD:
+		state->attachment += 4;
+		state->trust += 3;
+		state->stress -= 2;
+		state->boredom -= 2;
+		state->last_pet_timestamp_ms = event->timestamp_ms;
+		break;
+
+	case APP_EVENT_SHAKE_LIGHT:
+		state->arousal += 6;
+		state->curiosity += 4;
+		state->sleepiness -= 4;
+		state->stress += 1;
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_SHAKE_PLAY:
+		state->arousal += 10;
+		state->curiosity += 6;
+		state->boredom -= 4;
 		state->sleepiness -= 6;
-		mark_real_interaction(state, event->timestamp_ms);
+		state->stress += (state->trust >= 40) ? 2 : 5;
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
 		break;
-	case APP_EVENT_MOCK_NOTIFICATION:
-		state->social_load += 15;
+
+	case APP_EVENT_SHAKE_ROUGH:
+		state->stress += 12;
+		state->trust -= 5;
+		state->attachment -= 2;
+		state->arousal += 10;
+		state->sleepiness -= 8;
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_rough_event_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_STARTLE, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_IMPACT:
+		state->stress += 10;
+		state->trust -= 2;
 		state->arousal += 8;
-		state->boredom -= 4;
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_rough_event_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_STARTLE, event->timestamp_ms);
 		break;
-	case APP_EVENT_PHONE_NOTIFICATION:
-		state->social_load += 15;
-		state->arousal += 8;
-		state->boredom -= 4;
-		state->last_phone_notification_timestamp_ms = event->timestamp_ms;
+
+	case APP_EVENT_MOTION_WAKE:
+		state->arousal += 3;
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
 		break;
-	case APP_EVENT_IDLE_TIMEOUT:
-		if (state->current_mode == PET_MODE_AWAKE) {
-			state->current_mode = PET_MODE_DROWSY;
+
+	case APP_EVENT_WALKING_START:
+		state->walk_confidence = 80;
+		state->last_walk_timestamp_ms = event->timestamp_ms;
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_LOOK_UP, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_WALKING_STOP:
+		state->walk_confidence = 0;
+		break;
+
+	case APP_EVENT_STEP_BATCH:
+		steps = MAX(event->param, 0);
+		state->boredom -= MIN((steps / 2), 6);
+		state->sleepiness -= 2;
+		state->curiosity += 2;
+		if (state->ble_connected && (steps > 0)) {
+			state->attachment += 1;
+		}
+		if (steps > 0) {
+			state->step_count_today += (uint32_t)steps;
+			state->total_steps_since_boot += (uint32_t)steps;
+			state->last_motion_timestamp_ms = event->timestamp_ms;
+			state->last_walk_timestamp_ms = event->timestamp_ms;
+			state->walk_confidence = (uint8_t)MIN(100, state->walk_confidence + 5);
 		}
 		break;
-	case APP_EVENT_WAKE:
-		state->current_mode = PET_MODE_AWAKE;
-		state->sleepiness -= 8;
-		state->arousal += 5;
+
+	case APP_EVENT_FLIP_FACE_DOWN:
+		state->sleepiness += 2;
+		trigger_reaction(state, REACTION_LOOK_DOWN, event->timestamp_ms);
 		break;
-	case APP_EVENT_SLEEP_REQUEST:
-		state->current_mode = PET_MODE_ASLEEP;
-		state->arousal -= 6;
+
+	case APP_EVENT_PHONE_NOTIFICATION_SINGLE:
+		state->social_load += 5;
+		state->curiosity += 6;
+		state->arousal += 4;
+		state->boredom -= 2;
+		state->last_phone_event_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_NOTIF_PING, event->timestamp_ms);
 		break;
+
+	case APP_EVENT_PHONE_NOTIFICATION_BURST:
+		state->social_load += 15;
+		state->stress += 8;
+		state->arousal += 8;
+		state->boredom -= 6;
+		state->notification_burst_level = (uint8_t)MIN(100, state->notification_burst_level + 1);
+		state->last_phone_event_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_NOTIF_BURST, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_PHONE_CONNECTED:
+		state->ble_connected = true;
+		state->curiosity += 3;
+		state->social_load += 2;
+		state->boredom -= 1;
+		state->last_phone_event_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_CONNECT_SPARK, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_PHONE_DISCONNECTED:
+		state->ble_connected = false;
+		state->boredom += 3;
+		state->curiosity += 1;
+		state->last_phone_event_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_DISCONNECT_SCAN, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_APP_SESSION_START:
+		state->app_session_active = true;
+		state->curiosity += 4;
+		state->trust += 2;
+		trigger_reaction(state, REACTION_CONNECT_SPARK, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_APP_SESSION_END:
+		state->app_session_active = false;
+		break;
+
+	case APP_EVENT_TIME_SYNC:
+		state->time_valid = true;
+		state->uptime_at_sync_ms = event->timestamp_ms;
+		if ((event->param >= -840) && (event->param <= 840)) {
+			state->tz_offset_minutes = (int16_t)event->param;
+		} else if (event->param >= 946684800) {
+			state->unix_time_at_sync = event->param;
+		}
+		break;
+
+	case APP_EVENT_CHARGER_CONNECTED:
+		state->charging = true;
+		state->stress -= 4;
+		state->sleepiness += 2;
+		state->curiosity -= 1;
+		trigger_reaction(state, REACTION_CHARGE_PULSE, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_CHARGER_DISCONNECTED:
+		state->charging = false;
+		state->curiosity += 2;
+		break;
+
 	case APP_EVENT_BATTERY_LOW:
 		state->battery_low = true;
-		state->stress += 6;
-		state->sleepiness += 6;
+		state->stress += 5;
+		state->sleepiness += 4;
+		trigger_reaction(state, REACTION_LOW_BATT_SAG, event->timestamp_ms);
 		break;
-	case APP_EVENT_BLE_CONNECTED:
-		state->ble_connected = true;
-		state->social_load += 5;
+
+	case APP_EVENT_BATTERY_CRITICAL:
+		state->battery_critical = true;
+		state->battery_low = true;
+		state->ambient_wake_enabled = false;
+		state->stress += 8;
+		state->sleepiness += 8;
 		break;
-	case APP_EVENT_BLE_DISCONNECTED:
-		state->ble_connected = false;
+
+	case APP_EVENT_WAKE:
+		state->sleepiness -= 8;
+		state->arousal += 5;
+		trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
 		break;
+
+	case APP_EVENT_SLEEP_REQUEST:
+		state->arousal -= 6;
+		trigger_reaction(state, REACTION_SLEEP_FADE, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_SELF_WAKE_TIMER:
+		state->arousal += 1;
+		state->curiosity += 1;
+		state->last_self_wake_timestamp_ms = event->timestamp_ms;
+		trigger_reaction(state, REACTION_GLANCE_LEFT, event->timestamp_ms);
+		break;
+
 	default:
 		break;
 	}
 
+	if (event_is_real_interaction(event->type, state)) {
+		mark_real_interaction(state, event->timestamp_ms);
+	}
+}
+
+static void update_mode(struct pet_state *state, int64_t now_ms)
+{
+	const int64_t idle_ms = now_ms - state->last_real_interaction_timestamp_ms;
+	const int64_t walk_recent_ms = now_ms - state->last_walk_timestamp_ms;
+	const int64_t phone_recent_ms = now_ms - state->last_phone_event_timestamp_ms;
+	const int64_t self_wake_recent_ms = now_ms - state->last_self_wake_timestamp_ms;
+	enum pet_mode mode = PET_MODE_IDLE;
+
+	if (state->charging) {
+		mode = PET_MODE_CHARGING;
+	} else if (state->battery_critical) {
+		mode = (state->sleepiness > 85) ? PET_MODE_ASLEEP : PET_MODE_LOW_POWER;
+	} else if (state->social_load > 80 || state->notification_burst_level > 6) {
+		mode = PET_MODE_OVERLOADED;
+	} else if (phone_recent_ms < (30 * MSEC_PER_SEC)) {
+		mode = PET_MODE_TASK_ALERT;
+	} else if (state->app_session_active) {
+		mode = PET_MODE_INTERACTING;
+	} else if ((walk_recent_ms <= (12 * MSEC_PER_SEC)) && (state->walk_confidence >= 30)) {
+		mode = PET_MODE_WALK_AWAKE;
+	} else if (self_wake_recent_ms < (20 * MSEC_PER_SEC)) {
+		mode = PET_MODE_INTERACTING;
+	} else if ((state->sleepiness > 88) && (state->arousal < 25) &&
+		   (state->current_display_state == DISPLAY_OFF)) {
+		mode = PET_MODE_ASLEEP;
+	} else if (state->sleepiness > 72) {
+		mode = PET_MODE_DROWSY;
+	} else if (idle_ms < (45 * MSEC_PER_SEC)) {
+		mode = PET_MODE_INTERACTING;
+	} else if (state->battery_low) {
+		mode = PET_MODE_LOW_POWER;
+	}
+
+	state->current_mode = mode;
+}
+
+static int score_for_expression(enum pet_expression expr, const struct pet_state *state, int64_t now_ms)
+{
+	const bool recent_pet = (now_ms - state->last_pet_timestamp_ms) < (10 * 60 * MSEC_PER_SEC);
+	const bool recent_motion = (now_ms - state->last_motion_timestamp_ms) < (45 * MSEC_PER_SEC);
+	const bool recent_notif = (now_ms - state->last_phone_event_timestamp_ms) < (30 * MSEC_PER_SEC);
+	const bool rough_recent = (now_ms - state->last_rough_event_timestamp_ms) < (60 * MSEC_PER_SEC);
+	const int64_t no_real_interaction_ms = now_ms - state->last_real_interaction_timestamp_ms;
+	const bool long_disconnect = !state->ble_connected &&
+				     ((now_ms - state->last_phone_event_timestamp_ms) > (30 * 60 * MSEC_PER_SEC));
+	const bool night = is_night_time(state, now_ms);
+
+	switch (expr) {
+	case PET_EXPR_CALM:
+		return 60 - state->stress - (state->social_load / 2) - (state->boredom / 4) +
+		       (state->energy / 4);
+	case PET_EXPR_CURIOUS:
+		return state->curiosity + (recent_notif ? 16 : 0) + (recent_motion ? 12 : 0) +
+		       ((state->current_mode == PET_MODE_WALK_AWAKE) ? 18 : 0) +
+		       (state->app_session_active ? 8 : 0) - (state->sleepiness / 3);
+	case PET_EXPR_CONTENT:
+		return (state->attachment / 2) + (state->trust / 2) + (recent_pet ? 20 : 0) -
+		       (state->stress / 2);
+	case PET_EXPR_HAPPY:
+		return (state->attachment / 2) + (state->energy / 3) + (recent_pet ? 15 : 0) -
+		       state->stress;
+	case PET_EXPR_PLAYFUL:
+		return state->arousal + (state->trust / 3) +
+		       ((state->current_mode == PET_MODE_WALK_AWAKE) ? 14 : 0) -
+		       (state->battery_low ? 20 : 0);
+	case PET_EXPR_SLEEPY:
+		return state->sleepiness + ((state->arousal < 35) ? 8 : 0) + (night ? 6 : 0) +
+		       ((no_real_interaction_ms > (5 * 60 * MSEC_PER_SEC)) ? 10 : 0);
+	case PET_EXPR_NEEDY:
+		return state->boredom + (state->attachment / 4) + (recent_pet ? -10 : 12) +
+		       ((no_real_interaction_ms > (8 * 60 * MSEC_PER_SEC)) ? 10 : 0);
+	case PET_EXPR_LONELY:
+		return state->boredom + (long_disconnect ? 20 : 0) + (recent_motion ? -8 : 8) +
+		       ((no_real_interaction_ms > (20 * 60 * MSEC_PER_SEC)) ? 16 : 0);
+	case PET_EXPR_ANNOYED:
+		return state->stress + (rough_recent ? 24 : 0) + ((state->trust < 40) ? 12 : 0);
+	case PET_EXPR_OVERSTIMULATED:
+		return state->social_load + (state->notification_burst_level * 10) + (state->arousal / 2);
+	case PET_EXPR_COZY:
+		return (state->charging ? 60 : 0) + ((100 - state->stress) / 2) + (recent_pet ? 10 : 0);
+	case PET_EXPR_DRAINED:
+		return (state->battery_critical ? 80 : 0) + (state->battery_low ? 40 : 0) +
+		       ((100 - state->energy) / 2) + (state->sleepiness / 2);
+	case PET_EXPR_ASLEEP:
+		return (state->current_mode == PET_MODE_ASLEEP ? 100 : 0) +
+		       (state->current_display_state == DISPLAY_OFF ? 20 : 0);
+	default:
+		return 0;
+	}
+}
+
+static void update_expression(struct pet_state *state, int64_t now_ms)
+{
+	int scores[PET_EXPR_COUNT];
+	enum pet_expression best_expr;
+	enum pet_expression curr_expr;
+	int best_score;
+	int curr_score;
+	int expr;
+	const int32_t hold_ms = 12 * MSEC_PER_SEC;
+	const int margin = 8;
+
+	if (state->current_mode == PET_MODE_ASLEEP) {
+		if (state->current_expression != PET_EXPR_ASLEEP) {
+			state->current_expression = PET_EXPR_ASLEEP;
+			state->last_expression_change_timestamp_ms = now_ms;
+		}
+		return;
+	}
+
+	for (expr = 0; expr < PET_EXPR_COUNT; expr++) {
+		scores[expr] = score_for_expression((enum pet_expression)expr, state, now_ms);
+	}
+
+	curr_expr = state->current_expression;
+	best_expr = PET_EXPR_CALM;
+	best_score = scores[PET_EXPR_CALM];
+
+	for (expr = 1; expr < PET_EXPR_COUNT; expr++) {
+		if (scores[expr] > best_score) {
+			best_expr = (enum pet_expression)expr;
+			best_score = scores[expr];
+		}
+	}
+
+	curr_score = scores[curr_expr];
+
+	if (best_expr != curr_expr) {
+		if ((now_ms - state->last_expression_change_timestamp_ms) < hold_ms &&
+		    best_score < (curr_score + margin)) {
+			return;
+		}
+
+		if (best_score < (curr_score + (margin - 2))) {
+			return;
+		}
+
+		state->current_expression = best_expr;
+		state->last_expression_change_timestamp_ms = now_ms;
+	}
+}
+
+void behavior_engine_init(struct pet_state *state, int64_t now_ms)
+{
+	(void)memset(state, 0, sizeof(*state));
+	(void)memset(&g_runtime, 0, sizeof(g_runtime));
+
+	state->energy = 72;
+	state->sleepiness = 22;
+	state->attachment = 50;
+	state->boredom = 20;
+	state->stress = 18;
+	state->arousal = 30;
+	state->social_load = 10;
+	state->trust = 55;
+	state->curiosity = 45;
+	state->walk_confidence = 0;
+	state->notification_burst_level = 0;
+
+	state->last_pet_timestamp_ms = now_ms;
+	state->last_real_interaction_timestamp_ms = now_ms;
+	state->last_motion_timestamp_ms = now_ms;
+	state->last_walk_timestamp_ms = now_ms;
+	state->last_phone_event_timestamp_ms = now_ms;
+	state->last_self_wake_timestamp_ms = now_ms;
+	state->last_reaction_timestamp_ms = now_ms;
+	state->last_rough_event_timestamp_ms = now_ms - (2 * 60 * MSEC_PER_SEC);
+	state->last_display_state_change_ms = now_ms;
+	state->last_expression_change_timestamp_ms = now_ms;
+
+	state->current_mode = PET_MODE_IDLE;
+	state->current_expression = PET_EXPR_CALM;
+	state->current_reaction = REACTION_NONE;
+	state->current_display_state = DISPLAY_FOREGROUND;
+
+	state->ambient_wake_enabled = true;
+	state->time_valid = false;
+	state->tz_offset_minutes = 0;
+	state->unix_time_at_sync = 0;
+	state->uptime_at_sync_ms = now_ms;
+
+	micro_reaction_init(now_ms);
+}
+
+void behavior_engine_handle_event(struct pet_state *state, const struct app_event *event)
+{
+	const enum pet_mode prev_mode = state->current_mode;
+	const enum pet_expression prev_expr = state->current_expression;
+
+	apply_event_deltas(state, event);
 	clamp_state(state);
-	update_mode_transitions(state);
-	state->expression = compute_expression(state, event->timestamp_ms);
+	update_mode(state, event->timestamp_ms);
+	update_expression(state, event->timestamp_ms);
+	state->current_reaction = micro_reaction_get_active(event->timestamp_ms);
+	state->uptime_seconds = event->timestamp_ms / MSEC_PER_SEC;
 
 	if (prev_mode != state->current_mode) {
 		LOG_INF("Mode: %s -> %s (event=%s)", pet_mode_str(prev_mode),
 			pet_mode_str(state->current_mode), app_event_type_str(event->type));
 	}
 
-	if (prev_expr != state->expression) {
+	if (prev_expr != state->current_expression) {
 		LOG_INF("Expr: %s -> %s (event=%s)", pet_expression_str(prev_expr),
-			pet_expression_str(state->expression), app_event_type_str(event->type));
-	}
-
-	if (IS_ENABLED(CONFIG_KERFUR_TRACE_EVENTS) && (event->type != APP_EVENT_TICK_1S)) {
-		LOG_INF("State: E=%d Sl=%d At=%d Bo=%d St=%d Ar=%d So=%d",
-			state->energy, state->sleepiness, state->attachment, state->boredom,
-			state->stress, state->arousal, state->social_load);
+			pet_expression_str(state->current_expression), app_event_type_str(event->type));
 	}
 }
 
 const char *pet_mode_str(enum pet_mode mode)
 {
 	switch (mode) {
-	case PET_MODE_AWAKE:
-		return "AWAKE";
-	case PET_MODE_DROWSY:
-		return "DROWSY";
 	case PET_MODE_ASLEEP:
 		return "ASLEEP";
+	case PET_MODE_DROWSY:
+		return "DROWSY";
+	case PET_MODE_IDLE:
+		return "IDLE";
+	case PET_MODE_INTERACTING:
+		return "INTERACTING";
+	case PET_MODE_WALK_AWAKE:
+		return "WALK_AWAKE";
+	case PET_MODE_TASK_ALERT:
+		return "TASK_ALERT";
+	case PET_MODE_CHARGING:
+		return "CHARGING";
+	case PET_MODE_LOW_POWER:
+		return "LOW_POWER";
+	case PET_MODE_OVERLOADED:
+		return "OVERLOADED";
 	default:
 		return "UNKNOWN";
 	}
@@ -254,21 +699,65 @@ const char *pet_mode_str(enum pet_mode mode)
 const char *pet_expression_str(enum pet_expression expression)
 {
 	switch (expression) {
-	case PET_EXPR_IDLE:
-		return "IDLE";
-	case PET_EXPR_HAPPY:
-		return "HAPPY";
-	case PET_EXPR_SLEEPY:
-		return "SLEEPY";
+	case PET_EXPR_CALM:
+		return "CALM";
 	case PET_EXPR_CURIOUS:
 		return "CURIOUS";
+	case PET_EXPR_CONTENT:
+		return "CONTENT";
+	case PET_EXPR_HAPPY:
+		return "HAPPY";
+	case PET_EXPR_PLAYFUL:
+		return "PLAYFUL";
+	case PET_EXPR_SLEEPY:
+		return "SLEEPY";
 	case PET_EXPR_NEEDY:
 		return "NEEDY";
-	case PET_EXPR_STRESSED:
-		return "STRESSED";
+	case PET_EXPR_LONELY:
+		return "LONELY";
+	case PET_EXPR_ANNOYED:
+		return "ANNOYED";
+	case PET_EXPR_OVERSTIMULATED:
+		return "OVERSTIMULATED";
+	case PET_EXPR_COZY:
+		return "COZY";
+	case PET_EXPR_DRAINED:
+		return "DRAINED";
 	case PET_EXPR_ASLEEP:
 		return "ASLEEP";
 	default:
 		return "UNKNOWN";
 	}
+}
+
+const char *pet_display_state_str(enum pet_display_state state)
+{
+	switch (state) {
+	case DISPLAY_FOREGROUND:
+		return "FOREGROUND";
+	case DISPLAY_AMBIENT:
+		return "AMBIENT";
+	case DISPLAY_OFF:
+		return "OFF";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+void behavior_engine_status_dump(const struct pet_state *state, char *buffer, size_t buffer_len)
+{
+	if ((buffer == NULL) || (buffer_len == 0U)) {
+		return;
+	}
+
+	(void)snprintf(buffer, buffer_len,
+		       "mode=%s expr=%s disp=%s react=%s E=%d Sl=%d Bo=%d St=%d Tr=%d Cu=%d At=%d steps=%u time=%s",
+		       pet_mode_str(state->current_mode),
+		       pet_expression_str(state->current_expression),
+		       pet_display_state_str(state->current_display_state),
+		       micro_reaction_str(state->current_reaction),
+		       state->energy, state->sleepiness, state->boredom, state->stress,
+		       state->trust, state->curiosity, state->attachment,
+		       state->total_steps_since_boot,
+		       state->time_valid ? "valid" : "invalid");
 }

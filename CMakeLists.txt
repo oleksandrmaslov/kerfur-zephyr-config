@@ -12,7 +12,10 @@ target_sources(app PRIVATE
     src/app/app.c
     src/core/event_bus.c
     src/behavior/behavior_engine.c
+    src/behavior/micro_reaction.c
+    src/display/display_policy.c
     src/ui/ui_renderer.c
+    src/ui/kerfur_faces.c
     src/drivers/mock_inputs.c
     src/drivers/touch_input.c
     src/power/power_manager.c

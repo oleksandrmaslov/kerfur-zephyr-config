@@ -7,6 +7,7 @@
 #include "behavior/behavior_engine.h"
 #include "ble/ble_manager.h"
 #include "core/event_bus.h"
+#include "display/display_policy.h"
 #include "drivers/mock_inputs.h"
 #include "drivers/touch_input.h"
 #include "power/power_manager.h"
@@ -14,12 +15,27 @@
 
 LOG_MODULE_REGISTER(kerfur_app, CONFIG_LOG_DEFAULT_LEVEL);
 
+#define APP_EVENT_DRAIN_BUDGET 32
+
 static void log_pet_snapshot(const struct pet_state *pet, const char *tag)
 {
-	LOG_INF("%s mode=%s expr=%s E=%d Sl=%d At=%d Bo=%d St=%d Ar=%d So=%d",
-		tag, pet_mode_str(pet->current_mode), pet_expression_str(pet->expression),
-		pet->energy, pet->sleepiness, pet->attachment, pet->boredom, pet->stress,
-		pet->arousal, pet->social_load);
+	char status[256];
+
+	behavior_engine_status_dump(pet, status, sizeof(status));
+	LOG_INF("%s %s", tag, status);
+}
+
+static void app_handle_event(struct pet_state *pet, const struct app_event *event)
+{
+	if (IS_ENABLED(CONFIG_KERFUR_TRACE_EVENTS) &&
+	    (event->type != APP_EVENT_TICK_100MS) &&
+	    (event->type != APP_EVENT_TICK_1S)) {
+		LOG_INF("Event rx: %s param=%d", app_event_type_str(event->type), event->param);
+	}
+
+	behavior_engine_handle_event(pet, event);
+	power_manager_on_event(event, pet);
+	display_policy_on_event(pet, event);
 }
 
 int app_run(void)
@@ -40,6 +56,7 @@ int app_run(void)
 	now_ms = k_uptime_get();
 	behavior_engine_init(&pet, now_ms);
 	power_manager_init(now_ms);
+	display_policy_init(&pet, now_ms);
 	log_pet_snapshot(&pet, "Boot");
 
 	err = ui_renderer_init();
@@ -73,15 +90,19 @@ int app_run(void)
 		struct app_event event;
 		struct app_event synthetic_event;
 		bool got_event;
-		bool display_blanked;
+		bool display_blanked = false;
+		uint8_t drained = 0U;
 
 		got_event = app_event_wait(&event, K_MSEC(20));
 		if (got_event) {
-			if (IS_ENABLED(CONFIG_KERFUR_TRACE_EVENTS) && (event.type != APP_EVENT_TICK_1S)) {
-				LOG_INF("Event rx: %s param=%d", app_event_type_str(event.type), event.param);
-			}
-			behavior_engine_handle_event(&pet, &event);
-			power_manager_on_event(&event, &pet);
+			app_handle_event(&pet, &event);
+			drained++;
+		}
+
+		while ((drained < APP_EVENT_DRAIN_BUDGET) &&
+		       app_event_wait(&event, K_NO_WAIT)) {
+			app_handle_event(&pet, &event);
+			drained++;
 		}
 
 		now_ms = k_uptime_get();
@@ -94,7 +115,7 @@ int app_run(void)
 			continue;
 		}
 
-		display_blanked = power_manager_is_display_blanked();
+		display_blanked = (display_policy_get_state(&pet) == DISPLAY_OFF);
 		if (display_blanked != last_display_blanked) {
 			LOG_INF("Display blank state -> %s", display_blanked ? "BLANKED" : "ACTIVE");
 			last_display_blanked = display_blanked;

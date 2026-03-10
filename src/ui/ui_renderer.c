@@ -8,7 +8,10 @@
 #include <zephyr/drivers/display.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 
+#include "behavior/micro_reaction.h"
+#include "ui/kerfur_faces.h"
 #include "ui/ui_renderer.h"
 
 LOG_MODULE_REGISTER(ui_renderer, CONFIG_LOG_DEFAULT_LEVEL);
@@ -17,105 +20,215 @@ LOG_MODULE_REGISTER(ui_renderer, CONFIG_LOG_DEFAULT_LEVEL);
 #error "No zephyr,display chosen node. Select a display shield."
 #endif
 
-struct face_nodes {
+#define UI_CANVAS_MAX_W 128
+#define UI_CANVAS_MAX_H 64
+
+#define BASE_LEFT_EYE_X 17
+#define BASE_RIGHT_EYE_X 74
+#define BASE_EYE_Y 16
+#define BASE_MOUTH_X 54
+#define BASE_MOUTH_Y 38
+#define BASE_WHISKER_LEFT_X 0
+#define BASE_WHISKER_RIGHT_X 119
+#define BASE_WHISKER_Y 46
+#define BASE_BROW_LEFT_X 46
+#define BASE_BROW_RIGHT_X 72
+#define BASE_BROW_Y 8
+#define BASE_BLINK_LEFT_X 20
+#define BASE_BLINK_RIGHT_X 77
+#define BASE_BLINK_Y 30
+
+struct ui_runtime {
+	const struct device *display;
 	lv_obj_t *root;
-	lv_obj_t *eye_l;
-	lv_obj_t *eye_r;
-	lv_obj_t *mouth;
-	lv_obj_t *mouth_aux;
-	lv_obj_t *brow_l;
-	lv_obj_t *brow_r;
-	lv_obj_t *icon_ble;
-	lv_obj_t *icon_bat_body;
-	lv_obj_t *icon_bat_tip;
-	lv_obj_t *icon_notif;
+	lv_obj_t *canvas;
+	bool blanked;
+	int16_t width;
+	int16_t height;
+	int8_t ambient_shift_x;
+	int8_t ambient_shift_y;
+	uint8_t shift_phase;
+	int64_t last_shift_ms;
+	uint8_t contrast;
 };
 
-static const struct device *g_display;
-static struct face_nodes g_face;
-static bool g_blanked;
-static int16_t g_width;
-static int16_t g_height;
-static uint32_t g_frame_id;
-static uint8_t g_shift_x;
-static uint8_t g_shift_y;
+static struct ui_runtime g_ui;
+static uint8_t g_canvas_buf[LV_CANVAS_BUF_SIZE(UI_CANVAS_MAX_W, UI_CANVAS_MAX_H, 8,
+						LV_DRAW_BUF_STRIDE_ALIGN)];
 
-static void ui_rect_style(lv_obj_t *obj, lv_color_t color)
+static void draw_pixel(int16_t x, int16_t y, lv_opa_t opa)
 {
-	lv_obj_remove_style_all(obj);
-	lv_obj_set_style_bg_color(obj, color, LV_PART_MAIN);
-	lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN);
-	lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
-	lv_obj_set_style_radius(obj, 0, LV_PART_MAIN);
+	if ((x < 0) || (y < 0) || (x >= g_ui.width) || (y >= g_ui.height)) {
+		return;
+	}
+
+	lv_canvas_set_px_skip_invalidate(g_ui.canvas, x, y, lv_color_white(), opa);
 }
 
-static lv_obj_t *ui_make_rect(lv_obj_t *parent, lv_color_t color)
+static void draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, lv_opa_t opa)
 {
-	lv_obj_t *obj = lv_obj_create(parent);
+	int16_t px;
+	int16_t py;
 
-	ui_rect_style(obj, color);
-	return obj;
+	for (py = 0; py < h; py++) {
+		for (px = 0; px < w; px++) {
+			draw_pixel(x + px, y + py, opa);
+		}
+	}
 }
 
-static void ui_set_hidden(lv_obj_t *obj, bool hidden)
+static void draw_bitmap(const struct kerfur_bitmap *bmp, int16_t x, int16_t y, lv_opa_t opa)
 {
-	if (hidden) {
-		lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+	uint8_t bytes_per_row;
+	int16_t row;
+	int16_t col;
+
+	if ((bmp == NULL) || (bmp->data == NULL)) {
+		return;
+	}
+
+	bytes_per_row = (uint8_t)((bmp->width + 7U) / 8U);
+
+	for (row = 0; row < bmp->height; row++) {
+		for (col = 0; col < bmp->width; col++) {
+			const uint8_t byte = bmp->data[(row * bytes_per_row) + (col / 8)];
+			/*
+			 * Adafruit GFX-style bitmap data is MSB-first in each byte.
+			 * Using MSB->left fixes mirrored/scrambled columns.
+			 */
+			const uint8_t bit = BIT(7 - (col % 8));
+
+			if ((byte & bit) != 0U) {
+				draw_pixel(x + col, y + row, opa);
+			}
+		}
+	}
+}
+
+static void update_contrast(enum pet_display_state state)
+{
+	uint8_t target;
+	int err;
+
+	if (state == DISPLAY_AMBIENT) {
+		target = 96U;
 	} else {
-		lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+		target = 255U;
+	}
+
+	if (g_ui.contrast == target) {
+		return;
+	}
+
+	err = display_set_contrast(g_ui.display, target);
+	if ((err < 0) && (err != -ENOSYS)) {
+		LOG_WRN("display_set_contrast failed (%d)", err);
+		return;
+	}
+
+	g_ui.contrast = target;
+}
+
+static void resolve_face_pose(const struct pet_state *state, enum kerfur_face_visual visual,
+			      bool ambient, int64_t now_ms, struct kerfur_face_pose *pose)
+{
+	const struct kerfur_face_animation *idle_animation;
+	const struct kerfur_face_animation *reaction_animation;
+
+	kerfur_face_pose_init(visual, pose);
+
+	idle_animation = kerfur_face_idle_animation_get(visual, ambient);
+	(void)kerfur_face_pose_apply_animation(pose, idle_animation, now_ms);
+
+	reaction_animation = kerfur_face_reaction_animation_get(state->current_reaction);
+	if (reaction_animation != NULL) {
+		(void)kerfur_face_pose_apply_animation(pose, reaction_animation,
+						      now_ms - state->last_reaction_timestamp_ms);
 	}
 }
 
-static void ui_create_scene(void)
+static bool should_blink(const struct pet_state *state, int64_t now_ms, bool ambient,
+			 const struct kerfur_face_pose *pose)
 {
-	lv_obj_t *screen = lv_screen_active();
-	lv_color_t white = lv_color_hex(0xffffff);
-	lv_color_t black = lv_color_hex(0x000000);
+	const int64_t blink_period_ms = ambient ? 8000 : 4200;
+	const bool reaction_anim_active =
+		kerfur_face_reaction_animation_get(state->current_reaction) != NULL;
+	const int64_t blink_duration_ms =
+		((pose->flags & KERFUR_FACE_FLAG_SLEEPY) != 0U) ? 400 : 220;
+	const bool periodic = ((now_ms + (state->arousal * 31)) % blink_period_ms) < blink_duration_ms;
 
-	g_face.root = lv_obj_create(screen);
-	ui_rect_style(g_face.root, black);
-	lv_obj_set_size(g_face.root, g_width, g_height);
-	lv_obj_set_pos(g_face.root, 0, 0);
-	lv_obj_clear_flag(g_face.root, LV_OBJ_FLAG_SCROLLABLE);
+	if ((pose != NULL) && (pose->eye_mode == KERFUR_FACE_EYE_BLINK)) {
+		return true;
+	}
 
-	g_face.eye_l = ui_make_rect(g_face.root, white);
-	g_face.eye_r = ui_make_rect(g_face.root, white);
-	g_face.mouth = ui_make_rect(g_face.root, white);
-	g_face.mouth_aux = ui_make_rect(g_face.root, white);
-	g_face.brow_l = ui_make_rect(g_face.root, white);
-	g_face.brow_r = ui_make_rect(g_face.root, white);
-	g_face.icon_ble = ui_make_rect(g_face.root, white);
-	g_face.icon_bat_body = ui_make_rect(g_face.root, white);
-	g_face.icon_bat_tip = ui_make_rect(g_face.root, white);
-	g_face.icon_notif = ui_make_rect(g_face.root, white);
+	if (reaction_anim_active) {
+		return false;
+	}
+
+	return periodic;
 }
 
-static void ui_update_icons(const struct pet_state *state, int64_t now_ms)
+static void update_pixel_shift(bool ambient, int64_t now_ms)
 {
-	bool notif_recent = (state->last_phone_notification_timestamp_ms > 0) &&
-			    ((now_ms - state->last_phone_notification_timestamp_ms) < (8 * MSEC_PER_SEC));
-	bool notif_pulse = ((now_ms / 250) % 2) == 0;
+	static const int8_t shift_table[6][2] = {
+		{0, 0}, {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0},
+	};
 
-	ui_set_hidden(g_face.icon_ble, !state->ble_connected);
-	ui_set_hidden(g_face.icon_bat_body, !state->battery_low);
-	ui_set_hidden(g_face.icon_bat_tip, !state->battery_low);
-	ui_set_hidden(g_face.icon_notif, !(notif_recent && notif_pulse));
-
-	if (state->ble_connected) {
-		lv_obj_set_pos(g_face.icon_ble, g_width - 8, 2);
-		lv_obj_set_size(g_face.icon_ble, 4, 4);
+	if (!ambient) {
+		g_ui.ambient_shift_x = 0;
+		g_ui.ambient_shift_y = 0;
+		g_ui.shift_phase = 0U;
+		g_ui.last_shift_ms = now_ms;
+		return;
 	}
 
-	if (state->battery_low) {
-		lv_obj_set_pos(g_face.icon_bat_body, 2, 2);
-		lv_obj_set_size(g_face.icon_bat_body, 6, 4);
-		lv_obj_set_pos(g_face.icon_bat_tip, 8, 3);
-		lv_obj_set_size(g_face.icon_bat_tip, 1, 2);
+	if ((now_ms - g_ui.last_shift_ms) < (45 * MSEC_PER_SEC)) {
+		return;
 	}
 
-	if (notif_recent && notif_pulse) {
-		lv_obj_set_pos(g_face.icon_notif, (g_width / 2) - 2, 2);
-		lv_obj_set_size(g_face.icon_notif, 4, 4);
+	g_ui.shift_phase = (g_ui.shift_phase + 1U) % 6U;
+	g_ui.ambient_shift_x = shift_table[g_ui.shift_phase][0];
+	g_ui.ambient_shift_y = shift_table[g_ui.shift_phase][1];
+	g_ui.last_shift_ms = now_ms;
+}
+
+static void draw_reaction_overlay(const struct pet_state *state, int64_t now_ms, lv_opa_t opa)
+{
+	switch (state->current_reaction) {
+	case REACTION_STARTLE:
+		draw_rect((g_ui.width / 2) - 1, 2, 3, 8, opa);
+		draw_rect((g_ui.width / 2) - 1, 12, 3, 3, opa);
+		break;
+	case REACTION_NOTIF_PING:
+		draw_rect((g_ui.width / 2) - 2, 3, 4, 4, opa);
+		break;
+	case REACTION_NOTIF_BURST:
+		draw_rect((g_ui.width / 2) - 4, 2, 8, 4, opa);
+		draw_rect((g_ui.width / 2) - 2, 7, 4, 3, opa);
+		break;
+	case REACTION_CHARGE_PULSE:
+		if (((now_ms / 250) % 2) == 0) {
+			draw_rect(4, 3, 7, 4, opa);
+			draw_rect(11, 4, 2, 2, opa);
+		}
+		break;
+	case REACTION_LOW_BATT_SAG:
+		draw_rect(4, 3, 7, 4, opa / 2);
+		draw_rect(11, 4, 2, 2, opa / 2);
+		break;
+	case REACTION_CONNECT_SPARK:
+		draw_rect(g_ui.width - 10, 2, 2, 6, opa);
+		draw_rect(g_ui.width - 7, 4, 2, 4, opa);
+		break;
+	case REACTION_DISCONNECT_SCAN:
+		draw_rect(g_ui.width - 11, 3, 6, 2, opa);
+		draw_rect(g_ui.width - 11, 7, 4, 2, opa);
+		break;
+	case REACTION_SLEEP_FADE:
+		draw_rect(0, 0, g_ui.width, g_ui.height, LV_OPA_30);
+		break;
+	default:
+		break;
 	}
 }
 
@@ -124,30 +237,47 @@ int ui_renderer_init(void)
 	struct display_capabilities caps;
 	int err;
 
-	g_display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
-	if (!device_is_ready(g_display)) {
+	g_ui.display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+	if (!device_is_ready(g_ui.display)) {
 		LOG_ERR("Display device not ready");
 		return -ENODEV;
 	}
 
-	display_get_capabilities(g_display, &caps);
-	g_width = (int16_t)caps.x_resolution;
-	g_height = (int16_t)caps.y_resolution;
+	display_get_capabilities(g_ui.display, &caps);
+	g_ui.width = (int16_t)caps.x_resolution;
+	g_ui.height = (int16_t)caps.y_resolution;
+	if ((g_ui.width > UI_CANVAS_MAX_W) || (g_ui.height > UI_CANVAS_MAX_H)) {
+		LOG_ERR("Display exceeds canvas max (%dx%d > %dx%d)",
+			g_ui.width, g_ui.height, UI_CANVAS_MAX_W, UI_CANVAS_MAX_H);
+		return -EINVAL;
+	}
 
-	ui_create_scene();
-	lv_timer_handler();
+	g_ui.root = lv_obj_create(lv_screen_active());
+	lv_obj_remove_style_all(g_ui.root);
+	lv_obj_set_style_bg_color(g_ui.root, lv_color_black(), LV_PART_MAIN);
+	lv_obj_set_style_bg_opa(g_ui.root, LV_OPA_COVER, LV_PART_MAIN);
+	lv_obj_set_size(g_ui.root, g_ui.width, g_ui.height);
+	lv_obj_set_pos(g_ui.root, 0, 0);
+	lv_obj_clear_flag(g_ui.root, LV_OBJ_FLAG_SCROLLABLE);
 
-	err = display_blanking_off(g_display);
-	if (err < 0 && err != -ENOSYS) {
+	g_ui.canvas = lv_canvas_create(g_ui.root);
+	lv_canvas_set_buffer(g_ui.canvas, g_canvas_buf, g_ui.width, g_ui.height, LV_COLOR_FORMAT_L8);
+	lv_obj_set_pos(g_ui.canvas, 0, 0);
+	lv_obj_set_size(g_ui.canvas, g_ui.width, g_ui.height);
+	lv_canvas_fill_bg(g_ui.canvas, lv_color_black(), LV_OPA_COVER);
+
+	err = display_blanking_off(g_ui.display);
+	if ((err < 0) && (err != -ENOSYS)) {
 		LOG_WRN("display_blanking_off failed (%d)", err);
 	}
 
-	g_blanked = false;
-	g_frame_id = 0U;
-	g_shift_x = 0U;
-	g_shift_y = 0U;
-
-	LOG_INF("LVGL renderer ready (%dx%d)", g_width, g_height);
+	g_ui.blanked = false;
+	g_ui.ambient_shift_x = 0;
+	g_ui.ambient_shift_y = 0;
+	g_ui.shift_phase = 0U;
+	g_ui.last_shift_ms = k_uptime_get();
+	g_ui.contrast = 255U;
+	lv_timer_handler();
 	return 0;
 }
 
@@ -155,143 +285,94 @@ void ui_renderer_set_blanked(bool blanked)
 {
 	int err;
 
-	if ((g_display == NULL) || (g_face.root == NULL) || (blanked == g_blanked)) {
+	if ((g_ui.display == NULL) || (g_ui.root == NULL) || (blanked == g_ui.blanked)) {
 		return;
 	}
 
-	g_blanked = blanked;
-	ui_set_hidden(g_face.root, blanked);
-
+	g_ui.blanked = blanked;
 	if (blanked) {
-		err = display_blanking_on(g_display);
-		if (err < 0 && err != -ENOSYS) {
+		lv_obj_add_flag(g_ui.root, LV_OBJ_FLAG_HIDDEN);
+		err = display_blanking_on(g_ui.display);
+		if ((err < 0) && (err != -ENOSYS)) {
 			LOG_WRN("display_blanking_on failed (%d)", err);
 		}
 	} else {
-		err = display_blanking_off(g_display);
-		if (err < 0 && err != -ENOSYS) {
+		lv_obj_clear_flag(g_ui.root, LV_OBJ_FLAG_HIDDEN);
+		err = display_blanking_off(g_ui.display);
+		if ((err < 0) && (err != -ENOSYS)) {
 			LOG_WRN("display_blanking_off failed (%d)", err);
 		}
-		lv_timer_handler();
 	}
 }
 
 void ui_renderer_render(const struct pet_state *state, int64_t now_ms)
 {
-	int16_t center_x;
-	int16_t center_y;
-	int16_t left_x;
-	int16_t right_x;
+	const enum kerfur_face_visual visual = kerfur_face_visual_for_expression(state->current_expression);
+	const bool ambient = (state->current_display_state == DISPLAY_AMBIENT);
+	struct kerfur_face_pose pose;
+	bool blink;
+	lv_opa_t opa = ambient ? LV_OPA_50 : LV_OPA_COVER;
+	int16_t left_eye_x;
+	int16_t right_eye_x;
 	int16_t eye_y;
-	int16_t eye_w = 12;
-	int16_t eye_h;
 	int16_t mouth_x;
 	int16_t mouth_y;
-	int16_t mouth_w = 20;
-	int16_t mouth_h = 2;
-	bool blink;
-	bool phase;
+	int16_t brow_y;
 
-	if ((g_face.root == NULL) || g_blanked) {
+	if ((g_ui.canvas == NULL) || g_ui.blanked || (state->current_display_state == DISPLAY_OFF)) {
 		return;
 	}
 
-	g_frame_id++;
-	if ((g_frame_id % 70U) == 0U) {
-		/* Anti-burn-in baseline: shift the face slowly by a few pixels. */
-		g_shift_x = (g_shift_x + 1U) % 3U;
-		g_shift_y = (g_shift_y + 1U) % 2U;
-	}
-	lv_obj_set_pos(g_face.root, (int16_t)g_shift_x, (int16_t)g_shift_y);
+	resolve_face_pose(state, visual, ambient, now_ms, &pose);
+	blink = should_blink(state, now_ms, ambient, &pose);
 
-	blink = (((now_ms / 120) % 28) == 0) || (((now_ms / 120) % 28) == 1);
-	phase = ((now_ms / 350) % 2) == 0;
+	update_contrast(state->current_display_state);
+	update_pixel_shift(ambient, now_ms);
+	lv_canvas_fill_bg(g_ui.canvas, lv_color_black(), LV_OPA_COVER);
 
-	center_x = g_width / 2;
-	center_y = g_height / 2;
-	eye_y = center_y - 10;
-	left_x = center_x - 26;
-	right_x = center_x + 14;
-	eye_h = blink ? 2 : 8;
+	left_eye_x = BASE_LEFT_EYE_X + pose.eye_dx + g_ui.ambient_shift_x;
+	right_eye_x = BASE_RIGHT_EYE_X + pose.eye_dx + g_ui.ambient_shift_x;
+	eye_y = BASE_EYE_Y + pose.eye_dy + g_ui.ambient_shift_y;
+	mouth_x = BASE_MOUTH_X + pose.mouth_dx + g_ui.ambient_shift_x;
+	mouth_y = BASE_MOUTH_Y + pose.mouth_dy + g_ui.ambient_shift_y;
+	brow_y = BASE_BROW_Y + pose.brow_dy + g_ui.ambient_shift_y;
 
-	ui_set_hidden(g_face.brow_l, true);
-	ui_set_hidden(g_face.brow_r, true);
-	ui_set_hidden(g_face.mouth_aux, true);
-
-	switch (state->expression) {
-	case PET_EXPR_SLEEPY:
-		eye_h = 3;
-		mouth_w = 24;
-		mouth_h = 1;
-		break;
-	case PET_EXPR_ASLEEP:
-		eye_h = 1;
-		mouth_w = 12;
-		mouth_h = 1;
-		break;
-	case PET_EXPR_CURIOUS:
-		mouth_w = 4;
-		mouth_h = 4;
-		break;
-	case PET_EXPR_NEEDY:
-		mouth_w = 24;
-		mouth_h = 2;
-		ui_set_hidden(g_face.mouth_aux, false);
-		break;
-	case PET_EXPR_STRESSED:
-		mouth_w = 24;
-		mouth_h = 2;
-		ui_set_hidden(g_face.brow_l, false);
-		ui_set_hidden(g_face.brow_r, false);
-		break;
-	case PET_EXPR_HAPPY:
-		mouth_w = 22;
-		mouth_h = 3;
-		break;
-	case PET_EXPR_IDLE:
-	default:
-		mouth_w = 20;
-		mouth_h = 2;
-		break;
+	if ((pose.flags & KERFUR_FACE_FLAG_SHOW_WHISKERS) != 0U) {
+		draw_bitmap(kerfur_face_whisker_left(), BASE_WHISKER_LEFT_X + g_ui.ambient_shift_x,
+			    BASE_WHISKER_Y + g_ui.ambient_shift_y, opa);
+		draw_bitmap(kerfur_face_whisker_right(), BASE_WHISKER_RIGHT_X + g_ui.ambient_shift_x,
+			    BASE_WHISKER_Y + g_ui.ambient_shift_y, opa);
 	}
 
-	lv_obj_set_pos(g_face.eye_l, left_x, eye_y);
-	lv_obj_set_size(g_face.eye_l, eye_w, eye_h);
-
-	if (state->expression == PET_EXPR_CURIOUS) {
-		lv_obj_set_pos(g_face.eye_r, right_x, eye_y - 1);
-		lv_obj_set_size(g_face.eye_r, eye_w, eye_h + 3);
+	if (blink) {
+		draw_bitmap(kerfur_face_eye_blink(), BASE_BLINK_LEFT_X + pose.eye_dx + g_ui.ambient_shift_x,
+			    BASE_BLINK_Y + pose.eye_dy + g_ui.ambient_shift_y, opa);
+		draw_bitmap(kerfur_face_eye_blink(), BASE_BLINK_RIGHT_X + pose.eye_dx + g_ui.ambient_shift_x,
+			    BASE_BLINK_Y + pose.eye_dy + g_ui.ambient_shift_y, opa);
 	} else {
-		lv_obj_set_pos(g_face.eye_r, right_x, eye_y);
-		lv_obj_set_size(g_face.eye_r, eye_w, eye_h);
+		draw_bitmap(kerfur_face_eye_open_left(), left_eye_x, eye_y, opa);
+		draw_bitmap(kerfur_face_eye_open_right(), right_eye_x, eye_y, opa);
 	}
 
-	if (state->expression == PET_EXPR_ASLEEP) {
-		mouth_x = center_x - (mouth_w / 2);
-		mouth_y = center_y + 11;
-	} else if (state->expression == PET_EXPR_CURIOUS) {
-		mouth_x = center_x - 2;
-		mouth_y = center_y + (phase ? 8 : 9);
-	} else {
-		mouth_x = center_x - (mouth_w / 2);
-		mouth_y = center_y + (phase ? 10 : 11);
+	draw_bitmap(kerfur_face_mouth(), mouth_x, mouth_y, opa);
+
+	if ((pose.flags & KERFUR_FACE_FLAG_SHOW_BROWS) != 0U) {
+		draw_bitmap(kerfur_face_brow_left(), BASE_BROW_LEFT_X + g_ui.ambient_shift_x,
+			    brow_y, opa);
+		draw_bitmap(kerfur_face_brow_right(), BASE_BROW_RIGHT_X + g_ui.ambient_shift_x,
+			    brow_y, opa);
 	}
 
-	lv_obj_set_pos(g_face.mouth, mouth_x, mouth_y);
-	lv_obj_set_size(g_face.mouth, mouth_w, mouth_h);
-
-	if (state->expression == PET_EXPR_NEEDY) {
-		lv_obj_set_pos(g_face.mouth_aux, center_x - 2, mouth_y - 2);
-		lv_obj_set_size(g_face.mouth_aux, 4, 1);
+	if (state->ble_connected) {
+		draw_rect(g_ui.width - 6, 2, 3, 4, opa);
 	}
 
-	if (state->expression == PET_EXPR_STRESSED) {
-		lv_obj_set_pos(g_face.brow_l, left_x - 2, eye_y - 2);
-		lv_obj_set_size(g_face.brow_l, 6, 1);
-		lv_obj_set_pos(g_face.brow_r, right_x + eye_w - 4, eye_y - 2);
-		lv_obj_set_size(g_face.brow_r, 6, 1);
+	if (state->battery_low) {
+		draw_rect(2, 2, 6, 4, opa / 2);
+		draw_rect(8, 3, 1, 2, opa / 2);
 	}
 
-	ui_update_icons(state, now_ms);
+	draw_reaction_overlay(state, now_ms, opa);
+	lv_obj_invalidate(g_ui.canvas);
 	lv_timer_handler();
 }
