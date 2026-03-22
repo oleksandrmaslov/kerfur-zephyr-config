@@ -20,6 +20,7 @@ enum kerfur_face_visual {
 	KERFUR_FACE_CALM = 0,
 	KERFUR_FACE_CURIOUS,
 	KERFUR_FACE_CONTENT,
+	KERFUR_FACE_HAPPY,
 	KERFUR_FACE_PLAYFUL,
 	KERFUR_FACE_SLEEPY,
 	KERFUR_FACE_ANNOYED,
@@ -37,6 +38,7 @@ enum kerfur_face_pose_flags {
 	KERFUR_FACE_FLAG_SHOW_BROWS = BIT(0),
 	KERFUR_FACE_FLAG_SHOW_WHISKERS = BIT(1),
 	KERFUR_FACE_FLAG_SLEEPY = BIT(2),
+	KERFUR_FACE_FLAG_SHOW_MOUTH_OPEN = BIT(3),
 };
 
 enum kerfur_face_frame_eye_mode {
@@ -45,11 +47,41 @@ enum kerfur_face_frame_eye_mode {
 	KERFUR_FACE_FRAME_EYE_BLINK,
 };
 
+struct kerfur_face_asset_pack {
+	const struct kerfur_bitmap *eye_open_left;
+	const struct kerfur_bitmap *eye_open_right;
+	const struct kerfur_bitmap *eye_blink;
+	const struct kerfur_bitmap *mouth;
+	const struct kerfur_bitmap *mouth_open;
+	const struct kerfur_bitmap *whisker_left;
+	const struct kerfur_bitmap *whisker_right;
+	const struct kerfur_bitmap *brow_left;
+	const struct kerfur_bitmap *brow_right;
+	uint8_t eye_left_x;
+	uint8_t eye_right_x;
+	uint8_t eye_y;
+	uint8_t blink_left_x;
+	uint8_t blink_right_x;
+	uint8_t blink_y;
+	uint8_t mouth_x;
+	uint8_t mouth_y;
+	uint8_t mouth_open_x;
+	uint8_t mouth_open_y;
+	uint8_t whisker_left_x;
+	uint8_t whisker_right_x;
+	uint8_t whisker_y;
+	uint8_t brow_left_x;
+	uint8_t brow_right_x;
+	uint8_t brow_y;
+};
+
 struct kerfur_face_pose {
 	int8_t eye_dx;
 	int8_t eye_dy;
 	int8_t mouth_dx;
 	int8_t mouth_dy;
+	int8_t mouth_open_dy;
+	int8_t whisker_dy;
 	int8_t brow_dy;
 	uint8_t flags;
 	uint8_t eye_mode;
@@ -60,6 +92,8 @@ struct kerfur_face_frame {
 	int8_t eye_dy;
 	int8_t mouth_dx;
 	int8_t mouth_dy;
+	int8_t mouth_open_dy;
+	int8_t whisker_dy;
 	int8_t brow_dy;
 	uint8_t set_flags;
 	uint8_t clear_flags;
@@ -90,13 +124,15 @@ struct kerfur_face_profile {
 enum kerfur_face_visual kerfur_face_visual_for_expression(enum pet_expression expression);
 const struct kerfur_face_profile *kerfur_face_profile_get(enum kerfur_face_visual visual);
 const char *kerfur_face_visual_str(enum kerfur_face_visual visual);
+const struct kerfur_face_asset_pack *kerfur_face_assets_get(enum kerfur_face_visual visual);
 void kerfur_face_pose_init(enum kerfur_face_visual visual, struct kerfur_face_pose *pose);
 bool kerfur_face_pose_apply_animation(struct kerfur_face_pose *pose,
 				      const struct kerfur_face_animation *animation,
 				      int64_t elapsed_ms);
 const struct kerfur_face_animation *kerfur_face_idle_animation_get(enum kerfur_face_visual visual,
 								   bool ambient);
-const struct kerfur_face_animation *kerfur_face_reaction_animation_get(enum micro_reaction_type reaction);
+const struct kerfur_face_animation *kerfur_face_reaction_animation_get(enum kerfur_face_visual visual,
+								      enum micro_reaction_type reaction);
 
 const struct kerfur_bitmap *kerfur_face_eye_open_left(void);
 const struct kerfur_bitmap *kerfur_face_eye_open_right(void);

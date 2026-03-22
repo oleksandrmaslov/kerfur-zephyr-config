@@ -237,9 +237,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->arousal += 2;
 		state->curiosity += 2;
 		state->boredom -= 1;
-		trigger_reaction(state, ((event->timestamp_ms / 500) % 2) ?
-				       REACTION_BLINK : REACTION_GLANCE_RIGHT,
-			       event->timestamp_ms);
+		trigger_reaction(state, REACTION_BLINK, event->timestamp_ms);
 		break;
 
 	case APP_EVENT_USER_PET_SOFT:
@@ -502,6 +500,7 @@ static void update_mode(struct pet_state *state, int64_t now_ms)
 static int score_for_expression(enum pet_expression expr, const struct pet_state *state, int64_t now_ms)
 {
 	const bool recent_pet = (now_ms - state->last_pet_timestamp_ms) < (10 * 60 * MSEC_PER_SEC);
+	const bool fresh_pet = (now_ms - state->last_pet_timestamp_ms) < (8 * MSEC_PER_SEC);
 	const bool recent_motion = (now_ms - state->last_motion_timestamp_ms) < (45 * MSEC_PER_SEC);
 	const bool recent_notif = (now_ms - state->last_phone_event_timestamp_ms) < (30 * MSEC_PER_SEC);
 	const bool rough_recent = (now_ms - state->last_rough_event_timestamp_ms) < (60 * MSEC_PER_SEC);
@@ -519,11 +518,11 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 		       ((state->current_mode == PET_MODE_WALK_AWAKE) ? 18 : 0) +
 		       (state->app_session_active ? 8 : 0) - (state->sleepiness / 3);
 	case PET_EXPR_CONTENT:
-		return (state->attachment / 2) + (state->trust / 2) + (recent_pet ? 20 : 0) -
+		return (state->attachment / 2) + (state->trust / 2) + (recent_pet ? 16 : 0) -
 		       (state->stress / 2);
 	case PET_EXPR_HAPPY:
-		return (state->attachment / 2) + (state->energy / 3) + (recent_pet ? 15 : 0) -
-		       state->stress;
+		return (state->attachment / 2) + (state->energy / 3) + (recent_pet ? 18 : 0) +
+		       (fresh_pet ? 26 : 0) - (state->stress / 2);
 	case PET_EXPR_PLAYFUL:
 		return state->arousal + (state->trust / 3) +
 		       ((state->current_mode == PET_MODE_WALK_AWAKE) ? 14 : 0) -
@@ -564,10 +563,19 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 	int expr;
 	const int32_t hold_ms = 12 * MSEC_PER_SEC;
 	const int margin = 8;
+	const bool pet_recent = (now_ms - state->last_pet_timestamp_ms) < (6 * MSEC_PER_SEC);
 
 	if (state->current_mode == PET_MODE_ASLEEP) {
 		if (state->current_expression != PET_EXPR_ASLEEP) {
 			state->current_expression = PET_EXPR_ASLEEP;
+			state->last_expression_change_timestamp_ms = now_ms;
+		}
+		return;
+	}
+
+	if (pet_recent) {
+		if (state->current_expression != PET_EXPR_HAPPY) {
+			state->current_expression = PET_EXPR_HAPPY;
 			state->last_expression_change_timestamp_ms = now_ms;
 		}
 		return;
@@ -607,6 +615,9 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 
 void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 {
+	const int64_t stale_recent_event_ms = now_ms - (60 * MSEC_PER_SEC);
+	const int64_t stale_pet_ms = now_ms - (11 * 60 * MSEC_PER_SEC);
+
 	(void)memset(state, 0, sizeof(*state));
 	(void)memset(&g_runtime, 0, sizeof(g_runtime));
 
@@ -622,12 +633,13 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->walk_confidence = 0;
 	state->notification_burst_level = 0;
 
-	state->last_pet_timestamp_ms = now_ms;
-	state->last_real_interaction_timestamp_ms = now_ms;
-	state->last_motion_timestamp_ms = now_ms;
-	state->last_walk_timestamp_ms = now_ms;
-	state->last_phone_event_timestamp_ms = now_ms;
-	state->last_self_wake_timestamp_ms = now_ms;
+	/* Seed boot in a neutral state so the first visible expression is not a fake recent event. */
+	state->last_pet_timestamp_ms = stale_pet_ms;
+	state->last_real_interaction_timestamp_ms = stale_recent_event_ms;
+	state->last_motion_timestamp_ms = stale_recent_event_ms;
+	state->last_walk_timestamp_ms = stale_recent_event_ms;
+	state->last_phone_event_timestamp_ms = stale_recent_event_ms;
+	state->last_self_wake_timestamp_ms = stale_recent_event_ms;
 	state->last_reaction_timestamp_ms = now_ms;
 	state->last_rough_event_timestamp_ms = now_ms - (2 * 60 * MSEC_PER_SEC);
 	state->last_display_state_change_ms = now_ms;

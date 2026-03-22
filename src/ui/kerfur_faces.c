@@ -2,6 +2,7 @@
 
 #include <zephyr/sys/util.h>
 
+#include "ui/exited_kerfur.h"
 #include "ui/kerfur_faces.h"
 
 static uint8_t profile_flags(const struct kerfur_face_profile *profile)
@@ -99,6 +100,62 @@ static const struct kerfur_bitmap g_brow_right = {
 	.data = image_brow_right_bits,
 };
 
+static const struct kerfur_face_asset_pack g_default_assets = {
+	.eye_open_left = &g_eye_left_open,
+	.eye_open_right = &g_eye_right_open,
+	.eye_blink = &g_eye_blink,
+	.mouth = &g_mouth,
+	.mouth_open = NULL,
+	.whisker_left = &g_whisker_left,
+	.whisker_right = &g_whisker_right,
+	.brow_left = &g_brow_left,
+	.brow_right = &g_brow_right,
+	.eye_left_x = 17,
+	.eye_right_x = 74,
+	.eye_y = 16,
+	.blink_left_x = 20,
+	.blink_right_x = 77,
+	.blink_y = 30,
+	.mouth_x = 54,
+	.mouth_y = 38,
+	.mouth_open_x = 54,
+	.mouth_open_y = 47,
+	.whisker_left_x = 0,
+	.whisker_right_x = 119,
+	.whisker_y = 46,
+	.brow_left_x = 46,
+	.brow_right_x = 72,
+	.brow_y = 8,
+};
+
+static const struct kerfur_face_asset_pack g_happy_assets = {
+	.eye_open_left = &g_exited_eye_left,
+	.eye_open_right = &g_exited_eye_right,
+	.eye_blink = &g_eye_blink,
+	.mouth = &g_mouth,
+	.mouth_open = NULL,
+	.whisker_left = &g_whisker_left,
+	.whisker_right = &g_whisker_right,
+	.brow_left = &g_brow_left,
+	.brow_right = &g_brow_right,
+	.eye_left_x = 20,
+	.eye_right_x = 68,
+	.eye_y = 18,
+	.blink_left_x = 23,
+	.blink_right_x = 71,
+	.blink_y = 30,
+	.mouth_x = 54,
+	.mouth_y = 38,
+	.mouth_open_x = 54,
+	.mouth_open_y = 47,
+	.whisker_left_x = 0,
+	.whisker_right_x = 119,
+	.whisker_y = 46,
+	.brow_left_x = 46,
+	.brow_right_x = 72,
+	.brow_y = 17,
+};
+
 static const struct kerfur_face_profile g_profiles[KERFUR_FACE_COUNT] = {
 	[KERFUR_FACE_CALM] = {
 		.visual = KERFUR_FACE_CALM,
@@ -132,6 +189,18 @@ static const struct kerfur_face_profile g_profiles[KERFUR_FACE_COUNT] = {
 		.mouth_dx = 0,
 		.mouth_dy = 2,
 		.brow_dy = 1,
+		.show_brows = true,
+		.show_whiskers = true,
+		.sleepy_eyes = false,
+	},
+	[KERFUR_FACE_HAPPY] = {
+		.visual = KERFUR_FACE_HAPPY,
+		.name = "HAPPY",
+		.eye_dx = 0,
+		.eye_dy = 0,
+		.mouth_dx = 0,
+		.mouth_dy = 0,
+		.brow_dy = 0,
 		.show_brows = true,
 		.show_whiskers = true,
 		.sleepy_eyes = false,
@@ -198,45 +267,6 @@ static const struct kerfur_face_profile g_profiles[KERFUR_FACE_COUNT] = {
 	},
 };
 
-static const struct kerfur_face_frame g_idle_breathe_fg_frames[] = {
-	{ .duration_ms = 700 },
-	{ .eye_dy = -1, .brow_dy = -1, .duration_ms = 180 },
-	{ .mouth_dy = 1, .duration_ms = 160 },
-	{ .duration_ms = 820 },
-};
-
-static const struct kerfur_face_frame g_idle_breathe_ambient_frames[] = {
-	{ .duration_ms = 1800 },
-	{ .mouth_dy = 1, .duration_ms = 300 },
-	{ .duration_ms = 2200 },
-};
-
-static const struct kerfur_face_frame g_idle_alert_fg_frames[] = {
-	{ .duration_ms = 900 },
-	{ .eye_dx = -1, .duration_ms = 160 },
-	{ .eye_dx = 1, .duration_ms = 160 },
-	{ .duration_ms = 900 },
-};
-
-static const struct kerfur_face_frame g_idle_alert_ambient_frames[] = {
-	{ .duration_ms = 1800 },
-	{ .eye_dx = 1, .duration_ms = 220 },
-	{ .duration_ms = 1800 },
-};
-
-static const struct kerfur_face_frame g_idle_drowse_frames[] = {
-	{ .duration_ms = 2200 },
-	{ .mouth_dy = 1, .duration_ms = 320 },
-	{ .duration_ms = 2400 },
-};
-
-static const struct kerfur_face_frame g_idle_playful_fg_frames[] = {
-	{ .duration_ms = 480 },
-	{ .eye_dy = -1, .duration_ms = 180 },
-	{ .eye_dy = 1, .duration_ms = 180 },
-	{ .duration_ms = 520 },
-};
-
 static const struct kerfur_face_frame g_react_blink_frames[] = {
 	{ .eye_mode = KERFUR_FACE_FRAME_EYE_BLINK, .duration_ms = 120 },
 	{ .eye_mode = KERFUR_FACE_FRAME_EYE_OPEN, .duration_ms = 100 },
@@ -268,54 +298,21 @@ static const struct kerfur_face_frame g_react_pet_bow_frames[] = {
 	{ .eye_dy = 1, .mouth_dy = 2, .duration_ms = 1200 },
 };
 
+static const struct kerfur_face_frame g_react_happy_pet_frames[] = {
+	{ .whisker_dy = 2, .duration_ms = 120 },
+	{ .whisker_dy = -2, .duration_ms = 120 },
+	{ .whisker_dy = 2, .duration_ms = 120 },
+	{ .whisker_dy = -1, .duration_ms = 170 },
+	{ .whisker_dy = 1, .duration_ms = 170 },
+	{ .duration_ms = 260 },
+};
+
 static const struct kerfur_face_frame g_react_happy_bounce_frames[] = {
 	{ .eye_dy = -1, .duration_ms = 180 },
 	{ .eye_dy = 1, .duration_ms = 180 },
 	{ .eye_dy = -1, .duration_ms = 180 },
 	{ .eye_dy = 1, .duration_ms = 180 },
 	{ .duration_ms = 220 },
-};
-
-static const struct kerfur_face_animation g_idle_breathe_fg = {
-	.name = "idle_breathe_fg",
-	.frames = g_idle_breathe_fg_frames,
-	.frame_count = ARRAY_SIZE(g_idle_breathe_fg_frames),
-	.loop = true,
-};
-
-static const struct kerfur_face_animation g_idle_breathe_ambient = {
-	.name = "idle_breathe_ambient",
-	.frames = g_idle_breathe_ambient_frames,
-	.frame_count = ARRAY_SIZE(g_idle_breathe_ambient_frames),
-	.loop = true,
-};
-
-static const struct kerfur_face_animation g_idle_alert_fg = {
-	.name = "idle_alert_fg",
-	.frames = g_idle_alert_fg_frames,
-	.frame_count = ARRAY_SIZE(g_idle_alert_fg_frames),
-	.loop = true,
-};
-
-static const struct kerfur_face_animation g_idle_alert_ambient = {
-	.name = "idle_alert_ambient",
-	.frames = g_idle_alert_ambient_frames,
-	.frame_count = ARRAY_SIZE(g_idle_alert_ambient_frames),
-	.loop = true,
-};
-
-static const struct kerfur_face_animation g_idle_drowse = {
-	.name = "idle_drowse",
-	.frames = g_idle_drowse_frames,
-	.frame_count = ARRAY_SIZE(g_idle_drowse_frames),
-	.loop = true,
-};
-
-static const struct kerfur_face_animation g_idle_playful_fg = {
-	.name = "idle_playful_fg",
-	.frames = g_idle_playful_fg_frames,
-	.frame_count = ARRAY_SIZE(g_idle_playful_fg_frames),
-	.loop = true,
 };
 
 static const struct kerfur_face_animation g_react_blink = {
@@ -364,6 +361,13 @@ static const struct kerfur_face_animation g_react_pet_bow = {
 	.name = "react_pet_bow",
 	.frames = g_react_pet_bow_frames,
 	.frame_count = ARRAY_SIZE(g_react_pet_bow_frames),
+	.loop = false,
+};
+
+static const struct kerfur_face_animation g_react_happy_pet = {
+	.name = "react_happy_pet",
+	.frames = g_react_happy_pet_frames,
+	.frame_count = ARRAY_SIZE(g_react_happy_pet_frames),
 	.loop = false,
 };
 
@@ -422,8 +426,9 @@ enum kerfur_face_visual kerfur_face_visual_for_expression(enum pet_expression ex
 	case PET_EXPR_NEEDY:
 		return KERFUR_FACE_CURIOUS;
 	case PET_EXPR_CONTENT:
-	case PET_EXPR_HAPPY:
 		return KERFUR_FACE_CONTENT;
+	case PET_EXPR_HAPPY:
+		return KERFUR_FACE_HAPPY;
 	case PET_EXPR_PLAYFUL:
 		return KERFUR_FACE_PLAYFUL;
 	case PET_EXPR_SLEEPY:
@@ -455,6 +460,16 @@ const char *kerfur_face_visual_str(enum kerfur_face_visual visual)
 	return kerfur_face_profile_get(visual)->name;
 }
 
+const struct kerfur_face_asset_pack *kerfur_face_assets_get(enum kerfur_face_visual visual)
+{
+	switch (visual) {
+	case KERFUR_FACE_HAPPY:
+		return &g_happy_assets;
+	default:
+		return &g_default_assets;
+	}
+}
+
 void kerfur_face_pose_init(enum kerfur_face_visual visual, struct kerfur_face_pose *pose)
 {
 	const struct kerfur_face_profile *profile = kerfur_face_profile_get(visual);
@@ -467,6 +482,8 @@ void kerfur_face_pose_init(enum kerfur_face_visual visual, struct kerfur_face_po
 	pose->eye_dy = profile->eye_dy;
 	pose->mouth_dx = profile->mouth_dx;
 	pose->mouth_dy = profile->mouth_dy;
+	pose->mouth_open_dy = 0;
+	pose->whisker_dy = 0;
 	pose->brow_dy = profile->brow_dy;
 	pose->flags = profile_flags(profile);
 	pose->eye_mode = profile->sleepy_eyes ? KERFUR_FACE_EYE_BLINK : KERFUR_FACE_EYE_OPEN;
@@ -491,6 +508,8 @@ bool kerfur_face_pose_apply_animation(struct kerfur_face_pose *pose,
 	pose->eye_dy += frame->eye_dy;
 	pose->mouth_dx += frame->mouth_dx;
 	pose->mouth_dy += frame->mouth_dy;
+	pose->mouth_open_dy += frame->mouth_open_dy;
+	pose->whisker_dy += frame->whisker_dy;
 	pose->brow_dy += frame->brow_dy;
 	pose->flags |= frame->set_flags;
 	pose->flags &= (uint8_t)~frame->clear_flags;
@@ -512,11 +531,23 @@ bool kerfur_face_pose_apply_animation(struct kerfur_face_pose *pose,
 const struct kerfur_face_animation *kerfur_face_idle_animation_get(enum kerfur_face_visual visual,
 								   bool ambient)
 {
+	ARG_UNUSED(visual);
+	ARG_UNUSED(ambient);
+
+	return NULL;
+
+	/*
+	 * Keep the tables in place for later tuning, but disable idle motion for now.
+	 * The user wants expressions to stay visually stable unless a reaction fires.
+	 */
+/*
 	switch (visual) {
 	case KERFUR_FACE_CALM:
 	case KERFUR_FACE_CONTENT:
 	case KERFUR_FACE_COZY:
 		return ambient ? &g_idle_breathe_ambient : &g_idle_breathe_fg;
+	case KERFUR_FACE_HAPPY:
+		return NULL;
 	case KERFUR_FACE_CURIOUS:
 		return ambient ? &g_idle_alert_ambient : &g_idle_alert_fg;
 	case KERFUR_FACE_PLAYFUL:
@@ -528,27 +559,18 @@ const struct kerfur_face_animation *kerfur_face_idle_animation_get(enum kerfur_f
 	default:
 		return NULL;
 	}
+*/
 }
 
-const struct kerfur_face_animation *kerfur_face_reaction_animation_get(enum micro_reaction_type reaction)
+const struct kerfur_face_animation *kerfur_face_reaction_animation_get(enum kerfur_face_visual visual,
+								      enum micro_reaction_type reaction)
 {
+	ARG_UNUSED(visual);
+
 	switch (reaction) {
 	case REACTION_BLINK:
-		return &g_react_blink;
 	case REACTION_WAKE_BLINK:
-		return &g_react_wake_blink;
-	case REACTION_GLANCE_LEFT:
-		return &g_react_glance_left;
-	case REACTION_GLANCE_RIGHT:
-		return &g_react_glance_right;
-	case REACTION_LOOK_UP:
-		return &g_react_look_up;
-	case REACTION_LOOK_DOWN:
-		return &g_react_look_down;
-	case REACTION_PET_BOW:
-		return &g_react_pet_bow;
-	case REACTION_HAPPY_BOUNCE:
-		return &g_react_happy_bounce;
+		return &g_react_blink;
 	default:
 		return NULL;
 	}

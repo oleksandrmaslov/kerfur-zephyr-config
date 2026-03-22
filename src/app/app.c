@@ -80,7 +80,6 @@ int app_run(void)
 		LOG_WRN("BLE scaffold not running (%d), continuing", err);
 	}
 
-	(void)app_event_publish(APP_EVENT_WAKE, 0);
 	last_frame_ms = now_ms;
 	last_state_log_ms = now_ms;
 	last_display_blanked = false;

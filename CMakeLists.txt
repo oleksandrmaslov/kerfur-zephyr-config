@@ -16,6 +16,7 @@ target_sources(app PRIVATE
     src/display/display_policy.c
     src/ui/ui_renderer.c
     src/ui/kerfur_faces.c
+    src/ui/exited_kerfur.c
     src/drivers/mock_inputs.c
     src/drivers/touch_input.c
     src/power/power_manager.c

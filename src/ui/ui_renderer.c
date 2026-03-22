@@ -140,19 +140,20 @@ static void resolve_face_pose(const struct pet_state *state, enum kerfur_face_vi
 	idle_animation = kerfur_face_idle_animation_get(visual, ambient);
 	(void)kerfur_face_pose_apply_animation(pose, idle_animation, now_ms);
 
-	reaction_animation = kerfur_face_reaction_animation_get(state->current_reaction);
+	reaction_animation = kerfur_face_reaction_animation_get(visual, state->current_reaction);
 	if (reaction_animation != NULL) {
 		(void)kerfur_face_pose_apply_animation(pose, reaction_animation,
 						      now_ms - state->last_reaction_timestamp_ms);
 	}
 }
 
-static bool should_blink(const struct pet_state *state, int64_t now_ms, bool ambient,
+static bool should_blink(const struct pet_state *state, enum kerfur_face_visual visual,
+			 int64_t now_ms, bool ambient,
 			 const struct kerfur_face_pose *pose)
 {
 	const int64_t blink_period_ms = ambient ? 8000 : 4200;
 	const bool reaction_anim_active =
-		kerfur_face_reaction_animation_get(state->current_reaction) != NULL;
+		kerfur_face_reaction_animation_get(visual, state->current_reaction) != NULL;
 	const int64_t blink_duration_ms =
 		((pose->flags & KERFUR_FACE_FLAG_SLEEPY) != 0U) ? 400 : 220;
 	const bool periodic = ((now_ms + (state->arousal * 31)) % blink_period_ms) < blink_duration_ms;
@@ -308,6 +309,7 @@ void ui_renderer_set_blanked(bool blanked)
 void ui_renderer_render(const struct pet_state *state, int64_t now_ms)
 {
 	const enum kerfur_face_visual visual = kerfur_face_visual_for_expression(state->current_expression);
+	const struct kerfur_face_asset_pack *assets = kerfur_face_assets_get(visual);
 	const bool ambient = (state->current_display_state == DISPLAY_AMBIENT);
 	struct kerfur_face_pose pose;
 	bool blink;
@@ -324,42 +326,52 @@ void ui_renderer_render(const struct pet_state *state, int64_t now_ms)
 	}
 
 	resolve_face_pose(state, visual, ambient, now_ms, &pose);
-	blink = should_blink(state, now_ms, ambient, &pose);
+	blink = should_blink(state, visual, now_ms, ambient, &pose);
 
 	update_contrast(state->current_display_state);
 	update_pixel_shift(ambient, now_ms);
 	lv_canvas_fill_bg(g_ui.canvas, lv_color_black(), LV_OPA_COVER);
 
-	left_eye_x = BASE_LEFT_EYE_X + pose.eye_dx + g_ui.ambient_shift_x;
-	right_eye_x = BASE_RIGHT_EYE_X + pose.eye_dx + g_ui.ambient_shift_x;
-	eye_y = BASE_EYE_Y + pose.eye_dy + g_ui.ambient_shift_y;
-	mouth_x = BASE_MOUTH_X + pose.mouth_dx + g_ui.ambient_shift_x;
-	mouth_y = BASE_MOUTH_Y + pose.mouth_dy + g_ui.ambient_shift_y;
-	brow_y = BASE_BROW_Y + pose.brow_dy + g_ui.ambient_shift_y;
+	left_eye_x = assets->eye_left_x + pose.eye_dx + g_ui.ambient_shift_x;
+	right_eye_x = assets->eye_right_x + pose.eye_dx + g_ui.ambient_shift_x;
+	eye_y = assets->eye_y + pose.eye_dy + g_ui.ambient_shift_y;
+	mouth_x = assets->mouth_x + pose.mouth_dx + g_ui.ambient_shift_x;
+	mouth_y = assets->mouth_y + pose.mouth_dy + g_ui.ambient_shift_y;
+	brow_y = assets->brow_y + pose.brow_dy + g_ui.ambient_shift_y;
 
 	if ((pose.flags & KERFUR_FACE_FLAG_SHOW_WHISKERS) != 0U) {
-		draw_bitmap(kerfur_face_whisker_left(), BASE_WHISKER_LEFT_X + g_ui.ambient_shift_x,
-			    BASE_WHISKER_Y + g_ui.ambient_shift_y, opa);
-		draw_bitmap(kerfur_face_whisker_right(), BASE_WHISKER_RIGHT_X + g_ui.ambient_shift_x,
-			    BASE_WHISKER_Y + g_ui.ambient_shift_y, opa);
+		draw_bitmap(assets->whisker_left,
+			    assets->whisker_left_x + g_ui.ambient_shift_x,
+			    assets->whisker_y + pose.whisker_dy + g_ui.ambient_shift_y, opa);
+		draw_bitmap(assets->whisker_right,
+			    assets->whisker_right_x + g_ui.ambient_shift_x,
+			    assets->whisker_y + pose.whisker_dy + g_ui.ambient_shift_y, opa);
 	}
 
 	if (blink) {
-		draw_bitmap(kerfur_face_eye_blink(), BASE_BLINK_LEFT_X + pose.eye_dx + g_ui.ambient_shift_x,
-			    BASE_BLINK_Y + pose.eye_dy + g_ui.ambient_shift_y, opa);
-		draw_bitmap(kerfur_face_eye_blink(), BASE_BLINK_RIGHT_X + pose.eye_dx + g_ui.ambient_shift_x,
-			    BASE_BLINK_Y + pose.eye_dy + g_ui.ambient_shift_y, opa);
+		draw_bitmap(assets->eye_blink,
+			    assets->blink_left_x + pose.eye_dx + g_ui.ambient_shift_x,
+			    assets->blink_y + pose.eye_dy + g_ui.ambient_shift_y, opa);
+		draw_bitmap(assets->eye_blink,
+			    assets->blink_right_x + pose.eye_dx + g_ui.ambient_shift_x,
+			    assets->blink_y + pose.eye_dy + g_ui.ambient_shift_y, opa);
 	} else {
-		draw_bitmap(kerfur_face_eye_open_left(), left_eye_x, eye_y, opa);
-		draw_bitmap(kerfur_face_eye_open_right(), right_eye_x, eye_y, opa);
+		draw_bitmap(assets->eye_open_left, left_eye_x, eye_y, opa);
+		draw_bitmap(assets->eye_open_right, right_eye_x, eye_y, opa);
 	}
 
-	draw_bitmap(kerfur_face_mouth(), mouth_x, mouth_y, opa);
+	draw_bitmap(assets->mouth, mouth_x, mouth_y, opa);
+
+	if (((pose.flags & KERFUR_FACE_FLAG_SHOW_MOUTH_OPEN) != 0U) && (assets->mouth_open != NULL)) {
+		draw_bitmap(assets->mouth_open,
+			    assets->mouth_open_x + g_ui.ambient_shift_x,
+			    assets->mouth_open_y + pose.mouth_open_dy + g_ui.ambient_shift_y, opa);
+	}
 
 	if ((pose.flags & KERFUR_FACE_FLAG_SHOW_BROWS) != 0U) {
-		draw_bitmap(kerfur_face_brow_left(), BASE_BROW_LEFT_X + g_ui.ambient_shift_x,
+		draw_bitmap(assets->brow_left, assets->brow_left_x + g_ui.ambient_shift_x,
 			    brow_y, opa);
-		draw_bitmap(kerfur_face_brow_right(), BASE_BROW_RIGHT_X + g_ui.ambient_shift_x,
+		draw_bitmap(assets->brow_right, assets->brow_right_x + g_ui.ambient_shift_x,
 			    brow_y, opa);
 	}
 
