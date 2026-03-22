@@ -1,40 +1,54 @@
 #include <stddef.h>
 
-#include <zephyr/sys/util.h>
-
-#include "ui/exited_kerfur.h"
 #include "ui/kerfur_faces.h"
 
-static uint8_t profile_flags(const struct kerfur_face_profile *profile)
-{
-	uint8_t flags = 0U;
-
-	if (profile->show_brows) {
-		flags |= KERFUR_FACE_FLAG_SHOW_BROWS;
-	}
-
-	if (profile->show_whiskers) {
-		flags |= KERFUR_FACE_FLAG_SHOW_WHISKERS;
-	}
-
-	if (profile->sleepy_eyes) {
-		flags |= KERFUR_FACE_FLAG_SLEEPY;
-	}
-
-	return flags;
-}
-
 /* Cat-style base assets ported from the existing kerfur_faces art set. */
-static const uint8_t image_eye_left_open_bits[] = {0x00,0x03,0xfc,0x00,0x00,0x00,0x3f,0xff,0x80,0x00,0x00,0xff,0xff,0xe0,0x00,0x01,0xff,0xff,0xf0,0x00,0x03,0xff,0xff,0xf8,0x00,0x07,0xff,0xbf,0xfc,0x00,0x0f,0xfc,0x03,0xfe,0x00,0x1f,0xe0,0x00,0xff,0x00,0x3f,0xc0,0x00,0x7f,0x80,0x3f,0x80,0x00,0x3f,0xc0,0x3f,0x00,0x00,0x1f,0xc0,0x7e,0x00,0x00,0x0f,0xc0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0xfc,0x00,0x00,0x07,0xe0,0xfc,0x00,0x00,0x03,0xf0,0xfc,0x00,0x00,0x03,0xf0,0xfc,0x00,0x00,0x03,0xf0,0xfc,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x0f,0xc0,0x3f,0x00,0x00,0x1f,0xc0,0x3f,0x80,0x00,0x3f,0xc0,0x3f,0xc0,0x00,0x7f,0x80,0x1f,0xe0,0x00,0xff,0x00,0x0f,0xfc,0x03,0xfe,0x00,0x07,0xff,0xbf,0xfc,0x00,0x03,0xff,0xff,0xf8,0x00,0x01,0xff,0xff,0xf0,0x00,0x00,0xff,0xff,0xe0,0x00,0x00,0x3f,0xff,0x80,0x00,0x00,0x03,0xfc,0x00,0x00};
+static const uint8_t image_eye_left_open_bits[] = {
+	0x00, 0x03, 0xfc, 0x00, 0x00, 0x00, 0x3f, 0xff, 0x80, 0x00, 0x00, 0xff,
+	0xff, 0xe0, 0x00, 0x01, 0xff, 0xff, 0xf0, 0x00, 0x03, 0xff, 0xff, 0xf8,
+	0x00, 0x07, 0xff, 0xbf, 0xfc, 0x00, 0x0f, 0xfc, 0x03, 0xfe, 0x00, 0x1f,
+	0xe0, 0x00, 0xff, 0x00, 0x3f, 0xc0, 0x00, 0x7f, 0x80, 0x3f, 0x80, 0x00,
+	0x3f, 0xc0, 0x3f, 0x00, 0x00, 0x1f, 0xc0, 0x7e, 0x00, 0x00, 0x0f, 0xc0,
+	0x7e, 0x00, 0x00, 0x07, 0xe0, 0x7e, 0x00, 0x00, 0x07, 0xe0, 0x7e, 0x00,
+	0x00, 0x07, 0xe0, 0xfc, 0x00, 0x00, 0x07, 0xe0, 0xfc, 0x00, 0x00, 0x03,
+	0xf0, 0xfc, 0x00, 0x00, 0x03, 0xf0, 0xfc, 0x00, 0x00, 0x03, 0xf0, 0xfc,
+	0x00, 0x00, 0x07, 0xe0, 0x7e, 0x00, 0x00, 0x07, 0xe0, 0x7e, 0x00, 0x00,
+	0x07, 0xe0, 0x7e, 0x00, 0x00, 0x07, 0xe0, 0x7e, 0x00, 0x00, 0x0f, 0xc0,
+	0x3f, 0x00, 0x00, 0x1f, 0xc0, 0x3f, 0x80, 0x00, 0x3f, 0xc0, 0x3f, 0xc0,
+	0x00, 0x7f, 0x80, 0x1f, 0xe0, 0x00, 0xff, 0x00, 0x0f, 0xfc, 0x03, 0xfe,
+	0x00, 0x07, 0xff, 0xbf, 0xfc, 0x00, 0x03, 0xff, 0xff, 0xf8, 0x00, 0x01,
+	0xff, 0xff, 0xf0, 0x00, 0x00, 0xff, 0xff, 0xe0, 0x00, 0x00, 0x3f, 0xff,
+	0x80, 0x00, 0x00, 0x03, 0xfc, 0x00, 0x00
+};
 
-static const uint8_t image_eye_right_open_bits[] = {0x00,0x03,0xfc,0x00,0x00,0x00,0x1f,0xff,0xc0,0x00,0x00,0x7f,0xff,0xf0,0x00,0x00,0xff,0xff,0xf8,0x00,0x01,0xff,0xff,0xfc,0x00,0x03,0xff,0xdf,0xfe,0x00,0x07,0xfc,0x03,0xff,0x00,0x0f,0xf0,0x00,0x7f,0x80,0x1f,0xe0,0x00,0x3f,0xc0,0x3f,0xc0,0x00,0x1f,0xc0,0x3f,0x80,0x00,0x0f,0xc0,0x3f,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x03,0xf0,0xfc,0x00,0x00,0x03,0xf0,0xfc,0x00,0x00,0x03,0xf0,0xfc,0x00,0x00,0x03,0xf0,0x7e,0x00,0x00,0x03,0xf0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0x7e,0x00,0x00,0x07,0xe0,0x3f,0x00,0x00,0x07,0xe0,0x3f,0x80,0x00,0x0f,0xc0,0x3f,0xc0,0x00,0x1f,0xc0,0x1f,0xe0,0x00,0x3f,0xc0,0x0f,0xf0,0x00,0x7f,0x80,0x07,0xfc,0x03,0xff,0x00,0x03,0xff,0xdf,0xfe,0x00,0x01,0xff,0xff,0xfc,0x00,0x00,0xff,0xff,0xf8,0x00,0x00,0x7f,0xff,0xf0,0x00,0x00,0x1f,0xff,0xc0,0x00,0x00,0x03,0xfc,0x00,0x00};
+static const uint8_t image_eye_right_open_bits[] = {
+	0x00, 0x03, 0xfc, 0x00, 0x00, 0x00, 0x1f, 0xff, 0xc0, 0x00, 0x00, 0x7f,
+	0xff, 0xf0, 0x00, 0x00, 0xff, 0xff, 0xf8, 0x00, 0x01, 0xff, 0xff, 0xfc,
+	0x00, 0x03, 0xff, 0xdf, 0xfe, 0x00, 0x07, 0xfc, 0x03, 0xff, 0x00, 0x0f,
+	0xf0, 0x00, 0x7f, 0x80, 0x1f, 0xe0, 0x00, 0x3f, 0xc0, 0x3f, 0xc0, 0x00,
+	0x1f, 0xc0, 0x3f, 0x80, 0x00, 0x0f, 0xc0, 0x3f, 0x00, 0x00, 0x07, 0xe0,
+	0x7e, 0x00, 0x00, 0x07, 0xe0, 0x7e, 0x00, 0x00, 0x07, 0xe0, 0x7e, 0x00,
+	0x00, 0x07, 0xe0, 0x7e, 0x00, 0x00, 0x03, 0xf0, 0xfc, 0x00, 0x00, 0x03,
+	0xf0, 0xfc, 0x00, 0x00, 0x03, 0xf0, 0xfc, 0x00, 0x00, 0x03, 0xf0, 0x7e,
+	0x00, 0x00, 0x03, 0xf0, 0x7e, 0x00, 0x00, 0x07, 0xe0, 0x7e, 0x00, 0x00,
+	0x07, 0xe0, 0x7e, 0x00, 0x00, 0x07, 0xe0, 0x3f, 0x00, 0x00, 0x07, 0xe0,
+	0x3f, 0x80, 0x00, 0x0f, 0xc0, 0x3f, 0xc0, 0x00, 0x1f, 0xc0, 0x1f, 0xe0,
+	0x00, 0x3f, 0xc0, 0x0f, 0xf0, 0x00, 0x7f, 0x80, 0x07, 0xfc, 0x03, 0xff,
+	0x00, 0x03, 0xff, 0xdf, 0xfe, 0x00, 0x01, 0xff, 0xff, 0xfc, 0x00, 0x00,
+	0xff, 0xff, 0xf8, 0x00, 0x00, 0x7f, 0xff, 0xf0, 0x00, 0x00, 0x1f, 0xff,
+	0xc0, 0x00, 0x00, 0x03, 0xfc, 0x00, 0x00
+};
 
 static const uint8_t image_eye_blink_bits[] = {
 	0xff, 0xff, 0xff, 0xfc, 0xff, 0xff, 0xff, 0xfc, 0xff, 0xff, 0xff, 0xfc,
 	0xff, 0xff, 0xff, 0xfc, 0xff, 0xff, 0xff, 0xfc
 };
 
-static const uint8_t image_mouth_bits[] = {0x01,0xf0,0x00,0x03,0xf8,0x00,0x01,0xf0,0x00,0x00,0xe0,0x00,0x00,0x00,0x00,0xc0,0xe0,0x60,0xe1,0xf0,0xe0,0xe3,0xb8,0xe0,0x7f,0xbf,0xc0,0x3f,0x1f,0x80};
+static const uint8_t image_mouth_bits[] = {
+	0x01, 0xf0, 0x00, 0x03, 0xf8, 0x00, 0x01, 0xf0, 0x00, 0x00, 0xe0, 0x00,
+	0x00, 0x00, 0x00, 0xc0, 0xe0, 0x60, 0xe1, 0xf0, 0xe0, 0xe3, 0xb8, 0xe0,
+	0x7f, 0xbf, 0xc0, 0x3f, 0x1f, 0x80
+};
 
 static const uint8_t image_whisker_left_bits[] = {
 	0x7e, 0xff, 0xfe, 0x00, 0x00, 0x3c, 0xff, 0xff
@@ -100,62 +114,6 @@ static const struct kerfur_bitmap g_brow_right = {
 	.data = image_brow_right_bits,
 };
 
-static const struct kerfur_face_asset_pack g_default_assets = {
-	.eye_open_left = &g_eye_left_open,
-	.eye_open_right = &g_eye_right_open,
-	.eye_blink = &g_eye_blink,
-	.mouth = &g_mouth,
-	.mouth_open = NULL,
-	.whisker_left = &g_whisker_left,
-	.whisker_right = &g_whisker_right,
-	.brow_left = &g_brow_left,
-	.brow_right = &g_brow_right,
-	.eye_left_x = 17,
-	.eye_right_x = 74,
-	.eye_y = 16,
-	.blink_left_x = 20,
-	.blink_right_x = 77,
-	.blink_y = 30,
-	.mouth_x = 54,
-	.mouth_y = 38,
-	.mouth_open_x = 54,
-	.mouth_open_y = 47,
-	.whisker_left_x = 0,
-	.whisker_right_x = 119,
-	.whisker_y = 46,
-	.brow_left_x = 46,
-	.brow_right_x = 72,
-	.brow_y = 8,
-};
-
-static const struct kerfur_face_asset_pack g_happy_assets = {
-	.eye_open_left = &g_exited_eye_left,
-	.eye_open_right = &g_exited_eye_right,
-	.eye_blink = &g_eye_blink,
-	.mouth = &g_mouth,
-	.mouth_open = NULL,
-	.whisker_left = &g_whisker_left,
-	.whisker_right = &g_whisker_right,
-	.brow_left = &g_brow_left,
-	.brow_right = &g_brow_right,
-	.eye_left_x = 20,
-	.eye_right_x = 68,
-	.eye_y = 18,
-	.blink_left_x = 23,
-	.blink_right_x = 71,
-	.blink_y = 30,
-	.mouth_x = 54,
-	.mouth_y = 38,
-	.mouth_open_x = 54,
-	.mouth_open_y = 47,
-	.whisker_left_x = 0,
-	.whisker_right_x = 119,
-	.whisker_y = 46,
-	.brow_left_x = 46,
-	.brow_right_x = 72,
-	.brow_y = 17,
-};
-
 static const struct kerfur_face_profile g_profiles[KERFUR_FACE_COUNT] = {
 	[KERFUR_FACE_CALM] = {
 		.visual = KERFUR_FACE_CALM,
@@ -189,18 +147,6 @@ static const struct kerfur_face_profile g_profiles[KERFUR_FACE_COUNT] = {
 		.mouth_dx = 0,
 		.mouth_dy = 2,
 		.brow_dy = 1,
-		.show_brows = true,
-		.show_whiskers = true,
-		.sleepy_eyes = false,
-	},
-	[KERFUR_FACE_HAPPY] = {
-		.visual = KERFUR_FACE_HAPPY,
-		.name = "HAPPY",
-		.eye_dx = 0,
-		.eye_dy = 0,
-		.mouth_dx = 0,
-		.mouth_dy = 0,
-		.brow_dy = 0,
 		.show_brows = true,
 		.show_whiskers = true,
 		.sleepy_eyes = false,
@@ -267,156 +213,6 @@ static const struct kerfur_face_profile g_profiles[KERFUR_FACE_COUNT] = {
 	},
 };
 
-static const struct kerfur_face_frame g_react_blink_frames[] = {
-	{ .eye_mode = KERFUR_FACE_FRAME_EYE_BLINK, .duration_ms = 120 },
-	{ .eye_mode = KERFUR_FACE_FRAME_EYE_OPEN, .duration_ms = 100 },
-};
-
-static const struct kerfur_face_frame g_react_wake_blink_frames[] = {
-	{ .eye_mode = KERFUR_FACE_FRAME_EYE_BLINK, .duration_ms = 140 },
-	{ .eye_mode = KERFUR_FACE_FRAME_EYE_OPEN, .eye_dy = -1, .duration_ms = 140 },
-	{ .eye_mode = KERFUR_FACE_FRAME_EYE_OPEN, .duration_ms = 220 },
-};
-
-static const struct kerfur_face_frame g_react_glance_left_frames[] = {
-	{ .eye_dx = -3, .duration_ms = 900 },
-};
-
-static const struct kerfur_face_frame g_react_glance_right_frames[] = {
-	{ .eye_dx = 3, .duration_ms = 900 },
-};
-
-static const struct kerfur_face_frame g_react_look_up_frames[] = {
-	{ .eye_dy = -2, .duration_ms = 900 },
-};
-
-static const struct kerfur_face_frame g_react_look_down_frames[] = {
-	{ .eye_dy = 2, .duration_ms = 900 },
-};
-
-static const struct kerfur_face_frame g_react_pet_bow_frames[] = {
-	{ .eye_dy = 1, .mouth_dy = 2, .duration_ms = 1200 },
-};
-
-static const struct kerfur_face_frame g_react_happy_pet_frames[] = {
-	{ .whisker_dy = 2, .duration_ms = 120 },
-	{ .whisker_dy = -2, .duration_ms = 120 },
-	{ .whisker_dy = 2, .duration_ms = 120 },
-	{ .whisker_dy = -1, .duration_ms = 170 },
-	{ .whisker_dy = 1, .duration_ms = 170 },
-	{ .duration_ms = 260 },
-};
-
-static const struct kerfur_face_frame g_react_happy_bounce_frames[] = {
-	{ .eye_dy = -1, .duration_ms = 180 },
-	{ .eye_dy = 1, .duration_ms = 180 },
-	{ .eye_dy = -1, .duration_ms = 180 },
-	{ .eye_dy = 1, .duration_ms = 180 },
-	{ .duration_ms = 220 },
-};
-
-static const struct kerfur_face_animation g_react_blink = {
-	.name = "react_blink",
-	.frames = g_react_blink_frames,
-	.frame_count = ARRAY_SIZE(g_react_blink_frames),
-	.loop = false,
-};
-
-static const struct kerfur_face_animation g_react_wake_blink = {
-	.name = "react_wake_blink",
-	.frames = g_react_wake_blink_frames,
-	.frame_count = ARRAY_SIZE(g_react_wake_blink_frames),
-	.loop = false,
-};
-
-static const struct kerfur_face_animation g_react_glance_left = {
-	.name = "react_glance_left",
-	.frames = g_react_glance_left_frames,
-	.frame_count = ARRAY_SIZE(g_react_glance_left_frames),
-	.loop = false,
-};
-
-static const struct kerfur_face_animation g_react_glance_right = {
-	.name = "react_glance_right",
-	.frames = g_react_glance_right_frames,
-	.frame_count = ARRAY_SIZE(g_react_glance_right_frames),
-	.loop = false,
-};
-
-static const struct kerfur_face_animation g_react_look_up = {
-	.name = "react_look_up",
-	.frames = g_react_look_up_frames,
-	.frame_count = ARRAY_SIZE(g_react_look_up_frames),
-	.loop = false,
-};
-
-static const struct kerfur_face_animation g_react_look_down = {
-	.name = "react_look_down",
-	.frames = g_react_look_down_frames,
-	.frame_count = ARRAY_SIZE(g_react_look_down_frames),
-	.loop = false,
-};
-
-static const struct kerfur_face_animation g_react_pet_bow = {
-	.name = "react_pet_bow",
-	.frames = g_react_pet_bow_frames,
-	.frame_count = ARRAY_SIZE(g_react_pet_bow_frames),
-	.loop = false,
-};
-
-static const struct kerfur_face_animation g_react_happy_pet = {
-	.name = "react_happy_pet",
-	.frames = g_react_happy_pet_frames,
-	.frame_count = ARRAY_SIZE(g_react_happy_pet_frames),
-	.loop = false,
-};
-
-static const struct kerfur_face_animation g_react_happy_bounce = {
-	.name = "react_happy_bounce",
-	.frames = g_react_happy_bounce_frames,
-	.frame_count = ARRAY_SIZE(g_react_happy_bounce_frames),
-	.loop = false,
-};
-
-static const struct kerfur_face_frame *animation_frame_get(const struct kerfur_face_animation *animation,
-							   int64_t elapsed_ms)
-{
-	uint32_t total_duration = 0U;
-	uint32_t cursor = 0U;
-	uint8_t i;
-
-	if ((animation == NULL) || (animation->frames == NULL) || (animation->frame_count == 0U)) {
-		return NULL;
-	}
-
-	for (i = 0U; i < animation->frame_count; i++) {
-		total_duration += animation->frames[i].duration_ms;
-	}
-
-	if (total_duration == 0U) {
-		return &animation->frames[0];
-	}
-
-	if (elapsed_ms < 0) {
-		elapsed_ms = 0;
-	}
-
-	if (animation->loop) {
-		elapsed_ms %= total_duration;
-	} else if ((uint64_t)elapsed_ms >= total_duration) {
-		return &animation->frames[animation->frame_count - 1U];
-	}
-
-	for (i = 0U; i < animation->frame_count; i++) {
-		cursor += animation->frames[i].duration_ms;
-		if ((uint64_t)elapsed_ms < cursor) {
-			return &animation->frames[i];
-		}
-	}
-
-	return &animation->frames[animation->frame_count - 1U];
-}
-
 enum kerfur_face_visual kerfur_face_visual_for_expression(enum pet_expression expression)
 {
 	switch (expression) {
@@ -426,9 +222,8 @@ enum kerfur_face_visual kerfur_face_visual_for_expression(enum pet_expression ex
 	case PET_EXPR_NEEDY:
 		return KERFUR_FACE_CURIOUS;
 	case PET_EXPR_CONTENT:
-		return KERFUR_FACE_CONTENT;
 	case PET_EXPR_HAPPY:
-		return KERFUR_FACE_HAPPY;
+		return KERFUR_FACE_CONTENT;
 	case PET_EXPR_PLAYFUL:
 		return KERFUR_FACE_PLAYFUL;
 	case PET_EXPR_SLEEPY:
@@ -458,122 +253,6 @@ const struct kerfur_face_profile *kerfur_face_profile_get(enum kerfur_face_visua
 const char *kerfur_face_visual_str(enum kerfur_face_visual visual)
 {
 	return kerfur_face_profile_get(visual)->name;
-}
-
-const struct kerfur_face_asset_pack *kerfur_face_assets_get(enum kerfur_face_visual visual)
-{
-	switch (visual) {
-	case KERFUR_FACE_HAPPY:
-		return &g_happy_assets;
-	default:
-		return &g_default_assets;
-	}
-}
-
-void kerfur_face_pose_init(enum kerfur_face_visual visual, struct kerfur_face_pose *pose)
-{
-	const struct kerfur_face_profile *profile = kerfur_face_profile_get(visual);
-
-	if (pose == NULL) {
-		return;
-	}
-
-	pose->eye_dx = profile->eye_dx;
-	pose->eye_dy = profile->eye_dy;
-	pose->mouth_dx = profile->mouth_dx;
-	pose->mouth_dy = profile->mouth_dy;
-	pose->mouth_open_dy = 0;
-	pose->whisker_dy = 0;
-	pose->brow_dy = profile->brow_dy;
-	pose->flags = profile_flags(profile);
-	pose->eye_mode = profile->sleepy_eyes ? KERFUR_FACE_EYE_BLINK : KERFUR_FACE_EYE_OPEN;
-}
-
-bool kerfur_face_pose_apply_animation(struct kerfur_face_pose *pose,
-				      const struct kerfur_face_animation *animation,
-				      int64_t elapsed_ms)
-{
-	const struct kerfur_face_frame *frame;
-
-	if (pose == NULL) {
-		return false;
-	}
-
-	frame = animation_frame_get(animation, elapsed_ms);
-	if (frame == NULL) {
-		return false;
-	}
-
-	pose->eye_dx += frame->eye_dx;
-	pose->eye_dy += frame->eye_dy;
-	pose->mouth_dx += frame->mouth_dx;
-	pose->mouth_dy += frame->mouth_dy;
-	pose->mouth_open_dy += frame->mouth_open_dy;
-	pose->whisker_dy += frame->whisker_dy;
-	pose->brow_dy += frame->brow_dy;
-	pose->flags |= frame->set_flags;
-	pose->flags &= (uint8_t)~frame->clear_flags;
-
-	switch (frame->eye_mode) {
-	case KERFUR_FACE_FRAME_EYE_OPEN:
-		pose->eye_mode = KERFUR_FACE_EYE_OPEN;
-		break;
-	case KERFUR_FACE_FRAME_EYE_BLINK:
-		pose->eye_mode = KERFUR_FACE_EYE_BLINK;
-		break;
-	default:
-		break;
-	}
-
-	return true;
-}
-
-const struct kerfur_face_animation *kerfur_face_idle_animation_get(enum kerfur_face_visual visual,
-								   bool ambient)
-{
-	ARG_UNUSED(visual);
-	ARG_UNUSED(ambient);
-
-	return NULL;
-
-	/*
-	 * Keep the tables in place for later tuning, but disable idle motion for now.
-	 * The user wants expressions to stay visually stable unless a reaction fires.
-	 */
-/*
-	switch (visual) {
-	case KERFUR_FACE_CALM:
-	case KERFUR_FACE_CONTENT:
-	case KERFUR_FACE_COZY:
-		return ambient ? &g_idle_breathe_ambient : &g_idle_breathe_fg;
-	case KERFUR_FACE_HAPPY:
-		return NULL;
-	case KERFUR_FACE_CURIOUS:
-		return ambient ? &g_idle_alert_ambient : &g_idle_alert_fg;
-	case KERFUR_FACE_PLAYFUL:
-		return ambient ? &g_idle_alert_ambient : &g_idle_playful_fg;
-	case KERFUR_FACE_SLEEPY:
-	case KERFUR_FACE_ASLEEP:
-		return &g_idle_drowse;
-	case KERFUR_FACE_ANNOYED:
-	default:
-		return NULL;
-	}
-*/
-}
-
-const struct kerfur_face_animation *kerfur_face_reaction_animation_get(enum kerfur_face_visual visual,
-								      enum micro_reaction_type reaction)
-{
-	ARG_UNUSED(visual);
-
-	switch (reaction) {
-	case REACTION_BLINK:
-	case REACTION_WAKE_BLINK:
-		return &g_react_blink;
-	default:
-		return NULL;
-	}
 }
 
 const struct kerfur_bitmap *kerfur_face_eye_open_left(void)
