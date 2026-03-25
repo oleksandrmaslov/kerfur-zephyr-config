@@ -28,7 +28,9 @@
       "indicator_x": 3,
       "indicator_y": 3,
       "overlay_x": 3,
-      "overlay_y": 3
+      "overlay_y": 3,
+      "effect_x": 104,
+      "effect_y": 6
     },
     "timing_ms": {
       "blink_default": 220,
@@ -147,8 +149,8 @@
           "file": "pupils/pupil_round_right.svg",
           "width": 24,
           "height": 25,
-          "anchor_x": 2,
-          "anchor_y": 2,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "dynamic"
         },
@@ -157,8 +159,8 @@
           "file": "pupils/pupil_round_left.svg",
           "width": 24,
           "height": 25,
-          "anchor_x": 2,
-          "anchor_y": 2,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "dynamic"
         },
@@ -187,8 +189,8 @@
           "file": "pupils/pupil_glossy_right.svg",
           "width": 24,
           "height": 25,
-          "anchor_x": 2,
-          "anchor_y": 2,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "dynamic"
         },
@@ -197,8 +199,8 @@
           "file": "pupils/pupil_glossy_left.svg",
           "width": 24,
           "height": 25,
-          "anchor_x": 2,
-          "anchor_y": 2,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "dynamic"
         },
@@ -207,8 +209,8 @@
           "file": "pupils/pupil_playful_right.svg",
           "width": 24,
           "height": 13,
-          "anchor_x": 2,
-          "anchor_y": 2,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "dynamic"
         },
@@ -217,8 +219,8 @@
           "file": "pupils/pupil_playful_left.svg",
           "width": 24,
           "height": 13,
-          "anchor_x": 2,
-          "anchor_y": 2,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "dynamic"
         },
@@ -247,8 +249,8 @@
           "file": "pupils/pupil_spiral.svg",
           "width": 25,
           "height": 23,
-          "anchor_x": 3,
-          "anchor_y": 3,
+          "anchor_x": 13,
+          "anchor_y": 11,
           "color_role": "foreground_black",
           "mode": "special"
         },
@@ -257,8 +259,8 @@
           "file": "pupils/pupil_disconnect_right.svg",
           "width": 24,
           "height": 25,
-          "anchor_x": 3,
-          "anchor_y": 3,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "special"
         },
@@ -267,8 +269,8 @@
           "file": "pupils/pupil_disconnect_left.svg",
           "width": 24,
           "height": 25,
-          "anchor_x": 3,
-          "anchor_y": 3,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "special"
         },
@@ -277,8 +279,8 @@
           "file": "pupils/pupil_charge_right.svg",
           "width": 24,
           "height": 25,
-          "anchor_x": 3,
-          "anchor_y": 3,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "special"
         },
@@ -287,8 +289,8 @@
           "file": "pupils/pupil_charge_left.svg",
           "width": 24,
           "height": 25,
-          "anchor_x": 3,
-          "anchor_y": 3,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "special"
         },
@@ -297,8 +299,18 @@
           "file": "pupils/pupil_low_batt_left.svg",
           "width": 24,
           "height": 25,
-          "anchor_x": 3,
-          "anchor_y": 3,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "special"
+        },
+        {
+          "id": "pupil_low_batt_right",
+          "file": "pupils/pupil_low_batt_right.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
           "color_role": "foreground_black",
           "mode": "special"
         },
@@ -341,7 +353,7 @@
           "file": "eyebrows/brow_angry.svg",
           "width": 14,
           "height": 10,
-          "anchor_x": 2,
+          "anchor_x": 8,
           "anchor_y": 1,
           "mirrorable": true
         }
@@ -403,11 +415,12 @@
           "width": 8,
           "height": 8,
           "anchor_x": 18,
-          "anchor_y": 3
+          "anchor_y": 3,
+          "mirror_right": true
         },
         {
           "id": "whiskers_horny",
-          "file": "whiskers/whiskers horny.svg",
+          "file": "whiskers/whiskers_horny.svg",
           "width": 16,
           "height": 8,
           "anchor_x": 18,
@@ -498,6 +511,7 @@
       ]
     },
 
+
     "overlays": {
       "type": "runtime_or_bitmap",
       "items": [
@@ -516,7 +530,7 @@
         }
       ]
     }
-  },
+  }, 
 
   "blink_profiles": [
     {
@@ -609,11 +623,11 @@
       "id": "PET_EXPR_CALM",
       "left_eye_white": "eye_white_open_round",
       "right_eye_white": "eye_white_open_round",
-      "left_eyeball": "pupil_round",
-      "right_eyeball": "pupil_round",
+      "left_eyeball": "pupil_round_left",
+      "right_eyeball": "pupil_round_right",
       "left_brow": "brow_neutral",
       "right_brow": "brow_neutral",
-      "mouth": "mouth_cat_smile_small",
+      "mouth": "mouth_default",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_legacy_default",
       "base_look": { "x": 0, "y": 0 },
@@ -625,11 +639,11 @@
       "id": "PET_EXPR_CURIOUS",
       "left_eye_white": "eye_white_open_round",
       "right_eye_white": "eye_white_open_round",
-      "left_eyeball": "pupil_glossy",
-      "right_eyeball": "pupil_glossy",
-      "left_brow": "brow_soft",
-      "right_brow": "brow_soft",
-      "mouth": "mouth_cat_smile_small",
+      "left_eyeball": "pupil_glossy_left",
+      "right_eyeball": "pupil_glossy_right",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_default",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_legacy_default",
       "base_look": { "x": 15, "y": 0 },
@@ -641,11 +655,11 @@
       "id": "PET_EXPR_CONTENT",
       "left_eye_white": "eye_white_open_round",
       "right_eye_white": "eye_white_open_round",
-      "left_eyeball": "pupil_glossy",
-      "right_eyeball": "pupil_glossy",
-      "left_brow": "brow_soft",
-      "right_brow": "brow_soft",
-      "mouth": "mouth_cat_smile_small",
+      "left_eyeball": "pupil_glossy_left",
+      "right_eyeball": "pupil_glossy_right",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_half_open",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_legacy_default",
       "base_look": { "x": 0, "y": 5 },
@@ -657,11 +671,11 @@
       "id": "PET_EXPR_HAPPY",
       "left_eye_white": "eye_white_open_round",
       "right_eye_white": "eye_white_open_round",
-      "left_eyeball": "pupil_glossy",
-      "right_eyeball": "pupil_glossy",
-      "left_brow": "brow_soft",
-      "right_brow": "brow_soft",
-      "mouth": "mouth_cat_open_happy",
+      "left_eyeball": "pupil_glossy_left",
+      "right_eyeball": "pupil_glossy_right",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_happy_open",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_legacy_default",
       "base_look": { "x": 0, "y": 0 },
@@ -673,11 +687,11 @@
       "id": "PET_EXPR_PLAYFUL",
       "left_eye_white": "eye_white_half_playful",
       "right_eye_white": "eye_white_half_playful",
-      "left_eyeball": "pupil_round",
-      "right_eyeball": "pupil_round",
-      "left_brow": "brow_soft",
-      "right_brow": "brow_soft",
-      "mouth": "mouth_cat_open_happy",
+      "left_eyeball": "pupil_playful_left",
+      "right_eyeball": "pupil_playful_right",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_happy_open",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_legacy_default",
       "base_look": { "x": 0, "y": 0 },
@@ -686,25 +700,29 @@
     },
     {
       "id": "PET_EXPR_SLEEPY",
-      "left_eye_white": "eye_white_sleepy_flat",
-      "right_eye_white": "eye_white_sleepy_flat",
-      "left_eyeball": "pupil_round",
-      "right_eyeball": "pupil_round",
-      "left_brow": "brow_sleepy",
-      "right_brow": "brow_sleepy",
-      "mouth": "mouth_sleepy",
+      "left_eye_white": "eye_white_blink",
+      "right_eye_white": "eye_white_blink",
+      "left_eyeball": "pupil_none",
+      "right_eyeball": "pupil_none",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_default",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_legacy_sleepy",
       "base_look": { "x": 0, "y": 10 },
       "allow_dynamic_pupils": true,
-      "special_eye_mode": false
+      "special_eye_mode": false,
+      "slot_overrides": {    
+        "left_brow": { "dx": -8,"dy": 7},
+        "right_brow": { "dx": 8, "dy": 7 }
+      }
     },
     {
       "id": "PET_EXPR_NEEDY",
-      "left_eye_white": "eye_white_open_round",
-      "right_eye_white": "eye_white_open_round",
-      "left_eyeball": "pupil_round",
-      "right_eyeball": "pupil_round",
+      "left_eye_white": "eye_white_blink_crying",
+      "right_eye_white": "eye_white_blink_crying",
+      "left_eyeball": "pupil_none",
+      "right_eyeball": "pupil_none",
       "left_brow": "brow_soft",
       "right_brow": "brow_soft",
       "mouth": "mouth_sad",
@@ -712,38 +730,58 @@
       "blink_profile": "blink_legacy_default",
       "base_look": { "x": 0, "y": 8 },
       "allow_dynamic_pupils": true,
-      "special_eye_mode": false
+      "special_eye_mode": false,
+      "slot_overrides": {    
+        "left_brow": { "dx": -5,"dy": 7},
+        "right_brow": { "dx": 7, "dy": 7 },
+        "mouth": { "dx": 3, "dy": 0 }
+      }
     },
     {
       "id": "PET_EXPR_LONELY",
-      "left_eye_white": "eye_white_open_round",
-      "right_eye_white": "eye_white_open_round",
+      "left_eye_white": "eye_white_lonely",
+      "right_eye_white": "eye_white_lonely",
       "left_eyeball": "pupil_none",
       "right_eyeball": "pupil_none",
-      "left_brow": "brow_sleepy",
-      "right_brow": "brow_sleepy",
+      "left_brow": "brow_soft",
+      "right_brow": "brow_soft",
       "mouth": "mouth_sad",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_legacy_default",
       "base_look": { "x": 0, "y": 10 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
-      "default_effects": ["effect_tear_small"]
+      "descriprion": "when this expression is active, the blink eye white replaced with blink crying variant",
+      "slot_overrides": {  
+         "left_eye_white": { "dx": -1, "dy": 1},
+         "right_eye_white": { "dx": 3, "dy": 1},
+          "left_brow": { "dx": 3, "dy": 4 },
+          "right_brow": { "dx": -1, "dy": 4 },
+          "mouth": { "dx": 3, "dy": 0 }
+        }
     },
     {
       "id": "PET_EXPR_ANNOYED",
-      "left_eye_white": "eye_white_wide",
-      "right_eye_white": "eye_white_wide",
-      "left_eyeball": "pupil_round",
-      "right_eyeball": "pupil_round",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "left_eyeball": "pupil_annoyed",
+      "right_eyeball": "pupil_annoyed",
       "left_brow": "brow_angry",
       "right_brow": "brow_angry",
-      "mouth": "mouth_flat",
+      "mouth": "mouth_annoyed",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_legacy_default",
       "base_look": { "x": 0, "y": 0 },
       "allow_dynamic_pupils": true,
-      "special_eye_mode": false
+      "special_eye_mode": false,
+      "description": "A generally annoyed or displeased expression, pupils moving a bit chaotically to reflect agitation, can be used for various negative reactions that aren't strong enough to warrant a full 'overstimulated' expression",
+      "slot_overrides" :{
+      "mouth" : { "dx": -10, "dy": 11 },
+      "left_brow" : { "dx": -4,"dy": -1},
+      "right_brow" : { "dx": 1, "dy": -1},
+      "left_eyeball" : { "dx" :14, "dy": 15},
+      "right_eyeball" : { "dx": 15, "dy": 14}
+      }
     },
     {
       "id": "PET_EXPR_OVERSTIMULATED",
@@ -751,60 +789,61 @@
       "right_eye_white": "eye_white_open_round",
       "left_eyeball": "pupil_spiral",
       "right_eyeball": "pupil_spiral",
-      "left_brow": "brow_angry",
-      "right_brow": "brow_angry",
-      "mouth": "mouth_cat_smile_small",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_half_open",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_disabled",
       "base_look": { "x": 0, "y": 0 },
       "allow_dynamic_pupils": false,
-      "special_eye_mode": true
+      "special_eye_mode": true,
+      "slot_overrides" :{
+      "left_eyeball": {"dx" : -7, "dy": -5},
+      "right_eyeball": {"dx" : -7, "dy": -5}
+      }
     },
     {
       "id": "PET_EXPR_COZY",
       "left_eye_white": "eye_white_half_soft",
       "right_eye_white": "eye_white_half_soft",
-      "left_eyeball": "pupil_round",
-      "right_eyeball": "pupil_round",
-      "left_brow": "brow_sleepy",
-      "right_brow": "brow_sleepy",
-      "mouth": "mouth_cat_smile_small",
+      "left_eyeball": "pupil_cozy_left",
+      "right_eyeball": "pupil_cozy_right",
+      "left_brow": "brow_soft",
+      "right_brow": "brow_soft",
+      "mouth": "mouth_default",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_legacy_sleepy",
       "base_look": { "x": 0, "y": 5 },
       "allow_dynamic_pupils": true,
-      "special_eye_mode": false
-    },
-    {
-      "id": "PET_EXPR_DRAINED",
-      "left_eye_white": "eye_white_sleepy_flat",
-      "right_eye_white": "eye_white_sleepy_flat",
-      "left_eyeball": "pupil_low_batt",
-      "right_eyeball": "pupil_low_batt",
-      "left_brow": "brow_sleepy",
-      "right_brow": "brow_sleepy",
-      "mouth": "mouth_flat",
-      "whiskers": "whiskers_default",
-      "blink_profile": "blink_legacy_sleepy",
-      "base_look": { "x": 0, "y": 8 },
-      "allow_dynamic_pupils": false,
-      "special_eye_mode": true
+      "special_eye_mode": false,
+      "slot_overrides" :{
+        "left_eyeball": {"dx" : 4, "dy": 0},
+        "right_eyeball": {"dx" : 4, "dy": 0},
+        "left_brow": { "dx": -8,"dy": 6},
+        "right_brow": { "dx": 8, "dy": 6 }
+      }
     },
     {
       "id": "PET_EXPR_ASLEEP",
-      "left_eye_white": "eye_white_sleepy_flat",
-      "right_eye_white": "eye_white_sleepy_flat",
+      "left_eye_white": "eye_white_blink",
+      "right_eye_white": "eye_white_blink",
       "left_eyeball": "pupil_none",
       "right_eyeball": "pupil_none",
-      "left_brow": "brow_sleepy",
-      "right_brow": "brow_sleepy",
-      "mouth": "mouth_cat_smile_small",
+      "left_brow": "brow_soft",
+      "right_brow": "brow_soft",
+      "mouth": "mouth_sad",
       "whiskers": "whiskers_default",
       "blink_profile": "blink_disabled",
       "base_look": { "x": 0, "y": 0 },
       "allow_dynamic_pupils": false,
       "special_eye_mode": false,
-      "default_effects": ["effect_zzz"]
+      "default_effects": ["effect_zzz"],
+      "slot_overrides" :{
+        "left_brow": { "dx": -8,"dy": 6},
+        "right_brow": { "dx": 8, "dy": 6 },
+        "mouth": { "dx": 3, "dy": 0 }
+
+      }
     }
   ],
 
@@ -835,69 +874,128 @@
       "micro_animation": "glance_right"
     },
     {
-      "id": "REACTION_WAKE_BLINK",
-      "duration_ms": 350,
-      "blink_override": "blink_legacy_default",
-      "look_offset": { "x": 0, "y": -10 }
-    },
-    {
       "id": "REACTION_STARTLE",
       "duration_ms": 1000,
-      "temporary_left_eye_white": "eye_white_wide",
-      "temporary_right_eye_white": "eye_white_wide",
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "description": "adds a micro startle eye animation, to mimic surprise or sudden reactions, can be used in combination with other reactions or expressions for more impact",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "left_eyeball": "pupil_startle",
+      "right_eyeball": "pupil_startle",
+      "temporary_effects": [
+        { "effect_id": "effect_tear", "x": 8, "y": 14 },
+        { "effect_id": "effect_tear", "x": 15, "y": 52 },
+        { "effect_id": "effect_tear", "x": 115, "y": 8 },
+        { "effect_id": "effect_tear", "x": 109, "y": 49 }
+      ],
       "look_offset": { "x": 0, "y": -10 }
     },
     {
       "id": "REACTION_PET_BOW",
       "duration_ms": 1200,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CONTENT",
+      "right_eye_white": "eye_white_squeezed_x",
+      "left_eye_white": "eye_white_squeezed_x",
+      "right_eyeball": "pupil_none",
+      "left_eyeball": "pupil_none",
+      "mouth": "mouth_happy_open",
+      "slot_overrides":{
+        "right_eye_white": {"dx": -9, "dy": 0},
+        "left_brow": { "dx": 0,"dy": 9},
+        "right_brow": { "dx": 0, "dy": 9 }
+      },
+      "description": "Whiskers whiggle once per activation, find the reference in the code",
+
       "look_offset": { "x": 0, "y": 12 }
     },
     {
       "id": "REACTION_HAPPY_BOUNCE",
       "duration_ms": 1200,
-      "temporary_effect": "effect_spark"
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_HAPPY"
     },
     {
       "id": "REACTION_NOTIF_PING",
-      "duration_ms": 1000,
-      "temporary_indicator": "icon_bt",
-      "temporary_effect": "effect_spark"
+      "duration_ms": 10000,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "mouth": "mouth_half_open",
+      "left_eye_white" : "eye_white_squeezed_x",
+      "left_eyeball": "pupil_none",
+      "indicator": "icon_bt",
+      "description": "Indicates a new notification, changes between calm left eye and a squeezed X eye once per half second for 10 seconds overall"
     },
     {
       "id": "REACTION_NOTIF_BURST",
       "duration_ms": 1600,
-      "temporary_effect": "effect_spark",
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "left_eyeball": "pupil_annoyed",
+      "right_eyeball": "pupil_annoyed",
+      "slot_overrides" :{
+      "mouth" : { "dx": 0, "dy": 8 },
+      "left_brow" : { "dx": -9,"dy": 0},
+      "right_brow" : { "dx": 9, "dy": 0},
+      "left_eyeball" : { "dx" :14, "dy": 15},
+      "right_eyeball" : { "dx": 15, "dy": 14}
+      },
       "look_offset": { "x": 0, "y": -5 }
+  
     },
     {
       "id": "REACTION_CONNECT_SPARK",
       "duration_ms": 1400,
-      "temporary_indicator": "icon_bt",
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CONTENT",
+      "whiskers": "whiskers_horny",
+      "mouth": "mouth_happy_open",
+      "indicator": "icon_bt",
       "temporary_effect": "effect_spark"
     },
     {
       "id": "REACTION_DISCONNECT_SCAN",
       "duration_ms": 1600,
-      "temporary_left_eyeball": "pupil_disconnect",
-      "temporary_right_eyeball": "pupil_disconnect"
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "allow_dynamic_pupils": true,
+      "left_eyeball": "pupil_disconnect_left",
+      "right_eyeball": "pupil_disconnect_right"
     },
     {
       "id": "REACTION_CHARGE_PULSE",
       "duration_ms": 2200,
-      "temporary_left_eyeball": "pupil_charge",
-      "temporary_right_eyeball": "pupil_charge",
-      "temporary_overlay": "overlay_battery_percent"
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "allow_dynamic_pupils": true,
+      "left_eyeball": "pupil_charge_left",
+      "right_eyeball": "pupil_charge_right",
+      "overlay": "overlay_battery_percent"
     },
     {
       "id": "REACTION_LOW_BATT_SAG",
       "duration_ms": 1800,
-      "temporary_left_eyeball": "pupil_low_batt",
-      "temporary_right_eyeball": "pupil_low_batt"
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "mouth": "mouth_sad",
+      "allow_dynamic_pupils": false,
+      "left_eyeball": "pupil_low_batt_left",
+      "right_eyeball": "pupil_low_batt_right",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "slot_overrides" :{
+      "mouth" : { "dx": 0, "dy": 3 }
+    },
+      "temporary_effects": [
+        { "effect_id": "effect_tear", "x": 100, "y": 50 }
+      ]
     },
     {
       "id": "REACTION_SLEEP_FADE",
       "duration_ms": 1200,
-      "temporary_effect": "effect_zzz"
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_ASLEEP"
     },
     {
       "id": "REACTION_LOOK_UP",

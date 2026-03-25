@@ -1,0 +1,250 @@
+:root {
+  color-scheme: dark;
+  --bg: #151515;
+  --panel: #1f1f1f;
+  --panel-border: #303030;
+  --text: #ece7da;
+  --muted: #b7b0a0;
+  --accent: #d8c089;
+  --danger: #f29d8f;
+  --stage-bg: #000000;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(216, 192, 137, 0.08), transparent 32%),
+    linear-gradient(180deg, #111111, #181818 48%, #101010);
+  color: var(--text);
+}
+
+button,
+select,
+input {
+  font: inherit;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.topbar h1 {
+  margin: 0 0 4px;
+  font-size: 1.3rem;
+}
+
+.topbar p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+}
+
+button {
+  padding: 10px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: #272727;
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 18px;
+  padding: 18px 24px 24px;
+}
+
+.panel {
+  background: rgba(31, 31, 31, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+}
+
+.controls {
+  padding: 16px;
+  align-self: start;
+  position: sticky;
+  top: 18px;
+}
+
+.field,
+.toggle {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.field span,
+.toggle span {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+select,
+input[type="range"] {
+  width: 100%;
+}
+
+select {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: #121212;
+  color: var(--text);
+}
+
+.toggle {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.toggle input {
+  margin: 0;
+}
+
+.info-block + .info-block {
+  margin-top: 18px;
+}
+
+.info-block h2 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+}
+
+.status-output {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.info-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.info-list li + li {
+  margin-top: 6px;
+}
+
+.preview-column {
+  display: grid;
+  gap: 18px;
+}
+
+.preview-card {
+  padding: 16px;
+}
+
+.card-head {
+  margin-bottom: 12px;
+}
+
+.card-head h2 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.card-head p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.preview-shell {
+  position: relative;
+  overflow: auto;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(216, 192, 137, 0.06), transparent 24%),
+    var(--stage-bg);
+  min-height: 180px;
+  padding: 16px;
+}
+
+.generated-stage {
+  position: relative;
+  transform-origin: top left;
+  image-rendering: pixelated;
+}
+
+.generated-stage.grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+  background-size: 8px 8px;
+}
+
+.asset-layer,
+.eye-layer,
+.overlay-text {
+  position: absolute;
+}
+
+.asset-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+.mirrored {
+  transform: scaleX(-1);
+}
+
+.pupil-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.pupil-image {
+  position: absolute;
+  image-rendering: pixelated;
+}
+
+.overlay-text {
+  font: 600 8px/1 "Consolas", "Courier New", monospace;
+  color: #ffffff;
+  white-space: pre;
+}
+
+.reference-image {
+  display: block;
+  transform-origin: top left;
+  image-rendering: pixelated;
+}
+
+#reaction-reference-card[hidden] {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .controls {
+    position: static;
+  }
+}
