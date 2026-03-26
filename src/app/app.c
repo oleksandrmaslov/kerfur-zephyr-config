@@ -8,6 +8,7 @@
 #include "ble/ble_manager.h"
 #include "core/event_bus.h"
 #include "display/display_policy.h"
+#include "drivers/motion_classifier.h"
 #include "drivers/mock_inputs.h"
 #include "drivers/touch_input.h"
 #include "power/power_manager.h"
@@ -36,6 +37,7 @@ static void app_handle_event(struct pet_state *pet, const struct app_event *even
 	behavior_engine_handle_event(pet, event);
 	power_manager_on_event(event, pet);
 	display_policy_on_event(pet, event);
+	motion_classifier_on_event(event, pet);
 
 	if (event->type == APP_EVENT_FACE_DEBUG_DUMP) {
 		ui_renderer_request_debug_dump();
@@ -61,6 +63,7 @@ int app_run(void)
 	behavior_engine_init(&pet, now_ms);
 	power_manager_init(now_ms);
 	display_policy_init(&pet, now_ms);
+	(void)motion_classifier_init(now_ms);
 	log_pet_snapshot(&pet, "Boot");
 
 	err = ui_renderer_init();

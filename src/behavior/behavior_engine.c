@@ -17,8 +17,10 @@ struct behavior_runtime {
 	uint8_t ambient_energy_decay_accum;
 	uint8_t five_min_accum;
 	uint8_t thirty_min_accum;
+	int32_t step_day_index;
 	enum pet_expression forced_expression;
 	bool forced_expression_active;
+	bool step_day_valid;
 };
 
 static struct behavior_runtime g_runtime;
@@ -59,6 +61,47 @@ static int16_t clamp_look_range(int value)
 static uint8_t effective_walking_confidence(const struct pet_state *state)
 {
 	return MAX(state->walk_confidence, state->walking_confidence);
+}
+
+static bool pet_time_is_valid(const struct pet_state *state)
+{
+	return state->time_valid && (state->unix_time_at_sync > 0);
+}
+
+static int32_t current_local_day_index(const struct pet_state *state, int64_t now_ms)
+{
+	int64_t elapsed_s;
+	int64_t local_s;
+
+	elapsed_s = (now_ms - state->uptime_at_sync_ms) / MSEC_PER_SEC;
+	local_s = state->unix_time_at_sync + elapsed_s + ((int64_t)state->tz_offset_minutes * 60);
+	if (local_s < 0) {
+		return 0;
+	}
+
+	return (int32_t)(local_s / 86400LL);
+}
+
+static void sync_daily_step_counter(struct pet_state *state, int64_t now_ms)
+{
+	int32_t local_day_index;
+
+	if (!pet_time_is_valid(state)) {
+		return;
+	}
+
+	local_day_index = current_local_day_index(state, now_ms);
+	if (!g_runtime.step_day_valid) {
+		g_runtime.step_day_index = local_day_index;
+		g_runtime.step_day_valid = true;
+		return;
+	}
+
+	if (local_day_index != g_runtime.step_day_index) {
+		state->step_count_today = 0U;
+		g_runtime.step_day_index = local_day_index;
+		LOG_INF("Step day rollover -> local_day=%d", local_day_index);
+	}
 }
 
 static void clamp_state(struct pet_state *state)
@@ -206,7 +249,15 @@ static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 	    ((now_ms - state->last_walk_timestamp_ms) > (12 * MSEC_PER_SEC))) {
 		state->walk_confidence = 0;
 		state->walking_confidence = 0;
+		state->walking_active = false;
 	}
+
+	if (state->walking_active &&
+	    ((now_ms - state->last_walk_timestamp_ms) > (18 * MSEC_PER_SEC))) {
+		state->walking_active = false;
+	}
+
+	sync_daily_step_counter(state, now_ms);
 }
 
 static void apply_tick_10s(struct pet_state *state, int64_t now_ms)
@@ -248,6 +299,10 @@ static void apply_tick_60s(struct pet_state *state, int64_t now_ms)
 		state->boredom += 1;
 	}
 
+	if (state->walking_active && (no_real_interaction_ms >= (2 * 60 * MSEC_PER_SEC))) {
+		state->walking_active = false;
+	}
+
 	if (state->notification_burst_level > 0U) {
 		state->notification_burst_level--;
 	}
@@ -273,11 +328,13 @@ static bool event_is_real_interaction(enum app_event_type type, const struct pet
 	case APP_EVENT_USER_PET_SOFT:
 	case APP_EVENT_USER_PET_LONG:
 	case APP_EVENT_USER_HOLD:
+	case APP_EVENT_PICKED_UP:
+	case APP_EVENT_IN_HAND_ENTER:
 	case APP_EVENT_APP_SESSION_START:
 	case APP_EVENT_CHARGER_CONNECTED:
 		return true;
 	case APP_EVENT_STEP_BATCH:
-		return state->ble_connected && (effective_walking_confidence(state) >= 60U);
+		return state->walking_active || (effective_walking_confidence(state) >= 60U);
 	default:
 		return false;
 	}
@@ -349,6 +406,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->sleepiness -= 4;
 		state->stress += 1;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
 		break;
 
@@ -359,6 +417,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->sleepiness -= 6;
 		state->stress += (state->trust >= 40) ? 2 : 5;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
 		break;
 
@@ -369,7 +428,11 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->arousal += 10;
 		state->sleepiness -= 8;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		state->last_rough_event_timestamp_ms = event->timestamp_ms;
+		state->pickup_confidence = (uint8_t)MAX(0, (int)state->pickup_confidence - 20);
+		state->in_hand_confidence = (uint8_t)MAX(0, (int)state->in_hand_confidence - 25);
+		state->walking_active = false;
 		trigger_reaction(state, REACTION_STARTLE, event->timestamp_ms);
 		break;
 
@@ -378,27 +441,38 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->trust -= 2;
 		state->arousal += 8;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		state->last_rough_event_timestamp_ms = event->timestamp_ms;
+		state->pickup_confidence = (uint8_t)MAX(0, (int)state->pickup_confidence - 15);
+		state->in_hand_confidence = (uint8_t)MAX(0, (int)state->in_hand_confidence - 20);
+		state->walking_active = false;
 		trigger_reaction(state, REACTION_STARTLE, event->timestamp_ms);
 		break;
 
 	case APP_EVENT_MOTION_WAKE:
 		state->arousal += 3;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
 		break;
 
 	case APP_EVENT_WALKING_START:
-		state->walk_confidence = 80;
-		state->walking_confidence = 80;
+		state->walk_confidence = (uint8_t)MAX(state->walk_confidence, 80);
+		state->walking_confidence = (uint8_t)MAX(state->walking_confidence, 80);
+		state->walking_active = true;
+		state->walking_session_start_ms = event->timestamp_ms;
 		state->last_walk_timestamp_ms = event->timestamp_ms;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		trigger_reaction(state, REACTION_LOOK_UP, event->timestamp_ms);
 		break;
 
 	case APP_EVENT_WALKING_STOP:
-		state->walk_confidence = 0;
-		state->walking_confidence = 0;
+		state->walking_confidence = (uint8_t)MAX(0, event->param);
+		state->walk_confidence = state->walking_confidence;
+		state->walking_active = false;
+		state->last_walk_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		break;
 
 	case APP_EVENT_STEP_BATCH:
@@ -406,6 +480,9 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->boredom -= MIN((steps / 2), 6);
 		state->sleepiness -= 2;
 		state->curiosity += 2;
+		if (state->walking_active || (effective_walking_confidence(state) >= 60U)) {
+			state->walking_active = true;
+		}
 		if (state->ble_connected && (steps > 0)) {
 			state->attachment += 1;
 		}
@@ -414,9 +491,61 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 			state->total_steps_since_boot += (uint32_t)steps;
 			state->last_motion_timestamp_ms = event->timestamp_ms;
 			state->last_walk_timestamp_ms = event->timestamp_ms;
-			state->walk_confidence = (uint8_t)MIN(100, state->walk_confidence + 5);
+			state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+			if (event->payload.step_batch.from_hw_counter) {
+				state->last_hw_step_counter = event->payload.step_batch.hw_counter;
+			}
+			state->walk_confidence =
+				(uint8_t)MIN(100, MAX(state->walk_confidence,
+						       event->payload.step_batch.walking_confidence));
 			state->walking_confidence = state->walk_confidence;
+			state->walking_active = state->walking_confidence >= 70U;
+			if (state->walking_active && (state->walking_session_start_ms == 0LL)) {
+				state->walking_session_start_ms = event->timestamp_ms;
+			}
 		}
+		break;
+
+	case APP_EVENT_PICKUP_CANDIDATE:
+		state->pickup_confidence = (uint8_t)MAX(state->pickup_confidence,
+						      (uint8_t)MAX(event->param, 0));
+		state->picked_up_recently = true;
+		state->last_pickup_timestamp_ms = event->timestamp_ms;
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+		break;
+
+	case APP_EVENT_PICKED_UP:
+		state->pickup_confidence = (uint8_t)MAX(state->pickup_confidence,
+						      (uint8_t)MAX(event->param, 0));
+		state->picked_up_recently = true;
+		state->last_pickup_timestamp_ms = event->timestamp_ms;
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+		state->arousal += 2;
+		state->curiosity += 2;
+		state->attachment += 2;
+		break;
+
+	case APP_EVENT_IN_HAND_ENTER:
+		state->in_hand = true;
+		state->picked_up_recently = true;
+		state->in_hand_confidence = (uint8_t)MAX(state->in_hand_confidence,
+							(uint8_t)MAX(event->param, 0));
+		state->last_in_hand_timestamp_ms = event->timestamp_ms;
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+		state->sleepiness -= 1;
+		state->curiosity += 2;
+		state->attachment += 2;
+		break;
+
+	case APP_EVENT_IN_HAND_EXIT:
+		state->in_hand = false;
+		state->in_hand_confidence = (uint8_t)MIN(state->in_hand_confidence,
+							(uint8_t)MAX(0, 100 - MAX(event->param, 0)));
+		state->last_motion_timestamp_ms = event->timestamp_ms;
+		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		break;
 
 	case APP_EVENT_FLIP_FACE_DOWN:
@@ -479,6 +608,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		} else if (event->param >= 946684800) {
 			state->unix_time_at_sync = event->param;
 		}
+		sync_daily_step_counter(state, event->timestamp_ms);
 		break;
 
 	case APP_EVENT_CHARGER_CONNECTED:
@@ -586,6 +716,12 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		log_face_snapshot(state, "Face dump");
 		break;
 
+	case APP_EVENT_FACE_SET_DYNAMIC_PUPILS_DEBUG:
+		state->dynamic_pupils_forced_disabled = event->param != 0;
+		LOG_INF("Dynamic pupils debug override -> %s",
+			state->dynamic_pupils_forced_disabled ? "disabled" : "enabled");
+		break;
+
 	case APP_EVENT_WAKE:
 		state->sleepiness -= 8;
 		state->arousal += 5;
@@ -608,6 +744,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		break;
 	}
 
+	sync_daily_step_counter(state, event->timestamp_ms);
 	if (event_is_real_interaction(event->type, state)) {
 		mark_real_interaction(state, event->timestamp_ms);
 	}
@@ -631,8 +768,9 @@ static void update_mode(struct pet_state *state, int64_t now_ms)
 		mode = PET_MODE_TASK_ALERT;
 	} else if (state->app_session_active) {
 		mode = PET_MODE_INTERACTING;
-	} else if ((walk_recent_ms <= (12 * MSEC_PER_SEC)) &&
-		   (effective_walking_confidence(state) >= 30U)) {
+	} else if (state->walking_active ||
+		   ((walk_recent_ms <= (12 * MSEC_PER_SEC)) &&
+		    (effective_walking_confidence(state) >= 30U))) {
 		mode = PET_MODE_WALK_AWAKE;
 	} else if (self_wake_recent_ms < (20 * MSEC_PER_SEC)) {
 		mode = PET_MODE_INTERACTING;
@@ -823,8 +961,17 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->in_hand = false;
 	state->pickup_confidence = 0;
 	state->in_hand_confidence = 0;
+	state->picked_up_recently = false;
 	state->battery_percent = -1;
 	state->battery_percent_known = false;
+	state->walking_session_start_ms = 0;
+	state->last_hw_step_counter = 0U;
+	state->walking_active = false;
+	state->last_pickup_timestamp_ms = stale_recent_event_ms;
+	state->last_in_hand_timestamp_ms = stale_recent_event_ms;
+	state->last_motion_sample_timestamp_ms = stale_recent_event_ms;
+	state->last_still_timestamp_ms = stale_recent_event_ms;
+	state->dynamic_pupils_forced_disabled = false;
 
 	state->ambient_wake_enabled = true;
 	state->time_valid = false;
@@ -939,7 +1086,7 @@ void behavior_engine_status_dump(const struct pet_state *state, char *buffer, si
 	}
 
 	(void)snprintf(buffer, buffer_len,
-		"mode=%s expr=%s force=%s disp=%s react=%s ind=%d ov=%d look_t=%d,%d look_r=%d,%d look_c=%u carry=%d/%u/%u/%u batt=%d known=%d E=%d Sl=%d Bo=%d St=%d Tr=%d Cu=%d At=%d walk=%u/%u steps=%u time=%s",
+		"mode=%s expr=%s force=%s disp=%s react=%s ind=%d ov=%d look_t=%d,%d look_r=%d,%d look_c=%u carry=%d/%u/%u/%u walk=%u act=%d pick=%u in_hand=%u step_day=%u total=%u hw=%u batt=%d known=%d E=%d Sl=%d Bo=%d St=%d Tr=%d Cu=%d At=%d last_m=%lld last_w=%lld last_p=%lld last_h=%lld last_s=%lld dyn=%d time=%s",
 		       pet_mode_str(state->current_mode),
 		       pet_expression_str(state->current_expression),
 		       g_runtime.forced_expression_active ?
@@ -957,12 +1104,19 @@ void behavior_engine_status_dump(const struct pet_state *state, char *buffer, si
 		       state->pickup_confidence,
 		       state->in_hand_confidence,
 		       state->walking_confidence,
+		       state->walking_active ? 1 : 0,
+		       state->step_count_today,
+		       state->total_steps_since_boot,
+		       state->last_hw_step_counter,
 		       state->battery_percent,
 		       state->battery_percent_known ? 1 : 0,
 		       state->energy, state->sleepiness, state->boredom, state->stress,
 		       state->trust, state->curiosity, state->attachment,
-		       state->walk_confidence,
-		       state->walking_confidence,
-		       state->total_steps_since_boot,
+		       (long long)state->last_motion_timestamp_ms,
+		       (long long)state->last_walk_timestamp_ms,
+		       (long long)state->last_pickup_timestamp_ms,
+		       (long long)state->last_in_hand_timestamp_ms,
+		       (long long)state->last_still_timestamp_ms,
+		       state->dynamic_pupils_forced_disabled ? 1 : 0,
 		       state->time_valid ? "valid" : "invalid");
 }

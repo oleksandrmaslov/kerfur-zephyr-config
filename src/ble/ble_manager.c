@@ -88,6 +88,11 @@ LOG_MODULE_REGISTER(ble_manager, CONFIG_LOG_DEFAULT_LEVEL);
 #define KERFUR_FACE_DEBUG_OP_LOOK_TARGET 0x01U
 #define KERFUR_FACE_DEBUG_OP_CARRY_STATE 0x02U
 #define KERFUR_FACE_DEBUG_OP_BATTERY_PERCENT 0x03U
+#define KERFUR_FACE_DEBUG_OP_PICKUP_CANDIDATE 0x04U
+#define KERFUR_FACE_DEBUG_OP_PICKED_UP 0x05U
+#define KERFUR_FACE_DEBUG_OP_IN_HAND_ENTER 0x06U
+#define KERFUR_FACE_DEBUG_OP_IN_HAND_EXIT 0x07U
+#define KERFUR_FACE_DEBUG_OP_DYNAMIC_PUPILS 0x08U
 
 struct ancs_client_state {
 	struct bt_conn *conn;
@@ -352,6 +357,16 @@ static enum app_event_type decode_injected_event(uint8_t code)
 		return APP_EVENT_WAKE;
 	case 21:
 		return APP_EVENT_SLEEP_REQUEST;
+	case 22:
+		return APP_EVENT_PICKUP_CANDIDATE;
+	case 23:
+		return APP_EVENT_PICKED_UP;
+	case 24:
+		return APP_EVENT_IN_HAND_ENTER;
+	case 25:
+		return APP_EVENT_IN_HAND_EXIT;
+	case 26:
+		return APP_EVENT_FACE_SET_DYNAMIC_PUPILS_DEBUG;
 	default:
 		return APP_EVENT_COUNT;
 	}
@@ -397,6 +412,51 @@ static ssize_t inject_face_debug_v1(const uint8_t *payload, uint16_t len)
 		}
 		LOG_INF("BLE inject face: battery percent=%d known=%u", (int8_t)payload[3], payload[4]);
 		err = app_event_publish_battery_percent((int8_t)payload[3], payload[4] != 0U);
+		break;
+
+	case KERFUR_FACE_DEBUG_OP_PICKUP_CANDIDATE:
+		if (len < 4U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		LOG_INF("BLE inject face: pickup candidate conf=%u", payload[3]);
+		err = app_event_publish_with_timestamp(APP_EVENT_PICKUP_CANDIDATE, payload[3],
+						       k_uptime_get());
+		break;
+
+	case KERFUR_FACE_DEBUG_OP_PICKED_UP:
+		if (len < 4U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		LOG_INF("BLE inject face: picked up conf=%u", payload[3]);
+		err = app_event_publish_with_timestamp(APP_EVENT_PICKED_UP, payload[3],
+						       k_uptime_get());
+		break;
+
+	case KERFUR_FACE_DEBUG_OP_IN_HAND_ENTER:
+		if (len < 4U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		LOG_INF("BLE inject face: in hand enter conf=%u", payload[3]);
+		err = app_event_publish_with_timestamp(APP_EVENT_IN_HAND_ENTER, payload[3],
+						       k_uptime_get());
+		break;
+
+	case KERFUR_FACE_DEBUG_OP_IN_HAND_EXIT:
+		if (len < 4U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		LOG_INF("BLE inject face: in hand exit conf=%u", payload[3]);
+		err = app_event_publish_with_timestamp(APP_EVENT_IN_HAND_EXIT, payload[3],
+						       k_uptime_get());
+		break;
+
+	case KERFUR_FACE_DEBUG_OP_DYNAMIC_PUPILS:
+		if (len < 4U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		LOG_INF("BLE inject face: dynamic pupils %s", payload[3] != 0U ? "disabled" : "enabled");
+		err = app_event_publish(APP_EVENT_FACE_SET_DYNAMIC_PUPILS_DEBUG,
+					payload[3] != 0U ? 1 : 0);
 		break;
 
 	default:

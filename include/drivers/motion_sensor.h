@@ -4,29 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <zephyr/sys/util_macro.h>
-
-enum motion_sensor_mode {
-	MOTION_SENSOR_MODE_DISABLED = 0,
-	MOTION_SENSOR_MODE_IDLE,
-	MOTION_SENSOR_MODE_ACTIVE,
-	MOTION_SENSOR_MODE_WALK_MAINTAIN,
-	MOTION_SENSOR_MODE_IN_HAND_TRACK,
-};
-
-enum motion_sensor_event {
-	MOTION_SENSOR_EVENT_WAKE = BIT(0),
-	MOTION_SENSOR_EVENT_TILT = BIT(1),
-};
-
 struct motion_sensor_capabilities {
 	bool backend_ready;
-	bool silicon_has_hw_step_counter;
-	bool silicon_has_significant_motion;
-	bool silicon_has_tilt;
-	bool silicon_has_stationary_motion;
-	bool silicon_has_fsm;
-	bool silicon_has_mlc;
 	bool backend_has_hw_step_counter;
 	bool backend_has_significant_motion;
 	bool backend_has_tilt;
@@ -44,6 +23,14 @@ struct motion_sensor_sample {
 	int16_t gyro_mdps_z;
 	bool gyro_valid;
 	int64_t timestamp_ms;
+};
+
+enum motion_sensor_mode {
+	MOTION_SENSOR_MODE_DISABLED = 0,
+	MOTION_SENSOR_MODE_IDLE,
+	MOTION_SENSOR_MODE_ACTIVE,
+	MOTION_SENSOR_MODE_WALK_MAINTAIN,
+	MOTION_SENSOR_MODE_IN_HAND_TRACK,
 };
 
 typedef void (*motion_sensor_event_handler_t)(uint32_t events, void *user_data);

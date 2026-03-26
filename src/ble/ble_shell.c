@@ -11,6 +11,7 @@
 #include "behavior/behavior_engine.h"
 #include "behavior/micro_reaction.h"
 #include "core/event_bus.h"
+#include "drivers/motion_classifier.h"
 #endif
 
 #if defined(CONFIG_KERFUR_ENABLE_SHELL_CMDS)
@@ -111,6 +112,27 @@ static int parse_u8_arg(const char *arg, uint8_t *value)
 	}
 
 	*value = (uint8_t)parsed;
+	return 0;
+}
+
+static int parse_i32_arg(const char *arg, int32_t *value)
+{
+	char *endptr;
+	long parsed;
+
+	if ((arg == NULL) || (value == NULL)) {
+		return -EINVAL;
+	}
+
+	parsed = strtol(arg, &endptr, 0);
+	if ((*arg == '\0') || (*endptr != '\0')) {
+		return -EINVAL;
+	}
+	if ((parsed < INT32_MIN) || (parsed > INT32_MAX)) {
+		return -ERANGE;
+	}
+
+	*value = (int32_t)parsed;
 	return 0;
 }
 
@@ -423,6 +445,147 @@ static int cmd_face_battery(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_face_motion_walk_start(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t confidence = 80U;
+	int err;
+
+	if ((argc < 1U) || (argc > 2U)) {
+		shell_error(shell, "usage: kerfur face motion walk_start [confidence]");
+		return -EINVAL;
+	}
+
+	if (argc == 2U) {
+		err = parse_u8_arg(argv[1], &confidence);
+		if (err != 0) {
+			shell_error(shell, "invalid confidence: %s", argv[1]);
+			return err;
+		}
+	}
+
+	err = app_event_publish_with_timestamp(APP_EVENT_WALKING_START, confidence, k_uptime_get());
+	if (err != 0) {
+		shell_error(shell, "walking_start publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "walking start queued conf=%u", confidence);
+	return 0;
+}
+
+static int cmd_face_motion_walk_stop(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t confidence = 40U;
+	int err;
+
+	if ((argc < 1U) || (argc > 2U)) {
+		shell_error(shell, "usage: kerfur face motion walk_stop [confidence]");
+		return -EINVAL;
+	}
+
+	if (argc == 2U) {
+		err = parse_u8_arg(argv[1], &confidence);
+		if (err != 0) {
+			shell_error(shell, "invalid confidence: %s", argv[1]);
+			return err;
+		}
+	}
+
+	err = app_event_publish_with_timestamp(APP_EVENT_WALKING_STOP, confidence, k_uptime_get());
+	if (err != 0) {
+		shell_error(shell, "walking_stop publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "walking stop queued conf=%u", confidence);
+	return 0;
+}
+
+static int cmd_face_motion_step_batch(const struct shell *shell, size_t argc, char **argv)
+{
+	int32_t steps;
+	uint8_t confidence = 80U;
+	int err;
+
+	if ((argc < 2U) || (argc > 3U)) {
+		shell_error(shell, "usage: kerfur face motion step_batch <steps> [walking_conf]");
+		return -EINVAL;
+	}
+
+	err = parse_i32_arg(argv[1], &steps);
+	if (err != 0) {
+		shell_error(shell, "invalid steps: %s", argv[1]);
+		return err;
+	}
+	if (steps < 0) {
+		shell_error(shell, "steps must be >= 0");
+		return -ERANGE;
+	}
+	if (argc == 3U) {
+		err = parse_u8_arg(argv[2], &confidence);
+		if (err != 0) {
+			shell_error(shell, "invalid walking_conf: %s", argv[2]);
+			return err;
+		}
+	}
+
+	err = app_event_publish_step_batch((int32_t)steps, 0U, confidence, false);
+	if (err != 0) {
+		shell_error(shell, "step_batch publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "step batch queued steps=%d walk_conf=%u", steps, confidence);
+	return 0;
+}
+
+static int cmd_face_motion_dynamic_pupils(const struct shell *shell, size_t argc, char **argv)
+{
+	bool enabled;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur face motion dynamic_pupils <on|off>");
+		return -EINVAL;
+	}
+
+	err = parse_bool_arg(argv[1], &enabled);
+	if (err != 0) {
+		shell_error(shell, "invalid toggle: %s", argv[1]);
+		return err;
+	}
+
+	err = app_event_publish(APP_EVENT_FACE_SET_DYNAMIC_PUPILS_DEBUG, enabled ? 0 : 1);
+	if (err != 0) {
+		shell_error(shell, "dynamic pupils publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "dynamic pupils debug override %s", enabled ? "enabled" : "disabled");
+	return 0;
+}
+
+static int cmd_face_motion_conf_log(const struct shell *shell, size_t argc, char **argv)
+{
+	bool enabled;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur face motion conf_log <on|off>");
+		return -EINVAL;
+	}
+
+	err = parse_bool_arg(argv[1], &enabled);
+	if (err != 0) {
+		shell_error(shell, "invalid toggle: %s", argv[1]);
+		return err;
+	}
+
+	motion_classifier_set_debug_logging(enabled);
+	shell_print(shell, "motion confidence logging %s", enabled ? "enabled" : "disabled");
+	return 0;
+}
+
 static int cmd_face_expr_list(const struct shell *shell, size_t argc, char **argv)
 {
 	int expr;
@@ -592,11 +755,21 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_face_react,
 	SHELL_SUBCMD_SET_END
 );
 
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_face_motion,
+	SHELL_CMD(walk_start, NULL, "Force walking start", cmd_face_motion_walk_start),
+	SHELL_CMD(walk_stop, NULL, "Force walking stop", cmd_face_motion_walk_stop),
+	SHELL_CMD(step_batch, NULL, "Force a batched step update", cmd_face_motion_step_batch),
+	SHELL_CMD(dynamic_pupils, NULL, "Toggle dynamic pupil debug override", cmd_face_motion_dynamic_pupils),
+	SHELL_CMD(conf_log, NULL, "Toggle motion confidence logging", cmd_face_motion_conf_log),
+	SHELL_SUBCMD_SET_END
+);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_face,
 	SHELL_CMD(dump, NULL, "Request a face state debug dump", cmd_face_dump),
 	SHELL_CMD(look, NULL, "Queue look target update", cmd_face_look),
 	SHELL_CMD(carry, NULL, "Queue carry state update", cmd_face_carry),
 	SHELL_CMD(battery, NULL, "Queue battery percent update", cmd_face_battery),
+	SHELL_CMD(motion, &sub_kerfur_face_motion, "Motion debug commands", NULL),
 	SHELL_CMD(expr, &sub_kerfur_face_expr, "Expression override commands", NULL),
 	SHELL_CMD(react, &sub_kerfur_face_react, "Reaction trigger commands", NULL),
 	SHELL_SUBCMD_SET_END

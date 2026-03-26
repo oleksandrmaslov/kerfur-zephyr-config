@@ -26,6 +26,8 @@ static bool event_is_real_interaction(enum app_event_type type)
 	case APP_EVENT_USER_PET_SOFT:
 	case APP_EVENT_USER_PET_LONG:
 	case APP_EVENT_USER_HOLD:
+	case APP_EVENT_PICKED_UP:
+	case APP_EVENT_IN_HAND_ENTER:
 	case APP_EVENT_APP_SESSION_START:
 	case APP_EVENT_CHARGER_CONNECTED:
 	case APP_EVENT_WAKE:

@@ -40,6 +40,42 @@ static int abs_i16(int16_t value)
 	return (value < 0) ? -value : value;
 }
 
+static uint8_t motion_scale_for_recipe(enum kerfur_face_recipe_id recipe_id)
+{
+	switch (recipe_id) {
+	case KERFUR_FACE_RECIPE_PET_EXPR_PLAYFUL:
+		return 75U;
+	case KERFUR_FACE_RECIPE_PET_EXPR_COZY:
+		return 60U;
+	case KERFUR_FACE_RECIPE_PET_EXPR_SLEEPY:
+		return 35U;
+	case KERFUR_FACE_RECIPE_PET_EXPR_NEEDY:
+	case KERFUR_FACE_RECIPE_PET_EXPR_LONELY:
+		return 85U;
+	case KERFUR_FACE_RECIPE_PET_EXPR_OVERSTIMULATED:
+	case KERFUR_FACE_RECIPE_PET_EXPR_ASLEEP:
+		return 0U;
+	default:
+		return 100U;
+	}
+}
+
+static uint8_t motion_speed_for_recipe(enum kerfur_face_recipe_id recipe_id)
+{
+	switch (recipe_id) {
+	case KERFUR_FACE_RECIPE_PET_EXPR_PLAYFUL:
+		return 85U;
+	case KERFUR_FACE_RECIPE_PET_EXPR_COZY:
+		return 45U;
+	case KERFUR_FACE_RECIPE_PET_EXPR_SLEEPY:
+		return 25U;
+	case KERFUR_FACE_RECIPE_PET_EXPR_ASLEEP:
+		return 0U;
+	default:
+		return 70U;
+	}
+}
+
 static struct kerfur_face_point apply_override_point(struct kerfur_face_point point,
 						     const struct kerfur_face_override *override)
 {
@@ -359,6 +395,8 @@ static void resolve_pupil_offsets(const struct kerfur_face_asset_metadata *eye_a
 static enum face_runtime_dynamic_reason resolve_dynamic_reason(
 	const struct kerfur_face_recipe *recipe,
 	const struct kerfur_face_reaction *reaction,
+	const struct pet_state *state,
+	int64_t now_ms,
 	bool special_eye_mode_active,
 	bool blink_active,
 	bool has_zone,
@@ -366,6 +404,9 @@ static enum face_runtime_dynamic_reason resolve_dynamic_reason(
 {
 	if (!has_pupil) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_NO_PUPIL;
+	}
+	if (state->dynamic_pupils_forced_disabled) {
+		return FACE_RUNTIME_DYNAMIC_DISABLED_FORCED_OFF;
 	}
 	if (blink_active) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_BLINK;
@@ -382,6 +423,19 @@ static enum face_runtime_dynamic_reason resolve_dynamic_reason(
 	}
 	if (!has_zone) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_NO_ZONE;
+	}
+	if (!state->in_hand || (state->in_hand_confidence < 45U)) {
+		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND;
+	}
+	if (state->walking_active || (state->walking_confidence >= 70U)) {
+		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_WALKING;
+	}
+	if ((state->last_rough_event_timestamp_ms > 0LL) &&
+	    ((now_ms - state->last_rough_event_timestamp_ms) < 1200LL)) {
+		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_ROUGH;
+	}
+	if ((state->look_confidence < 35U) || (state->pickup_confidence < 25U)) {
+		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_LOW_CONFIDENCE;
 	}
 
 	return FACE_RUNTIME_DYNAMIC_ALLOWED;
@@ -610,6 +664,9 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	bool has_zone;
 	bool has_pupil;
 	bool dynamic_allowed;
+	uint8_t motion_confidence;
+	uint8_t motion_scale;
+	uint8_t motion_speed;
 	bool should_log;
 
 	recipe = resolve_recipe_and_reaction(state, &recipe_id, &reaction_id, &reaction);
@@ -657,24 +714,73 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 		target_y = 0;
 	}
 
+	has_zone = zone_is_available(left_eye_asset) || zone_is_available(right_eye_asset);
+	has_pupil = (plan.left_eyeball != KERFUR_FACE_ASSET_NONE) ||
+		    (plan.right_eyeball != KERFUR_FACE_ASSET_NONE);
+	dynamic_reason = resolve_dynamic_reason(recipe, reaction, state, now_ms,
+						 special_eye_mode_active, blink_active, has_zone,
+						 has_pupil);
+	dynamic_allowed = dynamic_reason == FACE_RUNTIME_DYNAMIC_ALLOWED;
+
+	motion_confidence = MIN(state->look_confidence,
+				MIN(state->pickup_confidence, state->in_hand_confidence));
+	if (state->walking_confidence > 0U) {
+		motion_confidence = (uint8_t)MIN(motion_confidence,
+						(uint8_t)MAX(0, 100 - state->walking_confidence));
+	}
+	if (state->battery_low) {
+		motion_confidence = (uint8_t)MIN(motion_confidence, 60U);
+	}
+	motion_scale = motion_scale_for_recipe(recipe_id);
+	motion_speed = motion_speed_for_recipe(recipe_id);
+	if (motion_scale == 0U) {
+		motion_confidence = 0U;
+	}
+
+	if (!dynamic_allowed) {
+		switch (dynamic_reason) {
+		case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_WALKING:
+			target_x /= 5;
+			target_y /= 5;
+			motion_speed = MAX(motion_speed, 35U);
+			break;
+		case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_ROUGH:
+			target_x = 0;
+			target_y = 0;
+			motion_confidence = 0U;
+			motion_speed = MAX(motion_speed, 55U);
+			break;
+		case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_LOW_CONFIDENCE:
+		case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND:
+			target_x /= 3;
+			target_y /= 3;
+			motion_confidence = (uint8_t)(motion_confidence / 2U);
+			motion_speed = MAX(motion_speed, 25U);
+			break;
+		case FACE_RUNTIME_DYNAMIC_DISABLED_FORCED_OFF:
+			target_x = 0;
+			target_y = 0;
+			motion_confidence = 0U;
+			motion_speed = MAX(motion_speed, 30U);
+			break;
+		default:
+			break;
+		}
+	} else {
+		target_x = (target_x * motion_confidence * motion_scale) / 10000;
+		target_y = (target_y * motion_confidence * motion_scale) / 10000;
+		motion_speed = MAX(8U, (uint8_t)((motion_speed * MAX(motion_confidence, 15U)) / 100U));
+	}
+
 	if ((runtime->last_step_ms == 0) || (now_ms < runtime->last_step_ms)) {
 		runtime->look_render_x = target_x;
 		runtime->look_render_y = target_y;
 	} else {
-		runtime->look_render_x =
-			smooth_axis(runtime->look_render_x, target_x, recipe->dynamic_pupil_speed);
-		runtime->look_render_y =
-			smooth_axis(runtime->look_render_y, target_y, recipe->dynamic_pupil_speed);
+		runtime->look_render_x = smooth_axis(runtime->look_render_x, target_x, motion_speed);
+		runtime->look_render_y = smooth_axis(runtime->look_render_y, target_y, motion_speed);
 	}
 
 	resolve_ambient_pupil_drift(recipe, now_ms, &ambient_dx, &ambient_dy);
-
-	has_zone = zone_is_available(left_eye_asset) || zone_is_available(right_eye_asset);
-	has_pupil = (plan.left_eyeball != KERFUR_FACE_ASSET_NONE) ||
-		    (plan.right_eyeball != KERFUR_FACE_ASSET_NONE);
-	dynamic_reason = resolve_dynamic_reason(recipe, reaction, special_eye_mode_active,
-						 blink_active, has_zone, has_pupil);
-	dynamic_allowed = dynamic_reason == FACE_RUNTIME_DYNAMIC_ALLOWED;
 
 	if (dynamic_allowed) {
 		if (zone_is_available(left_eye_asset)) {
@@ -757,6 +863,16 @@ const char *face_runtime_dynamic_reason_str(enum face_runtime_dynamic_reason rea
 		return "special_mode";
 	case FACE_RUNTIME_DYNAMIC_DISABLED_NO_PUPIL:
 		return "no_pupil";
+	case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_WALKING:
+		return "walking";
+	case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_ROUGH:
+		return "rough";
+	case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_LOW_CONFIDENCE:
+		return "low_confidence";
+	case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND:
+		return "not_in_hand";
+	case FACE_RUNTIME_DYNAMIC_DISABLED_FORCED_OFF:
+		return "forced_off";
 	default:
 		return "unknown";
 	}

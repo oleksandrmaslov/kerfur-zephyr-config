@@ -104,7 +104,7 @@ static int32_t apply_event_modifiers_ms(const struct pet_state *state, int32_t b
 		tuned = (tuned * 7) / 10;
 	}
 
-	if (ambient && state->battery_low) {
+	if (state->battery_low) {
 		tuned /= 2;
 	}
 
@@ -212,6 +212,23 @@ void display_policy_on_event(struct pet_state *state, const struct app_event *ev
 	case APP_EVENT_WALKING_START:
 		set_foreground_window(state, now_ms, 20 * MSEC_PER_SEC, 180 * MSEC_PER_SEC);
 		break;
+	case APP_EVENT_MOTION_WAKE:
+		set_foreground_window(state, now_ms, 6 * MSEC_PER_SEC, 20 * MSEC_PER_SEC);
+		break;
+	case APP_EVENT_PICKUP_CANDIDATE:
+		set_foreground_window(state, now_ms, 8 * MSEC_PER_SEC, 25 * MSEC_PER_SEC);
+		break;
+	case APP_EVENT_PICKED_UP:
+		set_foreground_window(state, now_ms, 15 * MSEC_PER_SEC, 60 * MSEC_PER_SEC);
+		break;
+	case APP_EVENT_IN_HAND_ENTER:
+		set_foreground_window(state, now_ms, 18 * MSEC_PER_SEC, 90 * MSEC_PER_SEC);
+		break;
+	case APP_EVENT_IN_HAND_EXIT:
+		if (state->current_display_state == DISPLAY_FOREGROUND) {
+			set_ambient_window(state, now_ms, 10 * MSEC_PER_SEC);
+		}
+		break;
 	case APP_EVENT_APP_SESSION_START:
 		g_policy.app_session_last_activity_ms = now_ms;
 		set_foreground_window(state, now_ms, 40 * MSEC_PER_SEC, 10 * 60 * MSEC_PER_SEC);
@@ -253,8 +270,16 @@ void display_policy_on_event(struct pet_state *state, const struct app_event *ev
 	    (event->type == APP_EVENT_USER_PET_LONG) || (event->type == APP_EVENT_USER_HOLD) ||
 	    (event->type == APP_EVENT_PHONE_CONNECTED) ||
 	    (event->type == APP_EVENT_PHONE_DISCONNECTED) ||
-	    (event->type == APP_EVENT_CHARGER_CONNECTED) || (event->type == APP_EVENT_PHONE_NOTIFICATION_SINGLE) ||
+	    (event->type == APP_EVENT_CHARGER_CONNECTED) ||
+	    (event->type == APP_EVENT_PHONE_NOTIFICATION_SINGLE) ||
 	    (event->type == APP_EVENT_PHONE_NOTIFICATION_BURST)) {
+		g_policy.app_session_last_activity_ms = now_ms;
+		schedule_self_wake(state, now_ms);
+	}
+
+	if ((event->type == APP_EVENT_MOTION_WAKE) || (event->type == APP_EVENT_PICKUP_CANDIDATE) ||
+	    (event->type == APP_EVENT_PICKED_UP) || (event->type == APP_EVENT_IN_HAND_ENTER) ||
+	    (event->type == APP_EVENT_IN_HAND_EXIT)) {
 		g_policy.app_session_last_activity_ms = now_ms;
 		schedule_self_wake(state, now_ms);
 	}
