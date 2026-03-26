@@ -69,6 +69,7 @@ bool power_manager_poll(int64_t now_ms, struct app_event *out_event)
 	if (!g_power.idle_timeout_sent &&
 	    idle_ms >= ((int64_t)CONFIG_KERFUR_IDLE_TIMEOUT_S * MSEC_PER_SEC)) {
 		g_power.idle_timeout_sent = true;
+		*out_event = (struct app_event){0};
 		out_event->type = APP_EVENT_IDLE_TIMEOUT;
 		out_event->timestamp_ms = now_ms;
 		out_event->param = 0;
@@ -80,6 +81,7 @@ bool power_manager_poll(int64_t now_ms, struct app_event *out_event)
 	    idle_ms >= ((int64_t)CONFIG_KERFUR_SLEEP_REQUEST_TIMEOUT_S * MSEC_PER_SEC)) {
 		/* TODO: Add real deep-sleep entry policy and wake source negotiation. */
 		g_power.sleep_request_sent = true;
+		*out_event = (struct app_event){0};
 		out_event->type = APP_EVENT_SLEEP_REQUEST;
 		out_event->timestamp_ms = now_ms;
 		out_event->param = 0;

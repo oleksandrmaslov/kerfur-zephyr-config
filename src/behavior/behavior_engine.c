@@ -17,6 +17,8 @@ struct behavior_runtime {
 	uint8_t ambient_energy_decay_accum;
 	uint8_t five_min_accum;
 	uint8_t thirty_min_accum;
+	enum pet_expression forced_expression;
+	bool forced_expression_active;
 };
 
 static struct behavior_runtime g_runtime;
@@ -32,6 +34,33 @@ static int16_t clamp_0_100(int value)
 	return (int16_t)value;
 }
 
+static int8_t clamp_battery_percent(int value)
+{
+	if (value < 0) {
+		return 0;
+	}
+	if (value > 100) {
+		return 100;
+	}
+	return (int8_t)value;
+}
+
+static int16_t clamp_look_range(int value)
+{
+	if (value < -100) {
+		return -100;
+	}
+	if (value > 100) {
+		return 100;
+	}
+	return (int16_t)value;
+}
+
+static uint8_t effective_walking_confidence(const struct pet_state *state)
+{
+	return MAX(state->walk_confidence, state->walking_confidence);
+}
+
 static void clamp_state(struct pet_state *state)
 {
 	state->energy = clamp_0_100(state->energy);
@@ -44,7 +73,25 @@ static void clamp_state(struct pet_state *state)
 	state->trust = clamp_0_100(state->trust);
 	state->curiosity = clamp_0_100(state->curiosity);
 	state->walk_confidence = (uint8_t)clamp_0_100(state->walk_confidence);
+	state->walking_confidence = (uint8_t)clamp_0_100(state->walking_confidence);
+	if (state->walking_confidence == 0U) {
+		state->walking_confidence = state->walk_confidence;
+	} else if (state->walk_confidence == 0U) {
+		state->walk_confidence = state->walking_confidence;
+	}
 	state->notification_burst_level = (uint8_t)clamp_0_100(state->notification_burst_level);
+	state->look_confidence = (uint8_t)clamp_0_100(state->look_confidence);
+	state->pickup_confidence = (uint8_t)clamp_0_100(state->pickup_confidence);
+	state->in_hand_confidence = (uint8_t)clamp_0_100(state->in_hand_confidence);
+	state->look_target_x = clamp_look_range(state->look_target_x);
+	state->look_target_y = clamp_look_range(state->look_target_y);
+	state->look_render_x = clamp_look_range(state->look_render_x);
+	state->look_render_y = clamp_look_range(state->look_render_y);
+	if (state->battery_percent_known) {
+		state->battery_percent = clamp_battery_percent(state->battery_percent);
+	} else {
+		state->battery_percent = -1;
+	}
 }
 
 static void mark_real_interaction(struct pet_state *state, int64_t now_ms)
@@ -81,6 +128,30 @@ static void trigger_reaction(struct pet_state *state, enum micro_reaction_type r
 	}
 
 	state->current_reaction = micro_reaction_get_active(now_ms);
+}
+
+static void log_face_snapshot(const struct pet_state *state, const char *reason)
+{
+	LOG_INF("%s face mode=%s expr=%s force=%s react=%s ind=%d ov=%d look_t=%d,%d look_r=%d,%d look_c=%u carry=%d/%u/%u/%u batt=%d known=%d",
+		reason,
+		pet_mode_str(state->current_mode),
+		pet_expression_str(state->current_expression),
+		g_runtime.forced_expression_active ?
+			pet_expression_str(g_runtime.forced_expression) : "AUTO",
+		micro_reaction_str(state->current_reaction),
+		state->current_indicator,
+		state->current_overlay,
+		state->look_target_x,
+		state->look_target_y,
+		state->look_render_x,
+		state->look_render_y,
+		state->look_confidence,
+		state->in_hand ? 1 : 0,
+		state->pickup_confidence,
+		state->in_hand_confidence,
+		state->walking_confidence,
+		state->battery_percent,
+		state->battery_percent_known ? 1 : 0);
 }
 
 static void apply_5min_drift(struct pet_state *state, int64_t now_ms)
@@ -134,6 +205,7 @@ static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 	if ((state->current_mode == PET_MODE_WALK_AWAKE) &&
 	    ((now_ms - state->last_walk_timestamp_ms) > (12 * MSEC_PER_SEC))) {
 		state->walk_confidence = 0;
+		state->walking_confidence = 0;
 	}
 }
 
@@ -205,7 +277,7 @@ static bool event_is_real_interaction(enum app_event_type type, const struct pet
 	case APP_EVENT_CHARGER_CONNECTED:
 		return true;
 	case APP_EVENT_STEP_BATCH:
-		return state->ble_connected && (state->walk_confidence >= 60U);
+		return state->ble_connected && (effective_walking_confidence(state) >= 60U);
 	default:
 		return false;
 	}
@@ -318,6 +390,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 
 	case APP_EVENT_WALKING_START:
 		state->walk_confidence = 80;
+		state->walking_confidence = 80;
 		state->last_walk_timestamp_ms = event->timestamp_ms;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
 		trigger_reaction(state, REACTION_LOOK_UP, event->timestamp_ms);
@@ -325,6 +398,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 
 	case APP_EVENT_WALKING_STOP:
 		state->walk_confidence = 0;
+		state->walking_confidence = 0;
 		break;
 
 	case APP_EVENT_STEP_BATCH:
@@ -341,6 +415,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 			state->last_motion_timestamp_ms = event->timestamp_ms;
 			state->last_walk_timestamp_ms = event->timestamp_ms;
 			state->walk_confidence = (uint8_t)MIN(100, state->walk_confidence + 5);
+			state->walking_confidence = state->walk_confidence;
 		}
 		break;
 
@@ -434,6 +509,83 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->sleepiness += 8;
 		break;
 
+	case APP_EVENT_LOOK_TARGET_UPDATE:
+		state->look_target_x = event->payload.look_target.x;
+		state->look_target_y = event->payload.look_target.y;
+		state->look_confidence = event->payload.look_target.confidence;
+		state->look_render_x = state->look_target_x;
+		state->look_render_y = state->look_target_y;
+		if (IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG_VERBOSE)) {
+			LOG_INF("Face look target -> x=%d y=%d conf=%u",
+				state->look_target_x, state->look_target_y, state->look_confidence);
+		}
+		break;
+
+	case APP_EVENT_CARRY_STATE_UPDATE:
+		state->in_hand = event->payload.carry_state.in_hand;
+		state->pickup_confidence = event->payload.carry_state.pickup_confidence;
+		state->in_hand_confidence = event->payload.carry_state.in_hand_confidence;
+		state->walking_confidence = event->payload.carry_state.walking_confidence;
+		state->walk_confidence = event->payload.carry_state.walking_confidence;
+		if (IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG_VERBOSE)) {
+			LOG_INF("Face carry -> in_hand=%d pickup=%u in_hand_conf=%u walk_conf=%u",
+				state->in_hand ? 1 : 0, state->pickup_confidence,
+				state->in_hand_confidence, state->walking_confidence);
+		}
+		break;
+
+	case APP_EVENT_BATTERY_PERCENT_UPDATE:
+		state->battery_percent_known = event->payload.battery_percent.known;
+		state->battery_percent = event->payload.battery_percent.known ?
+					 event->payload.battery_percent.percent : -1;
+		if (event->payload.battery_percent.known) {
+			state->battery_low = event->payload.battery_percent.percent <= 20;
+			state->battery_critical = event->payload.battery_percent.percent <= 5;
+		}
+		if (IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG_VERBOSE)) {
+			LOG_INF("Face battery -> percent=%d known=%d low=%d critical=%d",
+				state->battery_percent,
+				state->battery_percent_known ? 1 : 0,
+				state->battery_low ? 1 : 0,
+				state->battery_critical ? 1 : 0);
+		}
+		break;
+
+	case APP_EVENT_FACE_FORCE_EXPRESSION:
+		if ((event->param < PET_EXPR_CALM) || (event->param >= PET_EXPR_COUNT)) {
+			LOG_WRN("Ignoring invalid forced expression id=%d", event->param);
+			break;
+		}
+
+		g_runtime.forced_expression = (enum pet_expression)event->param;
+		g_runtime.forced_expression_active = true;
+		if (state->current_expression != g_runtime.forced_expression) {
+			state->current_expression = g_runtime.forced_expression;
+			state->last_expression_change_timestamp_ms = event->timestamp_ms;
+		}
+		LOG_INF("Forced expression -> %s", pet_expression_str(g_runtime.forced_expression));
+		break;
+
+	case APP_EVENT_FACE_CLEAR_FORCED_EXPRESSION:
+		g_runtime.forced_expression_active = false;
+		LOG_INF("Forced expression cleared");
+		break;
+
+	case APP_EVENT_FACE_TRIGGER_REACTION:
+		if ((event->param <= REACTION_NONE) || (event->param >= REACTION_COUNT)) {
+			LOG_WRN("Ignoring invalid reaction trigger id=%d", event->param);
+			break;
+		}
+
+		trigger_reaction(state, (enum micro_reaction_type)event->param, event->timestamp_ms);
+		LOG_INF("Triggered reaction -> %s",
+			micro_reaction_str((enum micro_reaction_type)event->param));
+		break;
+
+	case APP_EVENT_FACE_DEBUG_DUMP:
+		log_face_snapshot(state, "Face dump");
+		break;
+
 	case APP_EVENT_WAKE:
 		state->sleepiness -= 8;
 		state->arousal += 5;
@@ -479,7 +631,8 @@ static void update_mode(struct pet_state *state, int64_t now_ms)
 		mode = PET_MODE_TASK_ALERT;
 	} else if (state->app_session_active) {
 		mode = PET_MODE_INTERACTING;
-	} else if ((walk_recent_ms <= (12 * MSEC_PER_SEC)) && (state->walk_confidence >= 30)) {
+	} else if ((walk_recent_ms <= (12 * MSEC_PER_SEC)) &&
+		   (effective_walking_confidence(state) >= 30U)) {
 		mode = PET_MODE_WALK_AWAKE;
 	} else if (self_wake_recent_ms < (20 * MSEC_PER_SEC)) {
 		mode = PET_MODE_INTERACTING;
@@ -565,6 +718,14 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 	const int margin = 8;
 	const bool pet_recent = (now_ms - state->last_pet_timestamp_ms) < (6 * MSEC_PER_SEC);
 
+	if (g_runtime.forced_expression_active) {
+		if (state->current_expression != g_runtime.forced_expression) {
+			state->current_expression = g_runtime.forced_expression;
+			state->last_expression_change_timestamp_ms = now_ms;
+		}
+		return;
+	}
+
 	if (state->current_mode == PET_MODE_ASLEEP) {
 		if (state->current_expression != PET_EXPR_ASLEEP) {
 			state->current_expression = PET_EXPR_ASLEEP;
@@ -620,6 +781,8 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 
 	(void)memset(state, 0, sizeof(*state));
 	(void)memset(&g_runtime, 0, sizeof(g_runtime));
+	g_runtime.forced_expression = PET_EXPR_CALM;
+	g_runtime.forced_expression_active = false;
 
 	state->energy = 72;
 	state->sleepiness = 22;
@@ -631,6 +794,7 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->trust = 55;
 	state->curiosity = 45;
 	state->walk_confidence = 0;
+	state->walking_confidence = 0;
 	state->notification_burst_level = 0;
 
 	/* Seed boot in a neutral state so the first visible expression is not a fake recent event. */
@@ -649,6 +813,18 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->current_expression = PET_EXPR_CALM;
 	state->current_reaction = REACTION_NONE;
 	state->current_display_state = DISPLAY_FOREGROUND;
+	state->current_indicator = -1;
+	state->current_overlay = -1;
+	state->look_target_x = 0;
+	state->look_target_y = 0;
+	state->look_render_x = 0;
+	state->look_render_y = 0;
+	state->look_confidence = 0;
+	state->in_hand = false;
+	state->pickup_confidence = 0;
+	state->in_hand_confidence = 0;
+	state->battery_percent = -1;
+	state->battery_percent_known = false;
 
 	state->ambient_wake_enabled = true;
 	state->time_valid = false;
@@ -763,13 +939,30 @@ void behavior_engine_status_dump(const struct pet_state *state, char *buffer, si
 	}
 
 	(void)snprintf(buffer, buffer_len,
-		       "mode=%s expr=%s disp=%s react=%s E=%d Sl=%d Bo=%d St=%d Tr=%d Cu=%d At=%d steps=%u time=%s",
+		"mode=%s expr=%s force=%s disp=%s react=%s ind=%d ov=%d look_t=%d,%d look_r=%d,%d look_c=%u carry=%d/%u/%u/%u batt=%d known=%d E=%d Sl=%d Bo=%d St=%d Tr=%d Cu=%d At=%d walk=%u/%u steps=%u time=%s",
 		       pet_mode_str(state->current_mode),
 		       pet_expression_str(state->current_expression),
+		       g_runtime.forced_expression_active ?
+			       pet_expression_str(g_runtime.forced_expression) : "AUTO",
 		       pet_display_state_str(state->current_display_state),
 		       micro_reaction_str(state->current_reaction),
+		       state->current_indicator,
+		       state->current_overlay,
+		       state->look_target_x,
+		       state->look_target_y,
+		       state->look_render_x,
+		       state->look_render_y,
+		       state->look_confidence,
+		       state->in_hand ? 1 : 0,
+		       state->pickup_confidence,
+		       state->in_hand_confidence,
+		       state->walking_confidence,
+		       state->battery_percent,
+		       state->battery_percent_known ? 1 : 0,
 		       state->energy, state->sleepiness, state->boredom, state->stress,
 		       state->trust, state->curiosity, state->attachment,
+		       state->walk_confidence,
+		       state->walking_confidence,
 		       state->total_steps_since_boot,
 		       state->time_valid ? "valid" : "invalid");
 }

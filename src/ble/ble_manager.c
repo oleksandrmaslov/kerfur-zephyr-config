@@ -83,6 +83,12 @@ LOG_MODULE_REGISTER(ble_manager, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define KERFUR_COMPANION_TX_ATTR_INDEX 4U
 
+#define KERFUR_FACE_DEBUG_MAGIC 0xF0U
+#define KERFUR_FACE_DEBUG_VERSION 1U
+#define KERFUR_FACE_DEBUG_OP_LOOK_TARGET 0x01U
+#define KERFUR_FACE_DEBUG_OP_CARRY_STATE 0x02U
+#define KERFUR_FACE_DEBUG_OP_BATTERY_PERCENT 0x03U
+
 struct ancs_client_state {
 	struct bt_conn *conn;
 	uint16_t service_start_handle;
@@ -349,6 +355,59 @@ static enum app_event_type decode_injected_event(uint8_t code)
 	default:
 		return APP_EVENT_COUNT;
 	}
+}
+
+static ssize_t inject_face_debug_v1(const uint8_t *payload, uint16_t len)
+{
+	int err;
+
+	if (len < 3U) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+	if (payload[1] != KERFUR_FACE_DEBUG_VERSION) {
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
+
+	switch (payload[2]) {
+	case KERFUR_FACE_DEBUG_OP_LOOK_TARGET:
+		if (len < 8U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		LOG_INF("BLE inject face: look x=%d y=%d conf=%u",
+			(int16_t)sys_get_le16(&payload[3]),
+			(int16_t)sys_get_le16(&payload[5]),
+			payload[7]);
+		err = app_event_publish_look_target((int16_t)sys_get_le16(&payload[3]),
+						    (int16_t)sys_get_le16(&payload[5]),
+						    payload[7]);
+		break;
+
+	case KERFUR_FACE_DEBUG_OP_CARRY_STATE:
+		if (len < 7U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		LOG_INF("BLE inject face: carry in_hand=%u pickup=%u in_hand_conf=%u walk_conf=%u",
+			payload[3], payload[4], payload[5], payload[6]);
+		err = app_event_publish_carry_state(payload[3] != 0U, payload[4], payload[5], payload[6]);
+		break;
+
+	case KERFUR_FACE_DEBUG_OP_BATTERY_PERCENT:
+		if (len < 5U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		LOG_INF("BLE inject face: battery percent=%d known=%u", (int8_t)payload[3], payload[4]);
+		err = app_event_publish_battery_percent((int8_t)payload[3], payload[4] != 0U);
+		break;
+
+	default:
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
+
+	if (err != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+	}
+
+	return (ssize_t)len;
 }
 
 static void ancs_clear_cached_state(void)
@@ -947,6 +1006,10 @@ static ssize_t event_inject_write_cb(struct bt_conn *conn, const struct bt_gatt_
 
 	if (len < 1U) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+
+	if (payload[0] == KERFUR_FACE_DEBUG_MAGIC) {
+		return inject_face_debug_v1(payload, len);
 	}
 
 	type = decode_injected_event(payload[0]);

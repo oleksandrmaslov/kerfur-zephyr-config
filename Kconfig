@@ -62,11 +62,86 @@ config KERFUR_ENABLE_SHELL_CMDS
 	help
 	  Enables `kerfur ble ...` shell commands on USB serial backend.
 
+config KERFUR_ENABLE_FACE_SHELL_CMDS
+	bool "Enable Kerfur face debug shell commands"
+	default n
+	depends on KERFUR_ENABLE_SHELL_CMDS && KERFUR_FACE_DEBUG
+	help
+	  Enables `kerfur face ...` shell commands for debug-only expression,
+	  reaction, gaze, carry-state and battery injection. Keep disabled in
+	  normal builds so the face debug shell surface is compiled out.
+
 config KERFUR_ENABLE_MOCK_INPUTS
 	bool "Enable periodic mock external events"
 	default y
 	help
 	  Keeps the pet behavior active before all real sensors are added.
+
+config KERFUR_MOTION
+	bool "Enable Kerfur motion sensing and classification"
+	default y
+	select SENSOR
+	imply LSM6DSO
+	imply LSM6DSO_TRIGGER
+	imply LSM6DSO_TILT
+	help
+	  Enables the IMU abstraction, motion classifier, pickup and in-hand
+	  detection, and tilt-driven gaze integration. If no `motion0` DT alias
+	  exists, the firmware still builds and the motion stack remains disabled
+	  at runtime.
+
+if KERFUR_MOTION
+
+config KERFUR_MOTION_IDLE_ODR_HZ
+	int "Idle accelerometer sampling rate (Hz)"
+	range 1 26
+	default 12
+	help
+	  Target low-power accelerometer rate while waiting for motion wake.
+
+config KERFUR_MOTION_ACTIVE_ODR_HZ
+	int "Active accelerometer sampling rate (Hz)"
+	range 12 104
+	default 26
+	help
+	  Target accelerometer rate used during active classification windows.
+
+config KERFUR_MOTION_ACTIVE_WINDOW_MS
+	int "Active classification window (ms)"
+	range 500 10000
+	default 3000
+	help
+	  Duration of the motion analysis burst after a wake trigger.
+
+config KERFUR_MOTION_STEP_BATCH_SIZE
+	int "Step batch publish size"
+	range 1 32
+	default 8
+	help
+	  Number of accumulated steps before publishing APP_EVENT_STEP_BATCH.
+
+config KERFUR_MOTION_WALK_START_THRESHOLD
+	int "Walking start confidence threshold"
+	range 1 100
+	default 70
+	help
+	  Walking begins when confidence reaches this threshold.
+
+config KERFUR_MOTION_WALK_STOP_THRESHOLD
+	int "Walking stop confidence threshold"
+	range 1 100
+	default 45
+	help
+	  Walking ends when confidence falls below this threshold.
+
+config KERFUR_MOTION_GAZE_RATE_HZ
+	int "Maximum tilt gaze update rate (Hz)"
+	range 1 20
+	default 10
+	help
+	  Maximum rate for LOOK_TARGET updates while tracking in-hand tilt.
+
+endif
 
 config KERFUR_IDLE_TIMEOUT_S
 	int "Idle timeout (seconds)"
@@ -102,5 +177,20 @@ config KERFUR_TRACE_EVENTS
 	help
 	  Adds extra runtime logs in app/core/behavior/power paths for
 	  easier bring-up and troubleshooting.
+
+config KERFUR_FACE_DEBUG
+	bool "Enable modular face debug hooks"
+	default y
+	help
+	  Enables face-state debug events and shell-triggered dump plumbing for
+	  the modular face rewrite.
+
+config KERFUR_FACE_DEBUG_VERBOSE
+	bool "Enable verbose modular face debug logging"
+	default n
+	depends on KERFUR_FACE_DEBUG
+	help
+	  Adds detailed face snapshot logs for look/carry/battery updates and
+	  debug-dump requests.
 
 endmenu

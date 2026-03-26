@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include <lvgl.h>
 #include <zephyr/device.h>
@@ -10,8 +11,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
-#include "behavior/micro_reaction.h"
-#include "ui/kerfur_faces.h"
+#include "ui/face_runtime.h"
+#include "ui/generated/kerfur_face_assets.h"
 #include "ui/ui_renderer.h"
 
 LOG_MODULE_REGISTER(ui_renderer, CONFIG_LOG_DEFAULT_LEVEL);
@@ -20,29 +21,21 @@ LOG_MODULE_REGISTER(ui_renderer, CONFIG_LOG_DEFAULT_LEVEL);
 #error "No zephyr,display chosen node. Select a display shield."
 #endif
 
+#if !defined(CONFIG_LV_USE_IMAGE) || !defined(CONFIG_LV_USE_CANVAS) || \
+	!defined(CONFIG_LV_USE_LABEL)
+#error "ui_renderer requires CONFIG_LV_USE_IMAGE=y, CONFIG_LV_USE_CANVAS=y, and CONFIG_LV_USE_LABEL=y"
+#endif
+
 #define UI_CANVAS_MAX_W 128
 #define UI_CANVAS_MAX_H 64
-
-#define BASE_LEFT_EYE_X 17
-#define BASE_RIGHT_EYE_X 74
-#define BASE_EYE_Y 16
-#define BASE_MOUTH_X 54
-#define BASE_MOUTH_Y 38
-#define BASE_WHISKER_LEFT_X 0
-#define BASE_WHISKER_RIGHT_X 119
-#define BASE_WHISKER_Y 46
-#define BASE_BROW_LEFT_X 46
-#define BASE_BROW_RIGHT_X 72
-#define BASE_BROW_Y 8
-#define BASE_BLINK_LEFT_X 20
-#define BASE_BLINK_RIGHT_X 77
-#define BASE_BLINK_Y 30
 
 struct ui_runtime {
 	const struct device *display;
 	lv_obj_t *root;
 	lv_obj_t *canvas;
+	lv_obj_t *overlay_label;
 	bool blanked;
+	bool debug_dump_requested;
 	int16_t width;
 	int16_t height;
 	int8_t ambient_shift_x;
@@ -50,59 +43,127 @@ struct ui_runtime {
 	uint8_t shift_phase;
 	int64_t last_shift_ms;
 	uint8_t contrast;
+	struct face_runtime_state face_runtime;
 };
 
 static struct ui_runtime g_ui;
 static uint8_t g_canvas_buf[LV_CANVAS_BUF_SIZE(UI_CANVAS_MAX_W, UI_CANVAS_MAX_H, 8,
 						LV_DRAW_BUF_STRIDE_ALIGN)];
 
-static void draw_pixel(int16_t x, int16_t y, lv_opa_t opa)
+static void draw_bitmap(const struct kerfur_face_bitmap *bitmap, int16_t x, int16_t y,
+			bool mirror_x, bool draw_black, lv_opa_t opa)
 {
-	if ((x < 0) || (y < 0) || (x >= g_ui.width) || (y >= g_ui.height)) {
-		return;
-	}
-
-	lv_canvas_set_px_skip_invalidate(g_ui.canvas, x, y, lv_color_white(), opa);
-}
-
-static void draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, lv_opa_t opa)
-{
-	int16_t px;
-	int16_t py;
-
-	for (py = 0; py < h; py++) {
-		for (px = 0; px < w; px++) {
-			draw_pixel(x + px, y + py, opa);
-		}
-	}
-}
-
-static void draw_bitmap(const struct kerfur_bitmap *bmp, int16_t x, int16_t y, lv_opa_t opa)
-{
-	uint8_t bytes_per_row;
 	int16_t row;
 	int16_t col;
 
-	if ((bmp == NULL) || (bmp->data == NULL)) {
+	if ((bitmap == NULL) || (bitmap->data == NULL)) {
 		return;
 	}
 
-	bytes_per_row = (uint8_t)((bmp->width + 7U) / 8U);
+	for (row = 0; row < bitmap->height; row++) {
+		for (col = 0; col < bitmap->width; col++) {
+			int16_t src_col = mirror_x ? (bitmap->width - 1 - col) : col;
+			uint8_t byte = bitmap->data[(row * bitmap->stride) + (src_col / 8)];
+			uint8_t bit = BIT(7 - (src_col % 8));
+			int16_t dst_x = x + col;
+			int16_t dst_y = y + row;
 
-	for (row = 0; row < bmp->height; row++) {
-		for (col = 0; col < bmp->width; col++) {
-			const uint8_t byte = bmp->data[(row * bytes_per_row) + (col / 8)];
-			/*
-			 * Adafruit GFX-style bitmap data is MSB-first in each byte.
-			 * Using MSB->left fixes mirrored/scrambled columns.
-			 */
-			const uint8_t bit = BIT(7 - (col % 8));
-
-			if ((byte & bit) != 0U) {
-				draw_pixel(x + col, y + row, opa);
+			if (((byte & bit) != 0U) && (dst_x >= 0) && (dst_y >= 0) &&
+			    (dst_x < g_ui.width) && (dst_y < g_ui.height)) {
+				lv_canvas_set_px_skip_invalidate(
+					g_ui.canvas,
+					dst_x,
+					dst_y,
+					draw_black ? lv_color_black() : lv_color_white(),
+					opa
+				);
 			}
 		}
 	}
+}
+
+static bool should_mirror_on_right(const struct kerfur_face_asset_metadata *asset)
+{
+	return asset != NULL &&
+	       ((asset->flags & (KERFUR_FACE_ASSET_FLAG_MIRRORABLE |
+				 KERFUR_FACE_ASSET_FLAG_MIRROR_RIGHT)) != 0U);
+}
+
+static void draw_asset(enum kerfur_face_asset_id asset_id, int16_t x, int16_t y, bool right_side,
+		       lv_opa_t opa)
+{
+	const struct kerfur_face_asset_metadata *asset = kerfur_face_asset_get(asset_id);
+
+	if ((asset == NULL) || (asset->bitmap == NULL)) {
+		return;
+	}
+
+	draw_bitmap(
+		asset->bitmap,
+		x,
+		y,
+		right_side && should_mirror_on_right(asset),
+		(asset->flags & KERFUR_FACE_ASSET_FLAG_DRAW_BLACK) != 0U,
+		opa
+	);
+}
+
+static struct kerfur_face_point point_with_shift(struct kerfur_face_point point)
+{
+	point.x += g_ui.ambient_shift_x;
+	point.y += g_ui.ambient_shift_y;
+	return point;
+}
+
+static struct kerfur_face_point remap_eye_slot_position(struct kerfur_face_point base_position,
+							enum kerfur_face_asset_id from_asset_id,
+							enum kerfur_face_asset_id to_asset_id)
+{
+	const struct kerfur_face_asset_metadata *from_asset = kerfur_face_asset_get(from_asset_id);
+	const struct kerfur_face_asset_metadata *to_asset = kerfur_face_asset_get(to_asset_id);
+
+	if ((from_asset == NULL) || (to_asset == NULL)) {
+		return base_position;
+	}
+
+	base_position.x += to_asset->anchor_x - from_asset->anchor_x;
+	base_position.y += to_asset->anchor_y - from_asset->anchor_y;
+	return base_position;
+}
+
+static struct kerfur_face_point eye_white_draw_position(const struct face_runtime_plan *plan,
+							const struct kerfur_face_recipe *recipe,
+							bool left_eye)
+{
+	return remap_eye_slot_position(left_eye ? plan->layout.left_eye_white :
+						      plan->layout.right_eye_white,
+				       left_eye ? recipe->left_eye_white : recipe->right_eye_white,
+				       left_eye ? plan->left_eye_white : plan->right_eye_white);
+}
+
+static struct kerfur_face_point pupil_draw_position(const struct face_runtime_plan *plan,
+						    const struct kerfur_face_recipe *recipe,
+						    bool left_eye)
+{
+	struct kerfur_face_point point = eye_white_draw_position(plan, recipe, left_eye);
+	const struct kerfur_face_point pupil_offset = left_eye ? plan->layout.left_eyeball :
+							       plan->layout.right_eyeball;
+	const struct kerfur_face_asset_metadata *base_pupil_asset =
+		kerfur_face_asset_get(left_eye ? recipe->left_eyeball : recipe->right_eyeball);
+	const struct kerfur_face_asset_metadata *active_pupil_asset =
+		kerfur_face_asset_get(left_eye ? plan->left_eyeball : plan->right_eyeball);
+
+	point.x += pupil_offset.x;
+	point.y += pupil_offset.y;
+
+	if ((base_pupil_asset != NULL) && (active_pupil_asset != NULL)) {
+		point.x += active_pupil_asset->anchor_x - base_pupil_asset->anchor_x;
+		point.y += active_pupil_asset->anchor_y - base_pupil_asset->anchor_y;
+	}
+
+	point.x += left_eye ? plan->left_pupil_offset_x : plan->right_pupil_offset_x;
+	point.y += left_eye ? plan->left_pupil_offset_y : plan->right_pupil_offset_y;
+	return point_with_shift(point);
 }
 
 static void update_contrast(enum pet_display_state state)
@@ -110,12 +171,7 @@ static void update_contrast(enum pet_display_state state)
 	uint8_t target;
 	int err;
 
-	if (state == DISPLAY_AMBIENT) {
-		target = 96U;
-	} else {
-		target = 255U;
-	}
-
+	target = (state == DISPLAY_AMBIENT) ? 96U : 255U;
 	if (g_ui.contrast == target) {
 		return;
 	}
@@ -127,46 +183,6 @@ static void update_contrast(enum pet_display_state state)
 	}
 
 	g_ui.contrast = target;
-}
-
-static void resolve_face_pose(const struct pet_state *state, enum kerfur_face_visual visual,
-			      bool ambient, int64_t now_ms, struct kerfur_face_pose *pose)
-{
-	const struct kerfur_face_animation *idle_animation;
-	const struct kerfur_face_animation *reaction_animation;
-
-	kerfur_face_pose_init(visual, pose);
-
-	idle_animation = kerfur_face_idle_animation_get(visual, ambient);
-	(void)kerfur_face_pose_apply_animation(pose, idle_animation, now_ms);
-
-	reaction_animation = kerfur_face_reaction_animation_get(visual, state->current_reaction);
-	if (reaction_animation != NULL) {
-		(void)kerfur_face_pose_apply_animation(pose, reaction_animation,
-						      now_ms - state->last_reaction_timestamp_ms);
-	}
-}
-
-static bool should_blink(const struct pet_state *state, enum kerfur_face_visual visual,
-			 int64_t now_ms, bool ambient,
-			 const struct kerfur_face_pose *pose)
-{
-	const int64_t blink_period_ms = ambient ? 8000 : 4200;
-	const bool reaction_anim_active =
-		kerfur_face_reaction_animation_get(visual, state->current_reaction) != NULL;
-	const int64_t blink_duration_ms =
-		((pose->flags & KERFUR_FACE_FLAG_SLEEPY) != 0U) ? 400 : 220;
-	const bool periodic = ((now_ms + (state->arousal * 31)) % blink_period_ms) < blink_duration_ms;
-
-	if ((pose != NULL) && (pose->eye_mode == KERFUR_FACE_EYE_BLINK)) {
-		return true;
-	}
-
-	if (reaction_anim_active) {
-		return false;
-	}
-
-	return periodic;
 }
 
 static void update_pixel_shift(bool ambient, int64_t now_ms)
@@ -187,49 +203,102 @@ static void update_pixel_shift(bool ambient, int64_t now_ms)
 		return;
 	}
 
-	g_ui.shift_phase = (g_ui.shift_phase + 1U) % 6U;
+	g_ui.shift_phase = (g_ui.shift_phase + 1U) % ARRAY_SIZE(shift_table);
 	g_ui.ambient_shift_x = shift_table[g_ui.shift_phase][0];
 	g_ui.ambient_shift_y = shift_table[g_ui.shift_phase][1];
 	g_ui.last_shift_ms = now_ms;
 }
 
-static void draw_reaction_overlay(const struct pet_state *state, int64_t now_ms, lv_opa_t opa)
+static void update_overlay_label(const struct face_runtime_plan *plan)
 {
-	switch (state->current_reaction) {
-	case REACTION_STARTLE:
-		draw_rect((g_ui.width / 2) - 1, 2, 3, 8, opa);
-		draw_rect((g_ui.width / 2) - 1, 12, 3, 3, opa);
-		break;
-	case REACTION_NOTIF_PING:
-		draw_rect((g_ui.width / 2) - 2, 3, 4, 4, opa);
-		break;
-	case REACTION_NOTIF_BURST:
-		draw_rect((g_ui.width / 2) - 4, 2, 8, 4, opa);
-		draw_rect((g_ui.width / 2) - 2, 7, 4, 3, opa);
-		break;
-	case REACTION_CHARGE_PULSE:
-		if (((now_ms / 250) % 2) == 0) {
-			draw_rect(4, 3, 7, 4, opa);
-			draw_rect(11, 4, 2, 2, opa);
-		}
-		break;
-	case REACTION_LOW_BATT_SAG:
-		draw_rect(4, 3, 7, 4, opa / 2);
-		draw_rect(11, 4, 2, 2, opa / 2);
-		break;
-	case REACTION_CONNECT_SPARK:
-		draw_rect(g_ui.width - 10, 2, 2, 6, opa);
-		draw_rect(g_ui.width - 7, 4, 2, 4, opa);
-		break;
-	case REACTION_DISCONNECT_SCAN:
-		draw_rect(g_ui.width - 11, 3, 6, 2, opa);
-		draw_rect(g_ui.width - 11, 7, 4, 2, opa);
-		break;
-	case REACTION_SLEEP_FADE:
-		draw_rect(0, 0, g_ui.width, g_ui.height, LV_OPA_30);
-		break;
-	default:
-		break;
+	const struct kerfur_face_overlay_def *overlay_def = kerfur_face_overlay_get(plan->overlay_id);
+	struct kerfur_face_point overlay_point = point_with_shift(plan->layout.overlay);
+
+	if ((overlay_def->render_mode != KERFUR_FACE_OVERLAY_RENDER_BATTERY_PERCENT_TEXT) ||
+	    !g_ui.face_runtime.battery_percent_known) {
+		lv_obj_add_flag(g_ui.overlay_label, LV_OBJ_FLAG_HIDDEN);
+		return;
+	}
+
+	lv_label_set_text_fmt(g_ui.overlay_label, "%d%%", g_ui.face_runtime.battery_percent);
+	lv_obj_set_pos(g_ui.overlay_label, overlay_point.x, overlay_point.y);
+	lv_obj_clear_flag(g_ui.overlay_label, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void draw_face_plan(const struct face_runtime_plan *plan, lv_opa_t opa)
+{
+	const struct kerfur_face_recipe *recipe = kerfur_face_recipe_get(plan->recipe_id);
+	struct kerfur_face_point left_eye_base = eye_white_draw_position(plan, recipe, true);
+	struct kerfur_face_point right_eye_base = eye_white_draw_position(plan, recipe, false);
+	struct kerfur_face_point left_eye_pos = point_with_shift(left_eye_base);
+	struct kerfur_face_point right_eye_pos = point_with_shift(right_eye_base);
+	struct kerfur_face_point left_blink_pos = remap_eye_slot_position(left_eye_base,
+								 plan->left_eye_white,
+								 plan->blink_left_eye_white);
+	struct kerfur_face_point right_blink_pos = remap_eye_slot_position(right_eye_base,
+								  plan->right_eye_white,
+								  plan->blink_right_eye_white);
+	enum kerfur_face_asset_id left_eye_asset = plan->left_eye_white;
+	enum kerfur_face_asset_id right_eye_asset = plan->right_eye_white;
+	uint8_t index;
+
+	left_blink_pos = point_with_shift(left_blink_pos);
+	right_blink_pos = point_with_shift(right_blink_pos);
+
+	if (plan->blink_left_active && (plan->blink_left_eye_white != KERFUR_FACE_ASSET_NONE)) {
+		left_eye_pos = left_blink_pos;
+		left_eye_asset = plan->blink_left_eye_white;
+	}
+
+	if (plan->blink_right_active && (plan->blink_right_eye_white != KERFUR_FACE_ASSET_NONE)) {
+		right_eye_pos = right_blink_pos;
+		right_eye_asset = plan->blink_right_eye_white;
+	}
+
+	draw_asset(left_eye_asset, left_eye_pos.x, left_eye_pos.y, false, opa);
+	draw_asset(right_eye_asset, right_eye_pos.x, right_eye_pos.y, true, opa);
+
+	if (!plan->blink_left_active && (plan->left_eyeball != KERFUR_FACE_ASSET_NONE)) {
+		struct kerfur_face_point left_pupil = pupil_draw_position(plan, recipe, true);
+
+		draw_asset(plan->left_eyeball, left_pupil.x, left_pupil.y, false, opa);
+	}
+
+	if (!plan->blink_right_active && (plan->right_eyeball != KERFUR_FACE_ASSET_NONE)) {
+		struct kerfur_face_point right_pupil = pupil_draw_position(plan, recipe, false);
+
+		draw_asset(plan->right_eyeball, right_pupil.x, right_pupil.y, true, opa);
+	}
+
+	draw_asset(plan->left_brow, point_with_shift(plan->layout.left_brow).x,
+		  point_with_shift(plan->layout.left_brow).y, false, opa);
+	draw_asset(plan->right_brow, point_with_shift(plan->layout.right_brow).x,
+		  point_with_shift(plan->layout.right_brow).y, true, opa);
+	draw_asset(plan->mouth, point_with_shift(plan->layout.mouth).x,
+		  point_with_shift(plan->layout.mouth).y, false, opa);
+	draw_asset(plan->whiskers, point_with_shift(plan->layout.left_whisker).x,
+		  point_with_shift(plan->layout.left_whisker).y, false, opa);
+	draw_asset(plan->whiskers, point_with_shift(plan->layout.right_whisker).x,
+		  point_with_shift(plan->layout.right_whisker).y, true, opa);
+
+	for (index = 0U; index < plan->effect_count; index++) {
+		struct kerfur_face_point point = point_with_shift(plan->effects[index].position);
+
+		draw_asset(plan->effects[index].asset_id, point.x, point.y, false, opa);
+	}
+
+	if (plan->indicator_asset != KERFUR_FACE_ASSET_NONE) {
+		struct kerfur_face_point point = point_with_shift(plan->layout.indicator);
+
+		draw_asset(plan->indicator_asset, point.x, point.y, false, opa);
+	}
+
+	if (plan->overlay_asset != KERFUR_FACE_ASSET_NONE &&
+	    kerfur_face_overlay_get(plan->overlay_id)->render_mode ==
+		    KERFUR_FACE_OVERLAY_RENDER_BITMAP) {
+		struct kerfur_face_point point = point_with_shift(plan->layout.overlay);
+
+		draw_asset(plan->overlay_asset, point.x, point.y, false, opa);
 	}
 }
 
@@ -267,17 +336,24 @@ int ui_renderer_init(void)
 	lv_obj_set_size(g_ui.canvas, g_ui.width, g_ui.height);
 	lv_canvas_fill_bg(g_ui.canvas, lv_color_black(), LV_OPA_COVER);
 
+	g_ui.overlay_label = lv_label_create(g_ui.root);
+	lv_obj_set_style_text_color(g_ui.overlay_label, lv_color_white(), LV_PART_MAIN);
+	lv_obj_set_style_bg_opa(g_ui.overlay_label, LV_OPA_TRANSP, LV_PART_MAIN);
+	lv_obj_add_flag(g_ui.overlay_label, LV_OBJ_FLAG_HIDDEN);
+
 	err = display_blanking_off(g_ui.display);
 	if ((err < 0) && (err != -ENOSYS)) {
 		LOG_WRN("display_blanking_off failed (%d)", err);
 	}
 
 	g_ui.blanked = false;
+	g_ui.debug_dump_requested = false;
 	g_ui.ambient_shift_x = 0;
 	g_ui.ambient_shift_y = 0;
 	g_ui.shift_phase = 0U;
 	g_ui.last_shift_ms = k_uptime_get();
 	g_ui.contrast = 255U;
+	face_runtime_init(&g_ui.face_runtime);
 	lv_timer_handler();
 	return 0;
 }
@@ -306,85 +382,36 @@ void ui_renderer_set_blanked(bool blanked)
 	}
 }
 
-void ui_renderer_render(const struct pet_state *state, int64_t now_ms)
+void ui_renderer_request_debug_dump(void)
 {
-	const enum kerfur_face_visual visual = kerfur_face_visual_for_expression(state->current_expression);
-	const struct kerfur_face_asset_pack *assets = kerfur_face_assets_get(visual);
+	g_ui.debug_dump_requested = true;
+}
+
+void ui_renderer_render(struct pet_state *state, int64_t now_ms)
+{
 	const bool ambient = (state->current_display_state == DISPLAY_AMBIENT);
-	struct kerfur_face_pose pose;
-	bool blink;
+	const struct face_runtime_plan *plan;
 	lv_opa_t opa = ambient ? LV_OPA_50 : LV_OPA_COVER;
-	int16_t left_eye_x;
-	int16_t right_eye_x;
-	int16_t eye_y;
-	int16_t mouth_x;
-	int16_t mouth_y;
-	int16_t brow_y;
 
 	if ((g_ui.canvas == NULL) || g_ui.blanked || (state->current_display_state == DISPLAY_OFF)) {
 		return;
 	}
 
-	resolve_face_pose(state, visual, ambient, now_ms, &pose);
-	blink = should_blink(state, visual, now_ms, ambient, &pose);
-
 	update_contrast(state->current_display_state);
 	update_pixel_shift(ambient, now_ms);
+	plan = face_runtime_step(&g_ui.face_runtime, state, now_ms, ambient,
+				 g_ui.debug_dump_requested);
+	g_ui.debug_dump_requested = false;
+
 	lv_canvas_fill_bg(g_ui.canvas, lv_color_black(), LV_OPA_COVER);
+	lv_obj_add_flag(g_ui.overlay_label, LV_OBJ_FLAG_HIDDEN);
 
-	left_eye_x = assets->eye_left_x + pose.eye_dx + g_ui.ambient_shift_x;
-	right_eye_x = assets->eye_right_x + pose.eye_dx + g_ui.ambient_shift_x;
-	eye_y = assets->eye_y + pose.eye_dy + g_ui.ambient_shift_y;
-	mouth_x = assets->mouth_x + pose.mouth_dx + g_ui.ambient_shift_x;
-	mouth_y = assets->mouth_y + pose.mouth_dy + g_ui.ambient_shift_y;
-	brow_y = assets->brow_y + pose.brow_dy + g_ui.ambient_shift_y;
-
-	if ((pose.flags & KERFUR_FACE_FLAG_SHOW_WHISKERS) != 0U) {
-		draw_bitmap(assets->whisker_left,
-			    assets->whisker_left_x + g_ui.ambient_shift_x,
-			    assets->whisker_y + pose.whisker_dy + g_ui.ambient_shift_y, opa);
-		draw_bitmap(assets->whisker_right,
-			    assets->whisker_right_x + g_ui.ambient_shift_x,
-			    assets->whisker_y + pose.whisker_dy + g_ui.ambient_shift_y, opa);
+	if (plan != NULL) {
+		draw_face_plan(plan, opa);
+		update_overlay_label(plan);
 	}
 
-	if (blink) {
-		draw_bitmap(assets->eye_blink,
-			    assets->blink_left_x + pose.eye_dx + g_ui.ambient_shift_x,
-			    assets->blink_y + pose.eye_dy + g_ui.ambient_shift_y, opa);
-		draw_bitmap(assets->eye_blink,
-			    assets->blink_right_x + pose.eye_dx + g_ui.ambient_shift_x,
-			    assets->blink_y + pose.eye_dy + g_ui.ambient_shift_y, opa);
-	} else {
-		draw_bitmap(assets->eye_open_left, left_eye_x, eye_y, opa);
-		draw_bitmap(assets->eye_open_right, right_eye_x, eye_y, opa);
-	}
-
-	draw_bitmap(assets->mouth, mouth_x, mouth_y, opa);
-
-	if (((pose.flags & KERFUR_FACE_FLAG_SHOW_MOUTH_OPEN) != 0U) && (assets->mouth_open != NULL)) {
-		draw_bitmap(assets->mouth_open,
-			    assets->mouth_open_x + g_ui.ambient_shift_x,
-			    assets->mouth_open_y + pose.mouth_open_dy + g_ui.ambient_shift_y, opa);
-	}
-
-	if ((pose.flags & KERFUR_FACE_FLAG_SHOW_BROWS) != 0U) {
-		draw_bitmap(assets->brow_left, assets->brow_left_x + g_ui.ambient_shift_x,
-			    brow_y, opa);
-		draw_bitmap(assets->brow_right, assets->brow_right_x + g_ui.ambient_shift_x,
-			    brow_y, opa);
-	}
-
-	if (state->ble_connected) {
-		draw_rect(g_ui.width - 6, 2, 3, 4, opa);
-	}
-
-	if (state->battery_low) {
-		draw_rect(2, 2, 6, 4, opa / 2);
-		draw_rect(8, 3, 1, 2, opa / 2);
-	}
-
-	draw_reaction_overlay(state, now_ms, opa);
 	lv_obj_invalidate(g_ui.canvas);
+	lv_obj_invalidate(g_ui.overlay_label);
 	lv_timer_handler();
 }

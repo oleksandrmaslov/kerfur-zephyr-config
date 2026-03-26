@@ -54,15 +54,23 @@ struct pet_state {
 
 	/* Derived/session values. */
 	uint8_t walk_confidence;
+	uint8_t walking_confidence;
 	uint8_t notification_burst_level;
 	uint32_t step_count_today;
 	uint32_t total_steps_since_boot;
+	uint16_t last_hw_step_counter;
+	bool walking_active;
+	int64_t walking_session_start_ms;
 
 	/* Timestamps. */
 	int64_t last_pet_timestamp_ms;
 	int64_t last_real_interaction_timestamp_ms;
 	int64_t last_motion_timestamp_ms;
 	int64_t last_walk_timestamp_ms;
+	int64_t last_pickup_timestamp_ms;
+	int64_t last_in_hand_timestamp_ms;
+	int64_t last_motion_sample_timestamp_ms;
+	int64_t last_still_timestamp_ms;
 	int64_t last_phone_event_timestamp_ms;
 	int64_t last_self_wake_timestamp_ms;
 	int64_t last_reaction_timestamp_ms;
@@ -81,6 +89,19 @@ struct pet_state {
 	enum pet_expression current_expression;
 	enum micro_reaction_type current_reaction;
 	enum pet_display_state current_display_state;
+	int16_t current_indicator;
+	int16_t current_overlay;
+	int16_t look_target_x;
+	int16_t look_target_y;
+	int16_t look_render_x;
+	int16_t look_render_y;
+	uint8_t look_confidence;
+	bool picked_up_recently;
+	bool in_hand;
+	uint8_t pickup_confidence;
+	uint8_t in_hand_confidence;
+	int8_t battery_percent;
+	bool battery_percent_known;
 
 	/* Flags. */
 	bool ble_connected;
@@ -90,6 +111,7 @@ struct pet_state {
 	bool battery_critical;
 	bool ambient_wake_enabled;
 	bool time_valid;
+	bool dynamic_pupils_forced_disabled;
 };
 
 #endif /* KERFUR_PET_STATE_H_ */

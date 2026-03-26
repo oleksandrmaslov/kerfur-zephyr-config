@@ -36,6 +36,10 @@ static void app_handle_event(struct pet_state *pet, const struct app_event *even
 	behavior_engine_handle_event(pet, event);
 	power_manager_on_event(event, pet);
 	display_policy_on_event(pet, event);
+
+	if (event->type == APP_EVENT_FACE_DEBUG_DUMP) {
+		ui_renderer_request_debug_dump();
+	}
 }
 
 int app_run(void)
