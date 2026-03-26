@@ -21,10 +21,12 @@ struct in_hand_detector {
 	int64_t last_motion_wake_ms;
 	int64_t last_pickup_ms;
 	int64_t last_in_hand_ms;
+	int64_t last_orientation_change_ms;
 	uint8_t pickup_confidence;
 	uint8_t in_hand_confidence;
 	bool in_hand;
 	bool pickup_candidate_reported;
+	bool picked_up_reported;
 };
 
 struct in_hand_detector_input {

@@ -32,6 +32,7 @@ enum kerfur_face_asset_flags {
 	KERFUR_FACE_ASSET_FLAG_MIRRORABLE = 1 << 0,
 	KERFUR_FACE_ASSET_FLAG_MIRROR_RIGHT = 1 << 1,
 	KERFUR_FACE_ASSET_FLAG_SPECIAL_MODE = 1 << 2,
+	KERFUR_FACE_ASSET_FLAG_DRAW_BLACK = 1 << 3,
 };
 
 enum kerfur_face_asset_id {

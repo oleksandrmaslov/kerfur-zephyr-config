@@ -103,7 +103,7 @@ static void draw_asset(enum kerfur_face_asset_id asset_id, int16_t x, int16_t y,
 		x,
 		y,
 		right_side && should_mirror_on_right(asset),
-		(asset->flags & KERFUR_FACE_ASSET_FLAG_DRAW_BLACK) != 0U,
+		false,
 		opa
 	);
 }

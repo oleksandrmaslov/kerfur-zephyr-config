@@ -1,4 +1,5 @@
 #include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/sensor/lsm6dso.h>
 
 / {
 	chosen {
@@ -13,7 +14,15 @@
 
 	aliases {
 		touch0 = &pet_touch0;
+		motion0 = &kerfur_motion0;
 	};
+
+	/*
+	 * LSM6DSOX bring-up:
+	 * - default address here is 0x6a; change to 0x6b if your SA0/SDO strap is high
+	 * - runtime code supports polling-only test mode if INT is not wired yet
+	 * - once INT is wired, add `irq-gpios` and `int-pin` to enable tilt wake
+	 */
 
 	/*
 	 * Digital touch sensor input (default pin P0.31 / D21).
@@ -26,6 +35,27 @@
 			label = "PET_TOUCH_0";
 			gpios = <&gpio0 31 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 		};
+	};
+};
+
+&pro_micro_i2c {
+	status = "okay";
+
+	kerfur_motion0: lsm6dso@6a {
+		compatible = "st,lsm6dso";
+		reg = <0x6a>;
+		accel-pm = <LSM6DSO_DT_XL_LP_NORMAL_MODE>;
+		accel-range = <LSM6DSO_DT_FS_2G>;
+		accel-odr = <LSM6DSO_DT_ODR_12Hz5>;
+		gyro-pm = <LSM6DSO_DT_GY_NORMAL_MODE>;
+		gyro-range = <LSM6DSO_DT_FS_250DPS>;
+		gyro-odr = <LSM6DSO_DT_ODR_OFF>;
+		status = "okay";
+		/*
+		 * Enable when INT1/INT2 is wired:
+		 * int-pin = <1>;
+		 * irq-gpios = <&gpio0 SOME_FREE_PIN GPIO_ACTIVE_HIGH>;
+		 */
 	};
 };
 

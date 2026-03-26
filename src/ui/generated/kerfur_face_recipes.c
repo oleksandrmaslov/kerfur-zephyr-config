@@ -1,9 +1,11 @@
+#include <stddef.h>
+
 #include "ui/generated/kerfur_face_recipes.h"
 
-_Static_assert(KERFUR_FACE_RECIPE_PET_EXPR_CALM == PET_EXPR_CALM, "recipe alias drift");
+_Static_assert((int)KERFUR_FACE_RECIPE_PET_EXPR_CALM == (int)PET_EXPR_CALM, "recipe alias drift");
 _Static_assert(KERFUR_FACE_RECIPE_COUNT == (PET_EXPR_ASLEEP + 1), "recipe alias drift");
-_Static_assert(KERFUR_FACE_REACTION_REACTION_NONE == REACTION_NONE, "reaction alias drift");
-_Static_assert(KERFUR_FACE_REACTION_REACTION_LOOK_DOWN == REACTION_LOOK_DOWN, "reaction alias drift");
+_Static_assert((int)KERFUR_FACE_REACTION_REACTION_NONE == (int)REACTION_NONE, "reaction alias drift");
+_Static_assert((int)KERFUR_FACE_REACTION_REACTION_LOOK_DOWN == (int)REACTION_LOOK_DOWN, "reaction alias drift");
 
 static const enum kerfur_face_micro_anim_id g_face_ambient_motion_pet_expr_calm[] = { KERFUR_FACE_MICRO_ANIM_PUPIL_IDLE_DRIFT };
 static const enum kerfur_face_micro_anim_id g_face_ambient_motion_pet_expr_curious[] = { KERFUR_FACE_MICRO_ANIM_PUPIL_IDLE_DRIFT };
@@ -654,17 +656,17 @@ static const struct kerfur_face_reaction g_face_reactions[REACTION_COUNT] = {
 		.look_offset_y = 0,
 		.has_allow_dynamic_pupils_override = false,
 		.allow_dynamic_pupils = false,
-		.left_eye_white = KERFUR_FACE_ASSET_NONE,
-		.right_eye_white = KERFUR_FACE_ASSET_NONE,
-		.left_eyeball = KERFUR_FACE_ASSET_NONE,
-		.right_eyeball = KERFUR_FACE_ASSET_NONE,
+		.left_eye_white = KERFUR_FACE_ASSET_EYE_WHITE_BLINK,
+		.right_eye_white = KERFUR_FACE_ASSET_EYE_WHITE_BLINK,
+		.left_eyeball = KERFUR_FACE_ASSET_PUPIL_NONE,
+		.right_eyeball = KERFUR_FACE_ASSET_PUPIL_NONE,
 		.left_brow = KERFUR_FACE_ASSET_NONE,
 		.right_brow = KERFUR_FACE_ASSET_NONE,
 		.mouth = KERFUR_FACE_ASSET_NONE,
 		.whiskers = KERFUR_FACE_ASSET_NONE,
 		.indicator = KERFUR_FACE_INDICATOR_NONE,
 		.overlay = KERFUR_FACE_OVERLAY_NONE,
-		.blink_override = KERFUR_FACE_BLINK_PROFILE_BLINK_LEGACY_DEFAULT,
+		.blink_override = KERFUR_FACE_BLINK_PROFILE_NONE,
 		.micro_animation = KERFUR_FACE_MICRO_ANIM_NONE,
 		.left_eye_white_override = { 0, 0, 0, 0, 0 },
 		.right_eye_white_override = { 0, 0, 0, 0, 0 },
@@ -1217,7 +1219,7 @@ const struct kerfur_face_recipe *kerfur_face_recipe_get(enum kerfur_face_recipe_
 
 const struct kerfur_face_reaction *kerfur_face_reaction_get(enum kerfur_face_reaction_id id)
 {
-	if ((id < 0) || (id >= REACTION_COUNT)) {
+	if ((id < 0) || (id >= KERFUR_FACE_REACTION_REACTION_COUNT)) {
 		return &g_face_reactions[KERFUR_FACE_REACTION_REACTION_NONE];
 	}
 	return &g_face_reactions[id];

@@ -4,7 +4,19 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+enum motion_sensor_event {
+	MOTION_SENSOR_EVENT_WAKE = 1U << 0,
+	MOTION_SENSOR_EVENT_TILT = 1U << 1,
+	MOTION_SENSOR_EVENT_DATA_READY = 1U << 2,
+};
+
 struct motion_sensor_capabilities {
+	bool has_hw_step_counter;
+	bool has_significant_motion;
+	bool has_tilt;
+	bool has_stationary_motion;
+	bool has_fsm;
+	bool has_mlc;
 	bool backend_ready;
 	bool backend_has_hw_step_counter;
 	bool backend_has_significant_motion;

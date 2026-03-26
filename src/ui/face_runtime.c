@@ -408,6 +408,11 @@ static enum face_runtime_dynamic_reason resolve_dynamic_reason(
 	if (state->dynamic_pupils_forced_disabled) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_FORCED_OFF;
 	}
+	if (state->battery_critical ||
+	    (state->battery_low && !state->charging &&
+	     (state->current_display_state != DISPLAY_FOREGROUND))) {
+		return FACE_RUNTIME_DYNAMIC_DISABLED_BATTERY_SAVE;
+	}
 	if (blink_active) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_BLINK;
 	}
@@ -757,6 +762,12 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 			motion_confidence = (uint8_t)(motion_confidence / 2U);
 			motion_speed = MAX(motion_speed, 25U);
 			break;
+		case FACE_RUNTIME_DYNAMIC_DISABLED_BATTERY_SAVE:
+			target_x /= 4;
+			target_y /= 4;
+			motion_confidence = (uint8_t)(motion_confidence / 3U);
+			motion_speed = MAX(motion_speed, 18U);
+			break;
 		case FACE_RUNTIME_DYNAMIC_DISABLED_FORCED_OFF:
 			target_x = 0;
 			target_y = 0;
@@ -871,6 +882,8 @@ const char *face_runtime_dynamic_reason_str(enum face_runtime_dynamic_reason rea
 		return "low_confidence";
 	case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND:
 		return "not_in_hand";
+	case FACE_RUNTIME_DYNAMIC_DISABLED_BATTERY_SAVE:
+		return "battery_save";
 	case FACE_RUNTIME_DYNAMIC_DISABLED_FORCED_OFF:
 		return "forced_off";
 	default:

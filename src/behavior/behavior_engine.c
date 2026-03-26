@@ -1086,7 +1086,11 @@ void behavior_engine_status_dump(const struct pet_state *state, char *buffer, si
 	}
 
 	(void)snprintf(buffer, buffer_len,
-		"mode=%s expr=%s force=%s disp=%s react=%s ind=%d ov=%d look_t=%d,%d look_r=%d,%d look_c=%u carry=%d/%u/%u/%u walk=%u act=%d pick=%u in_hand=%u step_day=%u total=%u hw=%u batt=%d known=%d E=%d Sl=%d Bo=%d St=%d Tr=%d Cu=%d At=%d last_m=%lld last_w=%lld last_p=%lld last_h=%lld last_s=%lld dyn=%d time=%s",
+		"mode=%s expr=%s force=%s disp=%s react=%s ind=%d ov=%d look_t=%d,%d "
+		"look_r=%d,%d look_c=%u carry=%d/%u/%u/%u walk_act=%d step_day=%u "
+		"total=%u hw=%u batt=%d known=%d E=%d Sl=%d Bo=%d St=%d Tr=%d Cu=%d "
+		"At=%d last_m=%lld last_w=%lld last_p=%lld last_h=%lld last_s=%lld "
+		"dyn=%d time=%s",
 		       pet_mode_str(state->current_mode),
 		       pet_expression_str(state->current_expression),
 		       g_runtime.forced_expression_active ?
