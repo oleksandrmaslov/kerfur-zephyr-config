@@ -93,6 +93,8 @@ static void draw_asset(enum kerfur_face_asset_id asset_id, int16_t x, int16_t y,
 		       lv_opa_t opa)
 {
 	const struct kerfur_face_asset_metadata *asset = kerfur_face_asset_get(asset_id);
+	const bool draw_black = (asset != NULL) &&
+		((asset->flags & KERFUR_FACE_ASSET_FLAG_DRAW_BLACK) != 0U);
 
 	if ((asset == NULL) || (asset->bitmap == NULL)) {
 		return;
@@ -103,7 +105,7 @@ static void draw_asset(enum kerfur_face_asset_id asset_id, int16_t x, int16_t y,
 		x,
 		y,
 		right_side && should_mirror_on_right(asset),
-		false,
+		draw_black,
 		opa
 	);
 }
