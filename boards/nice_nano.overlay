@@ -51,11 +51,10 @@
 		gyro-range = <LSM6DSO_DT_FS_250DPS>;
 		gyro-odr = <LSM6DSO_DT_ODR_OFF>;
 		status = "okay";
-		/*
-		 * Enable when INT1/INT2 is wired:
-		 * int-pin = <1>;
-		 * irq-gpios = <&gpio0 SOME_FREE_PIN GPIO_ACTIVE_HIGH>;
-		 */
+		
+		 int-pin = <1>;
+		 irq-gpios = <&gpio1 0 GPIO_ACTIVE_HIGH>;
+		
 	};
 };
 
