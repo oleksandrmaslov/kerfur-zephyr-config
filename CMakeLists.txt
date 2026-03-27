@@ -4,6 +4,17 @@ cmake_minimum_required(VERSION 3.20.0)
 # directory before compiler detection writes CMake*Compiler.cmake files.
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/CMakeFiles/${CMAKE_VERSION}")
 
+set(KERFUR_CONF_FILE "${CONF_FILE}")
+if(NOT DEFINED CONF_FILE OR "${CONF_FILE}" STREQUAL "")
+    set(KERFUR_CONF_FILE "${CMAKE_CURRENT_SOURCE_DIR}/prj.conf")
+endif()
+
+if("${BOARD}" STREQUAL "nice_nano" AND
+   NOT "${KERFUR_CONF_FILE}" MATCHES "(^|[ ;])[^ ;]*prj_release\\.conf($|[ ;])")
+    list(APPEND EXTRA_DTC_OVERLAY_FILE
+         ${CMAKE_CURRENT_SOURCE_DIR}/boards/nice_nano_usb.overlay)
+endif()
+
 list(APPEND BOARD_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 list(APPEND SHIELD_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})

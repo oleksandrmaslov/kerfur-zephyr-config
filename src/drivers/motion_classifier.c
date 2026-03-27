@@ -17,7 +17,7 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 #define MOTION_IDLE_WAKE_THRESHOLD_MG 180U
 #define MOTION_IDLE_WAKE_SMOOTH_MG 120U
 #define MOTION_FEATURE_WINDOW_FRAMES 12U
-#define MOTION_LOOK_TILT_DIVISOR_MG 420
+#define MOTION_LOOK_TILT_DIVISOR_MG 220
 
 struct motion_feature_frame {
 	uint16_t motion_mg;
@@ -736,7 +736,6 @@ static void update_look_target(const struct in_hand_detector_output *detector_ou
 {
 	int16_t raw_x;
 	int16_t raw_y;
-	int scale;
 	int confidence;
 
 	if ((now_ms < g_motion.suppress_look_until_ms) ||
@@ -761,9 +760,6 @@ static void update_look_target(const struct in_hand_detector_output *detector_ou
 		raw_y = 0;
 	}
 
-	scale = MIN(detector_out->look_confidence, summary->stability_confidence);
-	raw_x = (int16_t)((raw_x * scale) / 100);
-	raw_y = (int16_t)((raw_y * scale) / 100);
 	confidence = detector_out->look_confidence -
 		(summary->chaos_confidence / 2U) -
 		(summary->cadence_confidence / 3U);

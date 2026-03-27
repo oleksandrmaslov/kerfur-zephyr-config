@@ -439,7 +439,7 @@ static enum face_runtime_dynamic_reason resolve_dynamic_reason(
 	    ((now_ms - state->last_rough_event_timestamp_ms) < 1200LL)) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_ROUGH;
 	}
-	if ((state->look_confidence < 35U) || (state->pickup_confidence < 25U)) {
+	if (state->look_confidence < 35U) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_LOW_CONFIDENCE;
 	}
 
@@ -547,8 +547,8 @@ static void resolve_look_target(const struct kerfur_face_recipe *recipe,
 	}
 
 	if (state->look_confidence > 0U) {
-		desired_x += (state->look_target_x * state->look_confidence) / 100;
-		desired_y += (state->look_target_y * state->look_confidence) / 100;
+		desired_x += state->look_target_x;
+		desired_y += state->look_target_y;
 	}
 
 	*target_x = clamp_s16(desired_x, -100, 100);
@@ -727,8 +727,7 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 						 has_pupil);
 	dynamic_allowed = dynamic_reason == FACE_RUNTIME_DYNAMIC_ALLOWED;
 
-	motion_confidence = MIN(state->look_confidence,
-				MIN(state->pickup_confidence, state->in_hand_confidence));
+	motion_confidence = MIN(state->look_confidence, state->in_hand_confidence);
 	if (state->walking_confidence > 0U) {
 		motion_confidence = (uint8_t)MIN(motion_confidence,
 						(uint8_t)MAX(0, 100 - state->walking_confidence));
@@ -778,8 +777,8 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 			break;
 		}
 	} else {
-		target_x = (target_x * motion_confidence * motion_scale) / 10000;
-		target_y = (target_y * motion_confidence * motion_scale) / 10000;
+		target_x = (target_x * motion_scale) / 100;
+		target_y = (target_y * motion_scale) / 100;
 		motion_speed = MAX(8U, (uint8_t)((motion_speed * MAX(motion_confidence, 15U)) / 100U));
 	}
 

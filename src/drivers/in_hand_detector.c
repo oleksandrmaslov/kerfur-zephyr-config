@@ -9,6 +9,7 @@
 #define IN_HAND_ENTER_THRESHOLD 70U
 #define IN_HAND_EXIT_THRESHOLD 45U
 #define SURFACE_STILL_MIN_MS 2200LL
+#define SURFACE_STILL_RECENT_MS 1800LL
 #define PICKUP_RECENT_MS 6000LL
 
 static uint8_t clamp_u8_0_100(int value)
@@ -63,7 +64,8 @@ void in_hand_detector_process(struct in_hand_detector *detector,
 {
 	uint16_t orientation_delta;
 	bool surface_still;
-	bool had_surface_still;
+	bool surface_still_confirmed;
+	bool had_surface_still_recently;
 	bool orientation_medium;
 	bool orientation_large;
 	bool motion_recent;
@@ -92,9 +94,11 @@ void in_hand_detector_process(struct in_hand_detector *detector,
 
 	surface_still = is_surface_still(input);
 	if (surface_still) {
-		if ((detector->still_since_ms == 0LL) ||
-		    (detector->state != IN_HAND_DETECTOR_SURFACE_STILL)) {
+		if (detector->still_since_ms == 0LL) {
 			detector->still_since_ms = input->now_ms;
+		}
+		if ((input->now_ms - detector->still_since_ms) >= SURFACE_STILL_MIN_MS) {
+			detector->surface_still_armed = true;
 		}
 		detector->surface_gravity_x =
 			(int16_t)((detector->surface_gravity_x * 7 + input->gravity_x) / 8);
@@ -103,11 +107,18 @@ void in_hand_detector_process(struct in_hand_detector *detector,
 		detector->surface_gravity_z =
 			(int16_t)((detector->surface_gravity_z * 7 + input->gravity_z) / 8);
 	} else {
-		detector->last_surface_leave_ms = input->now_ms;
+		if (detector->surface_still_armed) {
+			detector->last_surface_leave_ms = input->now_ms;
+		}
+		detector->still_since_ms = 0LL;
+		detector->surface_still_armed = false;
 	}
 
-	had_surface_still = (detector->still_since_ms > 0LL) &&
-			    ((input->now_ms - detector->still_since_ms) >= SURFACE_STILL_MIN_MS);
+	surface_still_confirmed = surface_still && detector->surface_still_armed;
+	had_surface_still_recently = surface_still_confirmed ||
+				     ((detector->last_surface_leave_ms > 0LL) &&
+				      ((input->now_ms - detector->last_surface_leave_ms) <=
+				       SURFACE_STILL_RECENT_MS));
 	orientation_delta = MAX(input->orientation_delta_mg, gravity_delta(detector, input));
 	orientation_medium = orientation_delta >= 105U;
 	orientation_large = orientation_delta >= 210U;
@@ -141,7 +152,7 @@ void in_hand_detector_process(struct in_hand_detector *detector,
 		detector->state = IN_HAND_DETECTOR_WALKING;
 		pickup_delta -= 8;
 		in_hand_delta -= 18;
-	} else if (surface_still && had_surface_still) {
+	} else if (surface_still_confirmed) {
 		detector->state = IN_HAND_DETECTOR_SURFACE_STILL;
 		pickup_delta -= 10;
 		in_hand_delta -= 14;
@@ -151,7 +162,7 @@ void in_hand_detector_process(struct in_hand_detector *detector,
 		detector->state = IN_HAND_DETECTOR_MAYBE_PICKED_UP;
 	}
 
-	if (had_surface_still && motion_recent && smooth_reorientation &&
+	if (had_surface_still_recently && motion_recent && smooth_reorientation &&
 	    !input->walking_active && !input->rough_motion) {
 		pickup_delta += 8;
 		pickup_delta += MIN(12, (int)(orientation_delta / 28U));
@@ -177,7 +188,7 @@ void in_hand_detector_process(struct in_hand_detector *detector,
 		if (orientation_large) {
 			in_hand_delta += 4;
 		}
-		if (had_surface_still) {
+		if (had_surface_still_recently) {
 			in_hand_delta += 3;
 		}
 		in_hand_delta -= input->chaos_confidence / 20U;
@@ -222,15 +233,15 @@ void in_hand_detector_process(struct in_hand_detector *detector,
 	} else if (detector->in_hand &&
 		   ((detector->in_hand_confidence <= IN_HAND_EXIT_THRESHOLD) ||
 		    input->rough_motion || input->walking_active ||
-		    (surface_still && had_surface_still))) {
+		    surface_still_confirmed)) {
 		detector->in_hand = false;
 		output->in_hand_exit = true;
-		if (surface_still && had_surface_still) {
+		if (surface_still_confirmed) {
 			detector->state = IN_HAND_DETECTOR_SURFACE_STILL;
 		}
 	}
 
-	if (!detector->in_hand && surface_still && had_surface_still &&
+	if (!detector->in_hand && surface_still_confirmed &&
 	    (detector->pickup_confidence <= 12U) && (detector->in_hand_confidence <= 12U)) {
 		detector->pickup_candidate_reported = false;
 		detector->picked_up_reported = false;
