@@ -140,6 +140,38 @@ config KERFUR_MOTION_GAZE_RATE_HZ
 	help
 	  Maximum rate for LOOK_TARGET updates while tracking in-hand tilt.
 
+config KERFUR_MOTION_GAZE_TILT_DIVISOR_MG
+	int "Tilt amount needed for full-scale gaze target (mg)"
+	range 80 600
+	default 170
+	help
+	  Lower values make pupils react more strongly to tilt. This is applied
+	  after board axis remapping and relative in-hand neutral capture.
+
+config KERFUR_MOTION_AXIS_SWAP_XY
+	bool "Swap motion sensor X and Y axes"
+	default n
+	help
+	  Use when the IMU is mounted rotated 90 degrees relative to the display.
+
+config KERFUR_MOTION_AXIS_INVERT_X
+	bool "Invert motion sensor X axis"
+	default n
+	help
+	  Use when left-right tilt is mirrored relative to the display.
+
+config KERFUR_MOTION_AXIS_INVERT_Y
+	bool "Invert motion sensor Y axis"
+	default n
+	help
+	  Use when up-down tilt is mirrored relative to the display.
+
+config KERFUR_MOTION_AXIS_INVERT_Z
+	bool "Invert motion sensor Z axis"
+	default n
+	help
+	  Use when the IMU is mounted on the opposite side of the display plane.
+
 endif
 
 config KERFUR_IDLE_TIMEOUT_S

@@ -17,8 +17,6 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 #define MOTION_IDLE_WAKE_THRESHOLD_MG 180U
 #define MOTION_IDLE_WAKE_SMOOTH_MG 120U
 #define MOTION_FEATURE_WINDOW_FRAMES 12U
-#define MOTION_LOOK_TILT_DIVISOR_MG 220
-
 struct motion_feature_frame {
 	uint16_t motion_mg;
 	uint16_t smooth_motion_mg;
@@ -157,20 +155,53 @@ static int sample_period_ms(void)
 
 static void normalize_motion_sample(struct motion_sensor_sample *sample)
 {
+	int16_t accel_x;
+	int16_t accel_y;
+	int16_t accel_z;
+	int16_t gyro_x;
+	int16_t gyro_y;
+	int16_t gyro_z;
+
 	if (sample == NULL) {
 		return;
 	}
 
-	/*
-	 * Keep the current board orientation mapping explicit so a future board
-	 * remap can happen in one place instead of leaking through the classifier.
-	 */
-	sample->accel_mg_x = sample->accel_mg_x;
-	sample->accel_mg_y = sample->accel_mg_y;
-	sample->accel_mg_z = sample->accel_mg_z;
-	sample->gyro_mdps_x = sample->gyro_mdps_x;
-	sample->gyro_mdps_y = sample->gyro_mdps_y;
-	sample->gyro_mdps_z = sample->gyro_mdps_z;
+	accel_x = sample->accel_mg_x;
+	accel_y = sample->accel_mg_y;
+	accel_z = sample->accel_mg_z;
+	gyro_x = sample->gyro_mdps_x;
+	gyro_y = sample->gyro_mdps_y;
+	gyro_z = sample->gyro_mdps_z;
+
+	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_SWAP_XY)) {
+		int16_t tmp = accel_x;
+
+		accel_x = accel_y;
+		accel_y = tmp;
+		tmp = gyro_x;
+		gyro_x = gyro_y;
+		gyro_y = tmp;
+	}
+
+	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_INVERT_X)) {
+		accel_x = -accel_x;
+		gyro_x = -gyro_x;
+	}
+	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_INVERT_Y)) {
+		accel_y = -accel_y;
+		gyro_y = -gyro_y;
+	}
+	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_INVERT_Z)) {
+		accel_z = -accel_z;
+		gyro_z = -gyro_z;
+	}
+
+	sample->accel_mg_x = accel_x;
+	sample->accel_mg_y = accel_y;
+	sample->accel_mg_z = accel_z;
+	sample->gyro_mdps_x = gyro_x;
+	sample->gyro_mdps_y = gyro_y;
+	sample->gyro_mdps_z = gyro_z;
 }
 
 static bool motion_classifier_uses_idle_polling(void)
@@ -654,7 +685,10 @@ static int16_t move_towards(int16_t current, int16_t target, int16_t max_delta)
 	return current + (int16_t)delta;
 }
 
-static void publish_motion_reaction(uint16_t motion_mg, uint32_t gyro_sum_mdps, int64_t now_ms)
+static void publish_motion_reaction(uint16_t motion_mg,
+				    uint32_t gyro_sum_mdps,
+				    bool stable_in_hand,
+				    int64_t now_ms)
 {
 	enum app_event_type type = APP_EVENT_COUNT;
 	int64_t suppress_until_ms = 0LL;
@@ -670,15 +704,19 @@ static void publish_motion_reaction(uint16_t motion_mg, uint32_t gyro_sum_mdps, 
 		cooldown_ms = 900;
 	} else if ((motion_mg >= 700U) || (gyro_sum_mdps >= 42000U)) {
 		type = APP_EVENT_SHAKE_PLAY;
-		suppress_until_ms = now_ms + 700LL;
+		suppress_until_ms = 0LL;
 		cooldown_ms = 750;
 	} else if ((motion_mg >= 350U) || (gyro_sum_mdps >= 22000U)) {
 		type = APP_EVENT_SHAKE_LIGHT;
-		suppress_until_ms = now_ms + 450LL;
+		suppress_until_ms = 0LL;
 		cooldown_ms = 600;
 	}
 
 	if (type == APP_EVENT_COUNT) {
+		return;
+	}
+	if (stable_in_hand &&
+	    ((type == APP_EVENT_SHAKE_LIGHT) || (type == APP_EVENT_SHAKE_PLAY))) {
 		return;
 	}
 	if ((now_ms - g_motion.last_shake_event_ms) < cooldown_ms) {
@@ -749,9 +787,9 @@ static void update_look_target(const struct in_hand_detector_output *detector_ou
 	}
 
 	raw_x = clamp_look_value((-(g_motion.gravity_x - g_motion.look_reference_x) * 100) /
-				 MOTION_LOOK_TILT_DIVISOR_MG);
+				 CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
 	raw_y = clamp_look_value(((g_motion.gravity_y - g_motion.look_reference_y) * 100) /
-				 MOTION_LOOK_TILT_DIVISOR_MG);
+				 CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
 
 	if (abs_i16(raw_x) <= 6) {
 		raw_x = 0;
@@ -953,7 +991,12 @@ static void motion_classifier_sample_work(struct k_work *work)
 	rough_motion = (motion_mg >= 900U) ||
 		      (gyro_sum_mdps >= 60000U) ||
 		      (feature_summary.chaos_confidence >= 72U);
-	publish_motion_reaction(motion_mg, gyro_sum_mdps, now_ms);
+	publish_motion_reaction(motion_mg,
+			       gyro_sum_mdps,
+			       g_motion.in_hand && (g_motion.in_hand_confidence >= 60U) &&
+				       (feature_summary.stability_confidence >= 45U) &&
+				       (feature_summary.chaos_confidence <= 45U),
+			       now_ms);
 
 	if (!motion_sensor_get_capabilities()->backend_has_hw_step_counter) {
 		step_detected = detect_software_step(linear_x, linear_y, linear_z, rough_motion, now_ms);

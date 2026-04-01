@@ -40,6 +40,28 @@ static int abs_i16(int16_t value)
 	return (value < 0) ? -value : value;
 }
 
+static int16_t percent_to_offset(int16_t percent, int16_t max_offset)
+{
+	int value;
+
+	if ((percent == 0) || (max_offset <= 0)) {
+		return 0;
+	}
+
+	value = percent * max_offset;
+	if (value >= 0) {
+		value = (value + 50) / 100;
+	} else {
+		value = (value - 50) / 100;
+	}
+
+	if ((value == 0) && (abs_i16(percent) >= 18)) {
+		value = sign_i16(percent);
+	}
+
+	return clamp_s16(value, -max_offset, max_offset);
+}
+
 static uint8_t motion_scale_for_recipe(enum kerfur_face_recipe_id recipe_id)
 {
 	switch (recipe_id) {
@@ -381,8 +403,8 @@ static void resolve_pupil_offsets(const struct kerfur_face_asset_metadata *eye_a
 	int16_t max_y = MAX(0, zone->ry - zone->margin);
 	int16_t scaled_x = clamp_s16((look_x * scale_x) / 100, -100, 100);
 	int16_t scaled_y = clamp_s16((look_y * scale_y) / 100, -100, 100);
-	int16_t dx = (scaled_x * max_x) / 100;
-	int16_t dy = (scaled_y * max_y) / 100;
+	int16_t dx = percent_to_offset(scaled_x, max_x);
+	int16_t dy = percent_to_offset(scaled_y, max_y);
 
 	dx += ambient_dx;
 	dy += ambient_dy;
