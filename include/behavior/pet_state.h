@@ -77,6 +77,7 @@ struct pet_state {
 	int64_t last_rough_event_timestamp_ms;
 	int64_t last_display_state_change_ms;
 	int64_t last_expression_change_timestamp_ms;
+	int64_t last_motion_wake_reaction_ms;
 	int64_t uptime_seconds;
 
 	/* Time sync cache (no RTC required in this phase). */

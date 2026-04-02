@@ -272,10 +272,18 @@ void in_hand_detector_process(struct in_hand_detector *detector,
 		detector->exit_candidate_since_ms = 0LL;
 	}
 
-	if (!detector->in_hand && surface_still_confirmed &&
-	    (detector->pickup_confidence <= 12U) && (detector->in_hand_confidence <= 12U)) {
-		detector->pickup_candidate_reported = false;
-		detector->picked_up_reported = false;
+	/* Reset one-shot flags when clearly not held.
+	 * Use relaxed thresholds so quick re-pickup cycles can re-fire events. */
+	if (!detector->in_hand) {
+		if (detector->pickup_candidate_reported &&
+		    (detector->pickup_confidence < (PICKUP_CANDIDATE_THRESHOLD - 10U))) {
+			detector->pickup_candidate_reported = false;
+		}
+		if (detector->picked_up_reported &&
+		    ((detector->pickup_confidence <= 30U) ||
+		     (surface_still_confirmed && (detector->in_hand_confidence <= 25U)))) {
+			detector->picked_up_reported = false;
+		}
 	}
 
 	output->look_confidence = 0U;

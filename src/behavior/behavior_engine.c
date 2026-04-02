@@ -240,7 +240,7 @@ static void apply_30min_drift(struct pet_state *state, int64_t now_ms)
 static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 {
 	g_runtime.arousal_decay_accum_s++;
-	if (g_runtime.arousal_decay_accum_s >= 3U) {
+	if (g_runtime.arousal_decay_accum_s >= 2U) {
 		g_runtime.arousal_decay_accum_s = 0U;
 		state->arousal -= 1;
 	}
@@ -266,8 +266,8 @@ static void apply_tick_10s(struct pet_state *state, int64_t now_ms)
 		state->social_load -= 1;
 	}
 
-	if ((now_ms - state->last_rough_event_timestamp_ms) > (60 * MSEC_PER_SEC)) {
-		state->stress -= 1;
+	if ((now_ms - state->last_rough_event_timestamp_ms) > (30 * MSEC_PER_SEC)) {
+		state->stress -= 2;
 	}
 
 	if ((state->current_mode != PET_MODE_ASLEEP) && !state->charging) {
@@ -344,8 +344,8 @@ static bool in_hand_motion_context_recent(const struct pet_state *state, int64_t
 {
 	return state->in_hand ||
 	       ((state->last_in_hand_timestamp_ms > 0LL) &&
-		((now_ms - state->last_in_hand_timestamp_ms) <= 1500LL) &&
-		(state->in_hand_confidence >= 40U));
+		((now_ms - state->last_in_hand_timestamp_ms) <= 3000LL) &&
+		(state->in_hand_confidence >= 30U));
 }
 
 static void apply_event_deltas(struct pet_state *state, const struct app_event *event)
@@ -409,35 +409,45 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		break;
 
 	case APP_EVENT_SHAKE_LIGHT:
-		state->arousal += 6;
-		state->curiosity += 4;
+		state->arousal += 5;
+		state->curiosity += 3;
 		state->sleepiness -= 4;
 		state->stress += 1;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
 		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		if (!in_hand_motion_context_recent(state, event->timestamp_ms)) {
-			trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+			if (state->sleepiness > 60) {
+				trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+			} else if (state->arousal <= 50) {
+				trigger_reaction(state, REACTION_GLANCE_LEFT, event->timestamp_ms);
+			}
 		}
 		break;
 
 	case APP_EVENT_SHAKE_PLAY:
-		state->arousal += 10;
-		state->curiosity += 6;
+		state->arousal += 7;
+		state->curiosity += 5;
 		state->boredom -= 4;
 		state->sleepiness -= 6;
-		state->stress += (state->trust >= 40) ? 2 : 5;
+		state->stress += (state->trust >= 40) ? 1 : 4;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
 		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
 		if (!in_hand_motion_context_recent(state, event->timestamp_ms)) {
-			trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
+			if (state->sleepiness > 60) {
+				trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+			} else if (state->stress > 50) {
+				trigger_reaction(state, REACTION_STARTLE, event->timestamp_ms);
+			} else {
+				trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
+			}
 		}
 		break;
 
 	case APP_EVENT_SHAKE_ROUGH:
-		state->stress += 12;
-		state->trust -= 5;
+		state->stress += 10;
+		state->trust -= 4;
 		state->attachment -= 2;
-		state->arousal += 10;
+		state->arousal += 8;
 		state->sleepiness -= 8;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
 		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
@@ -449,8 +459,8 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		break;
 
 	case APP_EVENT_IMPACT:
-		state->stress += 10;
-		state->trust -= 2;
+		state->stress += 8;
+		state->trust -= 1;
 		state->arousal += 8;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
 		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
@@ -462,11 +472,13 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		break;
 
 	case APP_EVENT_MOTION_WAKE:
-		state->arousal += 3;
+		state->arousal += 2;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
 		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		if (!in_hand_motion_context_recent(state, event->timestamp_ms)) {
+		if (!in_hand_motion_context_recent(state, event->timestamp_ms) &&
+		    ((event->timestamp_ms - state->last_motion_wake_reaction_ms) >= 4000LL)) {
 			trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+			state->last_motion_wake_reaction_ms = event->timestamp_ms;
 		}
 		break;
 
@@ -491,9 +503,20 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 
 	case APP_EVENT_STEP_BATCH:
 		steps = MAX(event->param, 0);
-		state->boredom -= MIN((steps / 2), 6);
+		{
+			/* Diminishing boredom reduction: first 500 steps of day are most impactful. */
+			int boredom_factor = (state->step_count_today < 500U) ? 3 :
+					     (state->step_count_today < 2000U) ? 2 : 1;
+			/* Curiosity: more impactful early in a walk session. */
+			int curiosity_add = (state->walking_session_start_ms > 0LL &&
+				(event->timestamp_ms - state->walking_session_start_ms) <
+					(120 * MSEC_PER_SEC))
+				? MIN(steps, 4) : 1;
+
+			state->boredom -= MIN((steps * boredom_factor / 2), 8);
+			state->curiosity += curiosity_add;
+		}
 		state->sleepiness -= 2;
-		state->curiosity += 2;
 		if (state->walking_active || (effective_walking_confidence(state) >= 60U)) {
 			state->walking_active = true;
 		}
@@ -818,20 +841,49 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 	case PET_EXPR_CALM:
 		return 60 - state->stress - (state->social_load / 2) - (state->boredom / 4) +
 		       (state->energy / 4);
-	case PET_EXPR_CURIOUS:
+	case PET_EXPR_CURIOUS: {
+		/* Walking bonus diminishes over time: full for first 2 min, decays to 4 by 10 min. */
+		int walk_bonus = 0;
+
+		if (state->current_mode == PET_MODE_WALK_AWAKE) {
+			int64_t walk_s = (now_ms - state->walking_session_start_ms) / MSEC_PER_SEC;
+
+			if (walk_s < 120) {
+				walk_bonus = 18;
+			} else if (walk_s < 600) {
+				walk_bonus = 18 - (int)((walk_s - 120) * 14 / 480);
+			} else {
+				walk_bonus = 4;
+			}
+		}
 		return state->curiosity + (recent_notif ? 16 : 0) + (recent_motion ? 12 : 0) +
-		       ((state->current_mode == PET_MODE_WALK_AWAKE) ? 18 : 0) +
+		       walk_bonus +
 		       (state->app_session_active ? 8 : 0) - (state->sleepiness / 3);
+	}
 	case PET_EXPR_CONTENT:
 		return (state->attachment / 2) + (state->trust / 2) + (recent_pet ? 16 : 0) -
 		       (state->stress / 2);
 	case PET_EXPR_HAPPY:
 		return (state->attachment / 2) + (state->energy / 3) + (recent_pet ? 18 : 0) +
 		       (fresh_pet ? 26 : 0) - (state->stress / 2);
-	case PET_EXPR_PLAYFUL:
+	case PET_EXPR_PLAYFUL: {
+		int walk_bonus = 0;
+
+		if (state->current_mode == PET_MODE_WALK_AWAKE) {
+			int64_t walk_s = (now_ms - state->walking_session_start_ms) / MSEC_PER_SEC;
+
+			if (walk_s < 120) {
+				walk_bonus = 14;
+			} else if (walk_s < 600) {
+				walk_bonus = 14 - (int)((walk_s - 120) * 10 / 480);
+			} else {
+				walk_bonus = 4;
+			}
+		}
 		return state->arousal + (state->trust / 3) +
-		       ((state->current_mode == PET_MODE_WALK_AWAKE) ? 14 : 0) -
+		       walk_bonus -
 		       (state->battery_low ? 20 : 0);
+	}
 	case PET_EXPR_SLEEPY:
 		return state->sleepiness + ((state->arousal < 35) ? 8 : 0) + (night ? 6 : 0) +
 		       ((no_real_interaction_ms > (5 * 60 * MSEC_PER_SEC)) ? 10 : 0);
@@ -858,6 +910,123 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 	}
 }
 
+/* Emotional adjacency: returns a small score bonus (0..5) for expressions
+ * that feel like natural transitions from the current one. This prevents
+ * jarring jumps like SLEEPY -> PLAYFUL and encourages gradual progressions. */
+static int transition_affinity(enum pet_expression current, enum pet_expression candidate)
+{
+	switch (current) {
+	case PET_EXPR_SLEEPY:
+		if (candidate == PET_EXPR_CALM) {
+			return 5;
+		}
+		if (candidate == PET_EXPR_CURIOUS) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_CALM:
+		if (candidate == PET_EXPR_CURIOUS) {
+			return 4;
+		}
+		if (candidate == PET_EXPR_CONTENT) {
+			return 4;
+		}
+		if (candidate == PET_EXPR_SLEEPY) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_CURIOUS:
+		if (candidate == PET_EXPR_PLAYFUL) {
+			return 4;
+		}
+		if (candidate == PET_EXPR_CALM) {
+			return 3;
+		}
+		if (candidate == PET_EXPR_HAPPY) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_PLAYFUL:
+		if (candidate == PET_EXPR_HAPPY) {
+			return 5;
+		}
+		if (candidate == PET_EXPR_CURIOUS) {
+			return 3;
+		}
+		if (candidate == PET_EXPR_OVERSTIMULATED) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_HAPPY:
+		if (candidate == PET_EXPR_CONTENT) {
+			return 5;
+		}
+		if (candidate == PET_EXPR_PLAYFUL) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_CONTENT:
+		if (candidate == PET_EXPR_CALM) {
+			return 4;
+		}
+		if (candidate == PET_EXPR_HAPPY) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_ANNOYED:
+		if (candidate == PET_EXPR_CALM) {
+			return 4;
+		}
+		if (candidate == PET_EXPR_OVERSTIMULATED) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_OVERSTIMULATED:
+		if (candidate == PET_EXPR_ANNOYED) {
+			return 4;
+		}
+		if (candidate == PET_EXPR_CALM) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_NEEDY:
+		if (candidate == PET_EXPR_LONELY) {
+			return 4;
+		}
+		if (candidate == PET_EXPR_CALM) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_LONELY:
+		if (candidate == PET_EXPR_NEEDY) {
+			return 3;
+		}
+		if (candidate == PET_EXPR_CALM) {
+			return 4;
+		}
+		break;
+	case PET_EXPR_COZY:
+		if (candidate == PET_EXPR_SLEEPY) {
+			return 4;
+		}
+		if (candidate == PET_EXPR_CONTENT) {
+			return 3;
+		}
+		break;
+	case PET_EXPR_DRAINED:
+		if (candidate == PET_EXPR_SLEEPY) {
+			return 5;
+		}
+		if (candidate == PET_EXPR_COZY) {
+			return 3;
+		}
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
 static void update_expression(struct pet_state *state, int64_t now_ms)
 {
 	int scores[PET_EXPR_COUNT];
@@ -866,9 +1035,22 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 	int best_score;
 	int curr_score;
 	int expr;
-	const int32_t hold_ms = 12 * MSEC_PER_SEC;
-	const int margin = 8;
+	int32_t hold_ms;
+	int margin;
 	const bool pet_recent = (now_ms - state->last_pet_timestamp_ms) < (6 * MSEC_PER_SEC);
+
+	/* Dynamic hold: shorter when arousal is high or just picked up.
+	 * Range: 4s (highly stimulated) to 12s (calm). */
+	if ((state->arousal >= 50) || state->picked_up_recently) {
+		hold_ms = 4 * MSEC_PER_SEC;
+		margin = 4;
+	} else if (state->arousal >= 30) {
+		hold_ms = 7 * MSEC_PER_SEC;
+		margin = 6;
+	} else {
+		hold_ms = 12 * MSEC_PER_SEC;
+		margin = 8;
+	}
 
 	if (g_runtime.forced_expression_active) {
 		if (state->current_expression != g_runtime.forced_expression) {
@@ -894,11 +1076,12 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 		return;
 	}
 
+	curr_expr = state->current_expression;
+
 	for (expr = 0; expr < PET_EXPR_COUNT; expr++) {
 		scores[expr] = score_for_expression((enum pet_expression)expr, state, now_ms);
+		scores[expr] += transition_affinity(curr_expr, (enum pet_expression)expr);
 	}
-
-	curr_expr = state->current_expression;
 	best_expr = PET_EXPR_CALM;
 	best_score = scores[PET_EXPR_CALM];
 
@@ -985,6 +1168,7 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->last_in_hand_timestamp_ms = stale_recent_event_ms;
 	state->last_motion_sample_timestamp_ms = stale_recent_event_ms;
 	state->last_still_timestamp_ms = stale_recent_event_ms;
+	state->last_motion_wake_reaction_ms = stale_recent_event_ms;
 	state->dynamic_pupils_forced_disabled = false;
 
 	state->ambient_wake_enabled = true;

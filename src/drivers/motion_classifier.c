@@ -98,6 +98,7 @@ struct motion_classifier_state {
 	int64_t last_motion_wake_ms;
 	int64_t suppress_look_until_ms;
 	int64_t last_shake_event_ms;
+	int64_t last_active_sample_ms;
 	int64_t last_carry_publish_ms;
 	int64_t last_look_publish_ms;
 	int64_t last_debug_log_ms;
@@ -316,17 +317,31 @@ static void flush_step_batch(int64_t now_ms)
 
 static void update_gravity_estimate(const struct motion_sensor_sample *sample)
 {
+	/* Validate accel magnitude is plausible for gravity (~1000mg).
+	 * Accept 850..1150mg range (squared: 722500..1322500). */
+	const int32_t ax = sample->accel_mg_x;
+	const int32_t ay = sample->accel_mg_y;
+	const int32_t az = sample->accel_mg_z;
+	const uint32_t mag_sq = (uint32_t)(ax * ax + ay * ay + az * az);
+	const bool plausible = (mag_sq >= 722500U) && (mag_sq <= 1322500U);
+	int divisor;
+
 	if (!g_motion.gravity_valid) {
-		g_motion.gravity_x = sample->accel_mg_x;
-		g_motion.gravity_y = sample->accel_mg_y;
-		g_motion.gravity_z = sample->accel_mg_z;
-		g_motion.gravity_valid = true;
+		if (plausible) {
+			g_motion.gravity_x = sample->accel_mg_x;
+			g_motion.gravity_y = sample->accel_mg_y;
+			g_motion.gravity_z = sample->accel_mg_z;
+			g_motion.gravity_valid = true;
+		}
+		/* If not plausible (boot during motion), skip and retry next sample. */
 		return;
 	}
 
-	g_motion.gravity_x += (sample->accel_mg_x - g_motion.gravity_x) / 6;
-	g_motion.gravity_y += (sample->accel_mg_y - g_motion.gravity_y) / 6;
-	g_motion.gravity_z += (sample->accel_mg_z - g_motion.gravity_z) / 6;
+	/* Use slower low-pass when sample looks noisy. */
+	divisor = plausible ? 6 : 12;
+	g_motion.gravity_x += (sample->accel_mg_x - g_motion.gravity_x) / divisor;
+	g_motion.gravity_y += (sample->accel_mg_y - g_motion.gravity_y) / divisor;
+	g_motion.gravity_z += (sample->accel_mg_z - g_motion.gravity_z) / divisor;
 }
 
 static void note_recent_step_timestamp(int64_t step_ms)
@@ -602,13 +617,13 @@ static bool detect_software_step(int16_t linear_x, int16_t linear_y, int16_t lin
 {
 	const uint16_t intensity = (uint16_t)(abs_i16(linear_x) + abs_i16(linear_y) +
 					       abs_i16(linear_z));
-	const bool over_threshold = intensity >= 260U;
+	const bool over_threshold = intensity >= 320U;
 	const int64_t since_last_peak = now_ms - g_motion.last_peak_ms;
 	bool step_detected = false;
 
 	if (!g_motion.over_step_threshold && over_threshold && !rough_motion &&
 	    ((g_motion.last_peak_ms == 0LL) ||
-	     ((since_last_peak >= 250LL) && (since_last_peak <= 900LL)))) {
+	     ((since_last_peak >= 300LL) && (since_last_peak <= 850LL)))) {
 		step_detected = true;
 		g_motion.last_peak_ms = now_ms;
 		note_step(now_ms);
@@ -628,14 +643,14 @@ static void update_walking_confidence(bool step_detected,
 	int delta = 0;
 
 	if (step_detected) {
-		delta += 4;
-		delta += cadence_confidence / 10U;
-		delta += recent_steps * 2U;
-		delta -= chaos_confidence / 12U;
+		delta += 3;
+		delta += cadence_confidence / 12U;
+		delta += MIN(recent_steps * 2U, 8U);
+		delta -= chaos_confidence / 10U;
 		if (recent_steps >= 4U) {
-			delta += 6;
+			delta += 4;
 		} else if (recent_steps >= 2U) {
-			delta += 3;
+			delta += 2;
 		}
 	} else if (chaos_confidence >= 75U) {
 		delta -= 18;
@@ -689,7 +704,8 @@ static void publish_motion_reaction(uint16_t motion_mg,
 				    uint32_t gyro_sum_mdps,
 				    uint8_t stability_confidence,
 				    uint8_t chaos_confidence,
-				    bool stable_in_hand,
+				    bool in_hand,
+				    uint8_t in_hand_confidence,
 				    int64_t now_ms)
 {
 	enum app_event_type type = APP_EVENT_COUNT;
@@ -708,7 +724,7 @@ static void publish_motion_reaction(uint16_t motion_mg,
 		type = APP_EVENT_SHAKE_PLAY;
 		suppress_until_ms = 0LL;
 		cooldown_ms = 900;
-	} else if ((motion_mg >= 500U) || (gyro_sum_mdps >= 28000U)) {
+	} else if ((motion_mg >= 600U) || (gyro_sum_mdps >= 34000U)) {
 		type = APP_EVENT_SHAKE_LIGHT;
 		suppress_until_ms = 0LL;
 		cooldown_ms = 800;
@@ -717,13 +733,15 @@ static void publish_motion_reaction(uint16_t motion_mg,
 	if (type == APP_EVENT_COUNT) {
 		return;
 	}
-	if ((type == APP_EVENT_SHAKE_LIGHT || type == APP_EVENT_SHAKE_PLAY) &&
-	    (chaos_confidence < 40U) && (stability_confidence >= 45U)) {
-		return;
-	}
-	if (stable_in_hand &&
-	    ((type == APP_EVENT_SHAKE_LIGHT) || (type == APP_EVENT_SHAKE_PLAY))) {
-		return;
+	/* Suppress light/play shakes when device is in hand or hand-like context.
+	 * This prevents false triggers from normal gestures while holding the device. */
+	if ((type == APP_EVENT_SHAKE_LIGHT) || (type == APP_EVENT_SHAKE_PLAY)) {
+		if (in_hand || (in_hand_confidence >= 50U)) {
+			return;
+		}
+		if ((stability_confidence >= 35U) && (chaos_confidence <= 55U)) {
+			return;
+		}
 	}
 	if ((now_ms - g_motion.last_shake_event_ms) < cooldown_ms) {
 		return;
@@ -980,6 +998,10 @@ static void motion_classifier_sample_work(struct k_work *work)
 			   abs_i16(sample.gyro_mdps_z)) :
 		0U;
 
+	if (motion_mg >= 80U) {
+		g_motion.last_active_sample_ms = now_ms;
+	}
+
 	memset(&feature_frame, 0, sizeof(feature_frame));
 	feature_frame.motion_mg = motion_mg;
 	feature_frame.smooth_motion_mg = smooth_motion_mg;
@@ -1035,11 +1057,8 @@ static void motion_classifier_sample_work(struct k_work *work)
 			       gyro_sum_mdps,
 			       feature_summary.stability_confidence,
 			       feature_summary.chaos_confidence,
-			       detector_out.in_hand ||
-				       ((detector_out.in_hand_confidence >= 60U) &&
-					(detector_out.look_confidence >= 45U) &&
-					(feature_summary.stability_confidence >= 40U) &&
-					(feature_summary.chaos_confidence <= 55U)),
+			       detector_out.in_hand,
+			       detector_out.in_hand_confidence,
 			       now_ms);
 
 	emit_detector_events(&detector_out, now_ms);
@@ -1061,6 +1080,12 @@ static void motion_classifier_sample_work(struct k_work *work)
 		motion_classifier_set_mode(MOTION_CLASSIFIER_MODE_IN_HAND_TRACK,
 					   now_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS);
 	} else if (now_ms < g_motion.active_until_ms) {
+		motion_classifier_set_mode(MOTION_CLASSIFIER_MODE_ACTIVE_WINDOW,
+					   g_motion.active_until_ms);
+	} else if ((motion_mg >= 80U) &&
+		   ((now_ms - g_motion.last_active_sample_ms) < 2000LL)) {
+		/* Subtle motion still ongoing -- extend briefly instead of hard drop. */
+		g_motion.active_until_ms = now_ms + 1500LL;
 		motion_classifier_set_mode(MOTION_CLASSIFIER_MODE_ACTIVE_WINDOW,
 					   g_motion.active_until_ms);
 	} else {
