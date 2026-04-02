@@ -86,15 +86,15 @@ static uint8_t motion_speed_for_recipe(enum kerfur_face_recipe_id recipe_id)
 {
 	switch (recipe_id) {
 	case KERFUR_FACE_RECIPE_PET_EXPR_PLAYFUL:
-		return 85U;
+		return 65U;
 	case KERFUR_FACE_RECIPE_PET_EXPR_COZY:
-		return 45U;
+		return 35U;
 	case KERFUR_FACE_RECIPE_PET_EXPR_SLEEPY:
-		return 25U;
+		return 18U;
 	case KERFUR_FACE_RECIPE_PET_EXPR_ASLEEP:
 		return 0U;
 	default:
-		return 70U;
+		return 55U;
 	}
 }
 

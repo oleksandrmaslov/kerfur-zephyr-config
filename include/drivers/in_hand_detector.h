@@ -23,6 +23,7 @@ struct in_hand_detector {
 	int64_t last_in_hand_ms;
 	int64_t last_orientation_change_ms;
 	int64_t last_surface_leave_ms;
+	int64_t exit_candidate_since_ms;
 	bool surface_still_armed;
 	uint8_t pickup_confidence;
 	uint8_t in_hand_confidence;

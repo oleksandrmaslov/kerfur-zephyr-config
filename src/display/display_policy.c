@@ -226,7 +226,15 @@ void display_policy_on_event(struct pet_state *state, const struct app_event *ev
 		break;
 	case APP_EVENT_IN_HAND_EXIT:
 		if (state->current_display_state == DISPLAY_FOREGROUND) {
-			set_ambient_window(state, now_ms, 10 * MSEC_PER_SEC);
+			const int32_t fg_ms = apply_event_modifiers_ms(state, 4 * MSEC_PER_SEC, false);
+			const int32_t ambient_ms =
+				apply_event_modifiers_ms(state, 12 * MSEC_PER_SEC, true);
+
+			g_policy.foreground_deadline_ms = MIN(g_policy.foreground_deadline_ms,
+							      now_ms + fg_ms);
+			g_policy.ambient_deadline_ms =
+				MAX(g_policy.ambient_deadline_ms,
+				    g_policy.foreground_deadline_ms + ambient_ms);
 		}
 		break;
 	case APP_EVENT_APP_SESSION_START:
@@ -278,8 +286,7 @@ void display_policy_on_event(struct pet_state *state, const struct app_event *ev
 	}
 
 	if ((event->type == APP_EVENT_MOTION_WAKE) || (event->type == APP_EVENT_PICKUP_CANDIDATE) ||
-	    (event->type == APP_EVENT_PICKED_UP) || (event->type == APP_EVENT_IN_HAND_ENTER) ||
-	    (event->type == APP_EVENT_IN_HAND_EXIT)) {
+	    (event->type == APP_EVENT_PICKED_UP) || (event->type == APP_EVENT_IN_HAND_ENTER)) {
 		g_policy.app_session_last_activity_ms = now_ms;
 		schedule_self_wake(state, now_ms);
 	}

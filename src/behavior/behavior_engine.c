@@ -340,6 +340,14 @@ static bool event_is_real_interaction(enum app_event_type type, const struct pet
 	}
 }
 
+static bool in_hand_motion_context_recent(const struct pet_state *state, int64_t now_ms)
+{
+	return state->in_hand ||
+	       ((state->last_in_hand_timestamp_ms > 0LL) &&
+		((now_ms - state->last_in_hand_timestamp_ms) <= 1500LL) &&
+		(state->in_hand_confidence >= 40U));
+}
+
 static void apply_event_deltas(struct pet_state *state, const struct app_event *event)
 {
 	int steps;
@@ -407,7 +415,9 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->stress += 1;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
 		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+		if (!in_hand_motion_context_recent(state, event->timestamp_ms)) {
+			trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+		}
 		break;
 
 	case APP_EVENT_SHAKE_PLAY:
@@ -418,7 +428,9 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->stress += (state->trust >= 40) ? 2 : 5;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
 		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
+		if (!in_hand_motion_context_recent(state, event->timestamp_ms)) {
+			trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
+		}
 		break;
 
 	case APP_EVENT_SHAKE_ROUGH:
@@ -453,7 +465,9 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->arousal += 3;
 		state->last_motion_timestamp_ms = event->timestamp_ms;
 		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+		if (!in_hand_motion_context_recent(state, event->timestamp_ms)) {
+			trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+		}
 		break;
 
 	case APP_EVENT_WALKING_START:

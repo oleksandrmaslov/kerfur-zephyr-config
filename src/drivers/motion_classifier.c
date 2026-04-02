@@ -687,6 +687,8 @@ static int16_t move_towards(int16_t current, int16_t target, int16_t max_delta)
 
 static void publish_motion_reaction(uint16_t motion_mg,
 				    uint32_t gyro_sum_mdps,
+				    uint8_t stability_confidence,
+				    uint8_t chaos_confidence,
 				    bool stable_in_hand,
 				    int64_t now_ms)
 {
@@ -702,17 +704,21 @@ static void publish_motion_reaction(uint16_t motion_mg,
 		type = APP_EVENT_SHAKE_ROUGH;
 		suppress_until_ms = now_ms + 1200LL;
 		cooldown_ms = 900;
-	} else if ((motion_mg >= 700U) || (gyro_sum_mdps >= 42000U)) {
+	} else if ((motion_mg >= 820U) || (gyro_sum_mdps >= 50000U)) {
 		type = APP_EVENT_SHAKE_PLAY;
 		suppress_until_ms = 0LL;
-		cooldown_ms = 750;
-	} else if ((motion_mg >= 350U) || (gyro_sum_mdps >= 22000U)) {
+		cooldown_ms = 900;
+	} else if ((motion_mg >= 500U) || (gyro_sum_mdps >= 28000U)) {
 		type = APP_EVENT_SHAKE_LIGHT;
 		suppress_until_ms = 0LL;
-		cooldown_ms = 600;
+		cooldown_ms = 800;
 	}
 
 	if (type == APP_EVENT_COUNT) {
+		return;
+	}
+	if ((type == APP_EVENT_SHAKE_LIGHT || type == APP_EVENT_SHAKE_PLAY) &&
+	    (chaos_confidence < 40U) && (stability_confidence >= 45U)) {
 		return;
 	}
 	if (stable_in_hand &&
@@ -991,12 +997,6 @@ static void motion_classifier_sample_work(struct k_work *work)
 	rough_motion = (motion_mg >= 900U) ||
 		      (gyro_sum_mdps >= 60000U) ||
 		      (feature_summary.chaos_confidence >= 72U);
-	publish_motion_reaction(motion_mg,
-			       gyro_sum_mdps,
-			       g_motion.in_hand && (g_motion.in_hand_confidence >= 60U) &&
-				       (feature_summary.stability_confidence >= 45U) &&
-				       (feature_summary.chaos_confidence <= 45U),
-			       now_ms);
 
 	if (!motion_sensor_get_capabilities()->backend_has_hw_step_counter) {
 		step_detected = detect_software_step(linear_x, linear_y, linear_z, rough_motion, now_ms);
@@ -1030,6 +1030,17 @@ static void motion_classifier_sample_work(struct k_work *work)
 	if (detector_out.state == IN_HAND_DETECTOR_SURFACE_STILL) {
 		g_motion.last_still_timestamp_ms = now_ms;
 	}
+
+	publish_motion_reaction(motion_mg,
+			       gyro_sum_mdps,
+			       feature_summary.stability_confidence,
+			       feature_summary.chaos_confidence,
+			       detector_out.in_hand ||
+				       ((detector_out.in_hand_confidence >= 60U) &&
+					(detector_out.look_confidence >= 45U) &&
+					(feature_summary.stability_confidence >= 40U) &&
+					(feature_summary.chaos_confidence <= 55U)),
+			       now_ms);
 
 	emit_detector_events(&detector_out, now_ms);
 	update_look_reference(&detector_out, &feature_summary);
