@@ -451,17 +451,14 @@ static enum face_runtime_dynamic_reason resolve_dynamic_reason(
 	if (!has_zone) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_NO_ZONE;
 	}
-	if (!state->in_hand || (state->in_hand_confidence < 45U)) {
+	if (!state->in_hand && (state->in_hand_confidence < 30U)) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND;
 	}
-	if (state->walking_active || (state->walking_confidence >= 70U)) {
-		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_WALKING;
-	}
 	if ((state->last_rough_event_timestamp_ms > 0LL) &&
-	    ((now_ms - state->last_rough_event_timestamp_ms) < 1200LL)) {
+	    ((now_ms - state->last_rough_event_timestamp_ms) < 1000LL)) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_ROUGH;
 	}
-	if (state->look_confidence < 35U) {
+	if (state->look_confidence < 20U) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_LOW_CONFIDENCE;
 	}
 
