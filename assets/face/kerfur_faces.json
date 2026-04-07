@@ -54,8 +54,8 @@
           "mirrorable": true,
           "eye_solver": {
             "shape": "ellipse",
-            "rx": 3,
-            "ry": 3,
+            "rx": 6,
+            "ry": 6,
             "margin": 1
           }
         },
@@ -69,7 +69,7 @@
           "mirrorable": true,
           "eye_solver": {
             "shape": "rectangle",
-            "rx": 3,
+            "rx": 6,
             "ry": 1,
             "margin": 1
           }
@@ -84,7 +84,7 @@
           "mirrorable": true,
           "eye_solver": {
             "shape": "rectangle",
-            "rx": 3,
+            "rx": 6,
             "ry": 1,
             "margin": 1
           }
@@ -633,6 +633,9 @@
       "base_look": { "x": 0, "y": 0 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 40,
+      "pupil_swap_style": "instant",
       "ambient_motion": ["pupil_idle_drift"]
     },
     {
@@ -649,6 +652,9 @@
       "base_look": { "x": 15, "y": 0 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 45,
+      "pupil_swap_style": "instant",
       "ambient_motion": ["pupil_idle_drift"]
     },
     {
@@ -665,6 +671,9 @@
       "base_look": { "x": 0, "y": 5 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 40,
+      "pupil_swap_style": "instant",
       "ambient_motion": ["pupil_idle_drift"]
     },
     {
@@ -681,6 +690,9 @@
       "base_look": { "x": 0, "y": 0 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 45,
+      "pupil_swap_style": "instant",
       "default_effects": ["effect_spark"]
     },
     {
@@ -696,7 +708,10 @@
       "blink_profile": "blink_legacy_default",
       "base_look": { "x": 0, "y": 0 },
       "allow_dynamic_pupils": true,
-      "special_eye_mode": false
+      "special_eye_mode": false,
+      "base_eye_openness": 80,
+      "transition_speed": 50,
+      "pupil_swap_style": "instant"
     },
     {
       "id": "PET_EXPR_SLEEPY",
@@ -712,7 +727,10 @@
       "base_look": { "x": 0, "y": 10 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
-      "slot_overrides": {    
+      "base_eye_openness": 25,
+      "transition_speed": 20,
+      "pupil_swap_style": "instant",
+      "slot_overrides": {
         "left_brow": { "dx": -8,"dy": 7},
         "right_brow": { "dx": 8, "dy": 7 }
       }
@@ -731,7 +749,10 @@
       "base_look": { "x": 0, "y": 8 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
-      "slot_overrides": {    
+      "base_eye_openness": 90,
+      "transition_speed": 35,
+      "pupil_swap_style": "instant",
+      "slot_overrides": {
         "left_brow": { "dx": -5,"dy": 7},
         "right_brow": { "dx": 7, "dy": 7 },
         "mouth": { "dx": 3, "dy": 0 }
@@ -751,8 +772,11 @@
       "base_look": { "x": 0, "y": 10 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
-      "descriprion": "when this expression is active, the blink eye white replaced with blink crying variant",
-      "slot_overrides": {  
+      "base_eye_openness": 100,
+      "transition_speed": 30,
+      "pupil_swap_style": "instant",
+      "description": "when this expression is active, the blink eye white replaced with blink crying variant",
+      "slot_overrides": {
          "left_eye_white": { "dx": -1, "dy": 1},
          "right_eye_white": { "dx": 3, "dy": 1},
           "left_brow": { "dx": 3, "dy": 4 },
@@ -774,6 +798,9 @@
       "base_look": { "x": 0, "y": 0 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 50,
+      "pupil_swap_style": "instant",
       "description": "A generally annoyed or displeased expression, pupils moving a bit chaotically to reflect agitation, can be used for various negative reactions that aren't strong enough to warrant a full 'overstimulated' expression",
       "slot_overrides" :{
       "mouth" : { "dx": -10, "dy": 11 },
@@ -797,6 +824,9 @@
       "base_look": { "x": 0, "y": 0 },
       "allow_dynamic_pupils": false,
       "special_eye_mode": true,
+      "base_eye_openness": 100,
+      "transition_speed": 40,
+      "pupil_swap_style": "on_blink",
       "slot_overrides" :{
       "left_eyeball": {"dx" : -7, "dy": -5},
       "right_eyeball": {"dx" : -7, "dy": -5}
@@ -816,6 +846,9 @@
       "base_look": { "x": 0, "y": 5 },
       "allow_dynamic_pupils": true,
       "special_eye_mode": false,
+      "base_eye_openness": 60,
+      "transition_speed": 25,
+      "pupil_swap_style": "instant",
       "slot_overrides" :{
         "left_eyeball": {"dx" : 4, "dy": 0},
         "right_eyeball": {"dx" : 4, "dy": 0},
@@ -837,6 +870,9 @@
       "base_look": { "x": 0, "y": 6 },
       "allow_dynamic_pupils": false,
       "special_eye_mode": false,
+      "base_eye_openness": 50,
+      "transition_speed": 18,
+      "pupil_swap_style": "settle",
       "dynamic_pupil_scale_x": 25,
       "dynamic_pupil_scale_y": 20,
       "dynamic_pupil_speed": 10,
@@ -863,6 +899,9 @@
       "base_look": { "x": 0, "y": 0 },
       "allow_dynamic_pupils": false,
       "special_eye_mode": false,
+      "base_eye_openness": 0,
+      "transition_speed": 15,
+      "pupil_swap_style": "instant",
       "default_effects": ["effect_zzz"],
       "slot_overrides" :{
         "left_brow": { "dx": -8,"dy": 6},
@@ -915,6 +954,7 @@
       "duration_ms": 1000,
       "compose_mode": "rebase",
       "base_expression": "PET_EXPR_CALM",
+      "stagger_delay_ms": 120,
       "description": "adds a micro startle eye animation, to mimic surprise or sudden reactions, can be used in combination with other reactions or expressions for more impact",
       "left_eye_white": "eye_white_open_round",
       "right_eye_white": "eye_white_open_round",
@@ -947,8 +987,8 @@
         "left_brow": { "dx": 0,"dy": 9},
         "right_brow": { "dx": 0, "dy": 9 }
       },
-      "description": "Whiskers whiggle once per activation, find the reference in the code",
-
+      "description": "Whiskers wiggle once per activation",
+      "whisker_wiggle": true,
       "look_offset": { "x": 0, "y": 12 }
     },
     {
@@ -993,6 +1033,8 @@
       "whiskers": "whiskers_horny",
       "mouth": "mouth_happy_open",
       "indicator": "icon_bt",
+      "stagger_delay_ms": 120,
+      "whisker_wiggle": true,
       "temporary_effect": "effect_spark"
     },
     {
@@ -1002,7 +1044,8 @@
       "base_expression": "PET_EXPR_CALM",
       "allow_dynamic_pupils": true,
       "left_eyeball": "pupil_disconnect_left",
-      "right_eyeball": "pupil_disconnect_right"
+      "right_eyeball": "pupil_disconnect_right",
+      "pupil_swap_override": "on_blink"
     },
     {
       "id": "REACTION_CHARGE_PULSE",
@@ -1012,7 +1055,8 @@
       "allow_dynamic_pupils": true,
       "left_eyeball": "pupil_charge_left",
       "right_eyeball": "pupil_charge_right",
-      "overlay": "overlay_battery_percent"
+      "overlay": "overlay_battery_percent",
+      "pupil_swap_override": "on_blink"
     },
     {
       "id": "REACTION_LOW_BATT_SAG",
@@ -1021,6 +1065,7 @@
       "base_expression": "PET_EXPR_CALM",
       "mouth": "mouth_sad",
       "allow_dynamic_pupils": false,
+      "pupil_swap_override": "settle",
       "left_eyeball": "pupil_low_batt_left",
       "right_eyeball": "pupil_low_batt_right",
       "left_eye_white": "eye_white_open_round",

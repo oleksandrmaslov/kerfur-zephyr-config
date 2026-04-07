@@ -261,11 +261,6 @@ static enum kerfur_face_blink_profile_id resolve_blink_profile(
 	return recipe->blink_profile;
 }
 
-static bool reaction_has_visual_activity(enum kerfur_face_reaction_id reaction_id)
-{
-	return reaction_id != KERFUR_FACE_REACTION_REACTION_NONE;
-}
-
 static bool blink_profile_is_sleepy(enum kerfur_face_blink_profile_id profile)
 {
 	return profile == KERFUR_FACE_BLINK_PROFILE_BLINK_LEGACY_SLEEPY;
@@ -274,33 +269,6 @@ static bool blink_profile_is_sleepy(enum kerfur_face_blink_profile_id profile)
 static bool blink_profile_is_disabled(enum kerfur_face_blink_profile_id profile)
 {
 	return profile == KERFUR_FACE_BLINK_PROFILE_BLINK_DISABLED;
-}
-
-static bool should_blink(const struct pet_state *state,
-			 enum kerfur_face_reaction_id reaction_id,
-			 enum kerfur_face_blink_profile_id profile,
-			 int64_t now_ms,
-			 bool ambient)
-{
-	const int64_t blink_period_ms =
-		ambient ? FACE_BLINK_PERIOD_AMBIENT_MS : FACE_BLINK_PERIOD_FOREGROUND_MS;
-	const int64_t blink_duration_ms =
-		blink_profile_is_sleepy(profile) ? FACE_BLINK_DURATION_SLEEPY_MS :
-						  FACE_BLINK_DURATION_DEFAULT_MS;
-
-	if (blink_profile_is_disabled(profile)) {
-		return false;
-	}
-
-	if (reaction_id == KERFUR_FACE_REACTION_REACTION_WAKE_BLINK) {
-		return true;
-	}
-
-	if (reaction_has_visual_activity(reaction_id)) {
-		return false;
-	}
-
-	return ((now_ms + ((int64_t)state->arousal * 31LL)) % blink_period_ms) < blink_duration_ms;
 }
 
 static int16_t smooth_axis(int16_t current, int16_t target, uint8_t speed)
@@ -627,6 +595,19 @@ static void log_plan(const struct face_runtime_plan *plan)
 		plan->layout.effect.x,
 		plan->layout.effect.y);
 
+	LOG_INF("Face channels eye_open=%u brow_dy=%d,%d mouth_dy=%d whisk_dy=%d,%d tear_dy=%d transition=%d per_eye=%d l_eye_open=%u r_eye_open=%u",
+		plan->eye_openness,
+		plan->left_brow_dy,
+		plan->right_brow_dy,
+		plan->mouth_dy,
+		plan->left_whisker_dy,
+		plan->right_whisker_dy,
+		plan->tear_drift_dy,
+		plan->transition_active ? 1 : 0,
+		plan->per_eye_openness ? 1 : 0,
+		plan->left_eye_openness,
+		plan->right_eye_openness);
+
 	for (index = 0U; index < plan->effect_count; index++) {
 		LOG_INF("Face effect[%u] asset=%s pos=%d,%d",
 			index,
@@ -634,6 +615,434 @@ static void log_plan(const struct face_runtime_plan *plan)
 			plan->effects[index].position.x,
 			plan->effects[index].position.y);
 	}
+}
+
+#define FACE_TRANSITION_SPEED_DEFAULT 40
+#define FACE_EYE_OPENNESS_DEFAULT    100
+#define FACE_BLINK_CLOSE_SPEED       65
+#define FACE_BLINK_OPEN_SPEED        35
+#define FACE_BLINK_CLOSE_SPEED_SLEEPY 45
+#define FACE_BLINK_OPEN_SPEED_SLEEPY  25
+
+struct whisker_wiggle_frame {
+	int8_t dy;
+	uint16_t duration_ms;
+};
+
+static const struct whisker_wiggle_frame g_whisker_wiggle[] = {
+	{ .dy =  2, .duration_ms = 120 },
+	{ .dy = -2, .duration_ms = 120 },
+	{ .dy =  2, .duration_ms = 120 },
+	{ .dy = -1, .duration_ms = 170 },
+	{ .dy =  1, .duration_ms = 170 },
+	{ .dy =  0, .duration_ms = 260 },
+};
+
+static int16_t evaluate_whisker_wiggle(int64_t start_ms, int64_t now_ms)
+{
+	int64_t elapsed = now_ms - start_ms;
+	int64_t cursor = 0;
+	uint8_t i;
+
+	if ((start_ms <= 0) || (elapsed < 0)) {
+		return 0;
+	}
+
+	for (i = 0U; i < ARRAY_SIZE(g_whisker_wiggle); i++) {
+		cursor += g_whisker_wiggle[i].duration_ms;
+		if (elapsed < cursor) {
+			return g_whisker_wiggle[i].dy;
+		}
+	}
+
+	return 0; /* animation finished */
+}
+
+static void update_blink_state(struct face_runtime_state *runtime,
+			       const struct kerfur_face_recipe *recipe,
+			       enum kerfur_face_blink_profile_id profile,
+			       const struct pet_state *state,
+			       int64_t now_ms,
+			       bool ambient)
+{
+	const int64_t blink_period =
+		ambient ? FACE_BLINK_PERIOD_AMBIENT_MS : FACE_BLINK_PERIOD_FOREGROUND_MS;
+	const int64_t blink_duration =
+		blink_profile_is_sleepy(profile) ? FACE_BLINK_DURATION_SLEEPY_MS
+						: FACE_BLINK_DURATION_DEFAULT_MS;
+	int16_t base_openness =
+		clamp_s16((int16_t)recipe->base_eye_openness + runtime->ctx_openness_bias, 0, 100);
+
+	if (blink_profile_is_disabled(profile)) {
+		runtime->tgt_eye_openness = base_openness;
+		return;
+	}
+
+	/* Schedule first blink */
+	if (runtime->blink_next_ms == 0) {
+		runtime->blink_next_ms =
+			now_ms + blink_period + (((int64_t)state->arousal * 31LL) % 800LL);
+		runtime->tgt_eye_openness = base_openness;
+		return;
+	}
+
+	/* Blink in progress: closing phase */
+	if (runtime->blink_descending) {
+		runtime->tgt_eye_openness = 0;
+		if ((now_ms - runtime->blink_phase_start_ms) >= blink_duration) {
+			runtime->blink_descending = false;
+			runtime->tgt_eye_openness = base_openness;
+			runtime->blink_next_ms =
+				now_ms + blink_period +
+				(((int64_t)state->arousal * 31LL) % 800LL);
+		}
+		return;
+	}
+
+	/* Check if it's time to blink */
+	if (now_ms >= runtime->blink_next_ms) {
+		runtime->blink_descending = true;
+		runtime->blink_phase_start_ms = now_ms;
+		runtime->tgt_eye_openness = 0;
+		return;
+	}
+
+	/* Not blinking — hold base openness */
+	runtime->tgt_eye_openness = base_openness;
+}
+
+static void detect_expression_transition(struct face_runtime_state *runtime,
+					 enum kerfur_face_recipe_id new_recipe_id,
+					 const struct kerfur_face_recipe *new_recipe,
+					 int64_t now_ms)
+{
+	const struct kerfur_face_recipe *old_recipe;
+
+	if (new_recipe_id == runtime->current_expression_id) {
+		return;
+	}
+
+	old_recipe = kerfur_face_recipe_get(runtime->current_expression_id);
+
+	runtime->ch_left_brow_dy =
+		(int16_t)(old_recipe->layout.left_brow.y - new_recipe->layout.left_brow.y);
+	runtime->ch_right_brow_dy =
+		(int16_t)(old_recipe->layout.right_brow.y - new_recipe->layout.right_brow.y);
+	runtime->ch_mouth_dy =
+		(int16_t)(old_recipe->layout.mouth.y - new_recipe->layout.mouth.y);
+	runtime->ch_left_whisker_dy =
+		(int16_t)(old_recipe->layout.left_whisker.y - new_recipe->layout.left_whisker.y);
+	runtime->ch_right_whisker_dy =
+		(int16_t)(old_recipe->layout.right_whisker.y - new_recipe->layout.right_whisker.y);
+
+	runtime->tgt_left_brow_dy = 0;
+	runtime->tgt_right_brow_dy = 0;
+	runtime->tgt_mouth_dy = 0;
+	runtime->tgt_left_whisker_dy = 0;
+	runtime->tgt_right_whisker_dy = 0;
+
+	runtime->tgt_eye_openness = (int16_t)new_recipe->base_eye_openness;
+
+	runtime->prev_expression_id = runtime->current_expression_id;
+	runtime->transition_start_ms = now_ms;
+	runtime->transition_active = true;
+}
+
+static void step_channels(struct face_runtime_state *runtime,
+			  const struct kerfur_face_recipe *recipe,
+			  int64_t now_ms)
+{
+	uint8_t speed = (recipe->transition_speed > 0U) ? recipe->transition_speed
+							: FACE_TRANSITION_SPEED_DEFAULT;
+	uint8_t eye_speed;
+	bool all_settled;
+
+	(void)now_ms;
+
+	/* Apply context bias to position channel targets */
+	runtime->ch_left_brow_dy =
+		smooth_axis(runtime->ch_left_brow_dy,
+			    runtime->tgt_left_brow_dy + runtime->ctx_brow_bias_dy, speed);
+	runtime->ch_right_brow_dy =
+		smooth_axis(runtime->ch_right_brow_dy,
+			    runtime->tgt_right_brow_dy + runtime->ctx_brow_bias_dy, speed);
+	runtime->ch_mouth_dy =
+		smooth_axis(runtime->ch_mouth_dy,
+			    runtime->tgt_mouth_dy + runtime->ctx_mouth_bias_dy, speed);
+	runtime->ch_left_whisker_dy =
+		smooth_axis(runtime->ch_left_whisker_dy, runtime->tgt_left_whisker_dy, speed);
+	runtime->ch_right_whisker_dy =
+		smooth_axis(runtime->ch_right_whisker_dy, runtime->tgt_right_whisker_dy, speed);
+
+	if (runtime->blink_descending) {
+		eye_speed = (recipe->blink_profile == KERFUR_FACE_BLINK_PROFILE_BLINK_LEGACY_SLEEPY)
+				? FACE_BLINK_CLOSE_SPEED_SLEEPY : FACE_BLINK_CLOSE_SPEED;
+	} else {
+		eye_speed = (recipe->blink_profile == KERFUR_FACE_BLINK_PROFILE_BLINK_LEGACY_SLEEPY)
+				? FACE_BLINK_OPEN_SPEED_SLEEPY : FACE_BLINK_OPEN_SPEED;
+	}
+	runtime->ch_eye_openness =
+		smooth_axis(runtime->ch_eye_openness, runtime->tgt_eye_openness, eye_speed);
+
+	all_settled = (runtime->ch_left_brow_dy == runtime->tgt_left_brow_dy) &&
+		      (runtime->ch_right_brow_dy == runtime->tgt_right_brow_dy) &&
+		      (runtime->ch_mouth_dy == runtime->tgt_mouth_dy) &&
+		      (runtime->ch_left_whisker_dy == runtime->tgt_left_whisker_dy) &&
+		      (runtime->ch_right_whisker_dy == runtime->tgt_right_whisker_dy) &&
+		      (runtime->ch_eye_openness == runtime->tgt_eye_openness);
+
+	if (all_settled && runtime->transition_active) {
+		runtime->transition_active = false;
+	}
+}
+
+/* --- Stage 3: Pupil swap policies --- */
+
+static void resolve_pupil_swap(struct face_runtime_state *runtime,
+			       const struct kerfur_face_recipe *recipe,
+			       const struct kerfur_face_reaction *reaction,
+			       struct face_runtime_plan *plan,
+			       int64_t now_ms)
+{
+	enum face_pupil_swap_style style;
+	bool eyeball_changed;
+
+	/* Determine effective swap style: reaction override > recipe default */
+	if (reaction->pupil_swap_override > 0U) {
+		style = (enum face_pupil_swap_style)reaction->pupil_swap_override;
+	} else {
+		style = (enum face_pupil_swap_style)recipe->pupil_swap_style;
+	}
+
+	eyeball_changed =
+		(plan->left_eyeball != runtime->plan.left_eyeball) ||
+		(plan->right_eyeball != runtime->plan.right_eyeball);
+
+	if (!eyeball_changed && !runtime->pupil_swap_waiting_for_blink) {
+		return;
+	}
+
+	switch (style) {
+	case FACE_PUPIL_SWAP_ON_BLINK:
+		if (eyeball_changed && !runtime->pupil_swap_waiting_for_blink) {
+			/* Defer the swap until eyes close */
+			runtime->deferred_left_eyeball = plan->left_eyeball;
+			runtime->deferred_right_eyeball = plan->right_eyeball;
+			runtime->pupil_swap_waiting_for_blink = true;
+			/* Keep current pupils for now */
+			plan->left_eyeball = runtime->plan.left_eyeball;
+			plan->right_eyeball = runtime->plan.right_eyeball;
+		}
+		if (runtime->pupil_swap_waiting_for_blink) {
+			if (runtime->ch_eye_openness < 10) {
+				/* Eyes are closed — do the swap */
+				plan->left_eyeball = runtime->deferred_left_eyeball;
+				plan->right_eyeball = runtime->deferred_right_eyeball;
+				runtime->pupil_swap_waiting_for_blink = false;
+			} else {
+				plan->left_eyeball = runtime->plan.left_eyeball;
+				plan->right_eyeball = runtime->plan.right_eyeball;
+			}
+		}
+		break;
+
+	case FACE_PUPIL_SWAP_SETTLE:
+		if (eyeball_changed && !runtime->pupil_swap_waiting_for_blink) {
+			runtime->deferred_left_eyeball = plan->left_eyeball;
+			runtime->deferred_right_eyeball = plan->right_eyeball;
+			runtime->pupil_swap_waiting_for_blink = true;
+			runtime->pupil_settle_start_ms = now_ms;
+			plan->left_eyeball = runtime->plan.left_eyeball;
+			plan->right_eyeball = runtime->plan.right_eyeball;
+		}
+		if (runtime->pupil_swap_waiting_for_blink) {
+			/* Wait for pupils to settle near center (~400ms) */
+			if ((now_ms - runtime->pupil_settle_start_ms) >= 400LL) {
+				plan->left_eyeball = runtime->deferred_left_eyeball;
+				plan->right_eyeball = runtime->deferred_right_eyeball;
+				runtime->pupil_swap_waiting_for_blink = false;
+			} else {
+				plan->left_eyeball = runtime->plan.left_eyeball;
+				plan->right_eyeball = runtime->plan.right_eyeball;
+			}
+		}
+		break;
+
+	case FACE_PUPIL_SWAP_INSTANT:
+	default:
+		/* Immediate swap — already in plan */
+		runtime->pupil_swap_waiting_for_blink = false;
+		break;
+	}
+}
+
+/* --- Stage 3: Reaction stagger --- */
+
+static void resolve_reaction_stagger(struct face_runtime_state *runtime,
+				     const struct kerfur_face_reaction *reaction,
+				     struct face_runtime_plan *plan,
+				     const struct kerfur_face_recipe *recipe,
+				     int64_t now_ms)
+{
+	int64_t elapsed;
+
+	if (reaction->stagger_delay_ms == 0U) {
+		return;
+	}
+
+	/* Detect reaction start */
+	if (plan->reaction_id != runtime->current_reaction_id) {
+		runtime->reaction_enter_ms = now_ms;
+		runtime->reaction_stagger_phase = 0U;
+	}
+
+	if (runtime->reaction_enter_ms <= 0) {
+		return;
+	}
+
+	elapsed = now_ms - runtime->reaction_enter_ms;
+
+	/* Phase 0: only eye assets applied (already in plan) */
+	/* Phase 1: after 1x stagger_delay — apply brow assets */
+	/* Phase 2: after 2x stagger_delay — apply mouth/whiskers */
+
+	if (elapsed < reaction->stagger_delay_ms) {
+		/* Phase 0: revert brows and mouth to base expression */
+		plan->left_brow = recipe->left_brow;
+		plan->right_brow = recipe->right_brow;
+		plan->mouth = recipe->mouth;
+		plan->whiskers = recipe->whiskers;
+	} else if (elapsed < (int64_t)(2U * reaction->stagger_delay_ms)) {
+		/* Phase 1: brows applied, mouth/whiskers still base */
+		plan->mouth = recipe->mouth;
+		plan->whiskers = recipe->whiskers;
+	}
+	/* Phase 2+: all reaction assets applied (already in plan) */
+}
+
+/* --- Stage 3: NOTIF_PING alternating wink --- */
+
+#define NOTIF_WINK_TOGGLE_MS 500LL
+
+static void apply_notif_ping_wink(struct face_runtime_state *runtime,
+				  struct face_runtime_plan *plan,
+				  int64_t now_ms)
+{
+	if (plan->reaction_id != KERFUR_FACE_REACTION_REACTION_NOTIF_PING) {
+		runtime->notif_wink_left_closed = false;
+		runtime->notif_wink_last_toggle_ms = 0;
+		return;
+	}
+
+	if (runtime->notif_wink_last_toggle_ms == 0) {
+		runtime->notif_wink_last_toggle_ms = now_ms;
+		runtime->notif_wink_left_closed = true;
+	}
+
+	if ((now_ms - runtime->notif_wink_last_toggle_ms) >= NOTIF_WINK_TOGGLE_MS) {
+		runtime->notif_wink_left_closed = !runtime->notif_wink_left_closed;
+		runtime->notif_wink_last_toggle_ms = now_ms;
+	}
+
+	plan->per_eye_openness = true;
+	plan->right_eye_openness = plan->eye_openness;
+	plan->left_eye_openness = runtime->notif_wink_left_closed ? 0U : plan->eye_openness;
+}
+
+/* --- Stage 3: ANNOYED chaotic pupil jitter --- */
+
+static void apply_annoyed_jitter(struct face_runtime_state *runtime,
+				 struct face_runtime_plan *plan)
+{
+	if (plan->recipe_id != KERFUR_FACE_RECIPE_PET_EXPR_ANNOYED ||
+	    !plan->dynamic_pupils_allowed) {
+		runtime->jitter_offset_x = 0;
+		runtime->jitter_offset_y = 0;
+		return;
+	}
+
+	runtime->jitter_seed = (uint16_t)((runtime->jitter_seed * 25173U + 13849U) >> 1);
+	runtime->jitter_offset_x = (int16_t)(((runtime->jitter_seed >> 0) & 3U) - 1);
+	runtime->jitter_offset_y = (int16_t)(((runtime->jitter_seed >> 2) & 3U) - 1);
+
+	plan->left_pupil_offset_x += runtime->jitter_offset_x;
+	plan->left_pupil_offset_y += runtime->jitter_offset_y;
+	plan->right_pupil_offset_x += runtime->jitter_offset_x;
+	plan->right_pupil_offset_y += runtime->jitter_offset_y;
+}
+
+/* --- Stage 3: Tear drift --- */
+
+#define TEAR_DRIFT_RESET_MS 3000LL
+
+static void update_tear_drift(struct face_runtime_state *runtime,
+			      const struct face_runtime_plan *plan,
+			      int64_t now_ms)
+{
+	bool has_tears = false;
+	uint8_t i;
+
+	for (i = 0U; i < plan->effect_count; i++) {
+		if (plan->effects[i].asset_id == KERFUR_FACE_ASSET_EFFECT_TEAR) {
+			has_tears = true;
+			break;
+		}
+	}
+
+	if (!has_tears) {
+		runtime->tear_drift_dy = 0;
+		runtime->tear_last_spawn_ms = 0;
+		return;
+	}
+
+	if (runtime->tear_last_spawn_ms == 0) {
+		runtime->tear_last_spawn_ms = now_ms;
+		runtime->tear_drift_dy = 0;
+	}
+
+	if ((now_ms - runtime->tear_last_spawn_ms) >= TEAR_DRIFT_RESET_MS) {
+		runtime->tear_drift_dy = 0;
+		runtime->tear_last_spawn_ms = now_ms;
+	} else {
+		runtime->tear_drift_dy += 1;
+	}
+}
+
+/* --- Stage 4: Context bias --- */
+
+static void compute_context_bias(struct face_runtime_state *runtime,
+				 const struct pet_state *state)
+{
+	int16_t openness_bias = 0;
+	int16_t brow_bias = 0;
+	int16_t mouth_bias = 0;
+
+	if (state->charging) {
+		openness_bias += -10;
+		brow_bias += 2;
+	}
+
+	if (state->battery_low) {
+		openness_bias += -15;
+		brow_bias += 1;
+		mouth_bias += 2;
+	}
+
+	if (state->walking_confidence > 50U) {
+		openness_bias += 5;
+		brow_bias += -1;
+	}
+
+	if (state->in_hand && (state->in_hand_confidence > 60U)) {
+		openness_bias += 5;
+	} else if (!state->in_hand && (state->in_hand_confidence < 15U)) {
+		openness_bias += -5;
+		brow_bias += 1;
+	}
+
+	runtime->ctx_openness_bias = openness_bias;
+	runtime->ctx_brow_bias_dy = brow_bias;
+	runtime->ctx_mouth_bias_dy = mouth_bias;
 }
 
 void face_runtime_init(struct face_runtime_state *runtime)
@@ -650,6 +1059,8 @@ void face_runtime_init(struct face_runtime_state *runtime)
 	runtime->battery_percent = -1;
 	runtime->plan.recipe_id = KERFUR_FACE_RECIPE_PET_EXPR_CALM;
 	runtime->plan.reaction_id = KERFUR_FACE_REACTION_REACTION_NONE;
+	runtime->ch_eye_openness = FACE_EYE_OPENNESS_DEFAULT;
+	runtime->tgt_eye_openness = FACE_EYE_OPENNESS_DEFAULT;
 }
 
 const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *runtime,
@@ -694,6 +1105,39 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	recipe = resolve_recipe_and_reaction(state, &recipe_id, &reaction_id, &reaction);
 	blink_profile_id = resolve_blink_profile(recipe, reaction);
 
+	detect_expression_transition(runtime, recipe_id, recipe, now_ms);
+
+	/* Whisker wiggle: start animation when reaction with wiggle just begins */
+	if (reaction->has_whisker_wiggle && (reaction_id != runtime->current_reaction_id)) {
+		runtime->whisker_anim_start_ms = now_ms;
+	}
+	if (runtime->whisker_anim_start_ms > 0) {
+		int16_t wiggle_dy = evaluate_whisker_wiggle(runtime->whisker_anim_start_ms, now_ms);
+
+		if (wiggle_dy == 0 &&
+		    (now_ms - runtime->whisker_anim_start_ms) > g_whisker_wiggle[0].duration_ms) {
+			runtime->whisker_anim_start_ms = 0;
+		}
+		runtime->tgt_left_whisker_dy = wiggle_dy;
+		runtime->tgt_right_whisker_dy = wiggle_dy;
+	}
+
+	/* Context bias computation (affects blink target) */
+	compute_context_bias(runtime, state);
+
+	/* WAKE_BLINK reaction forces a blink */
+	if (reaction_id == KERFUR_FACE_REACTION_REACTION_WAKE_BLINK &&
+	    reaction_id != runtime->current_reaction_id) {
+		runtime->blink_descending = true;
+		runtime->blink_phase_start_ms = now_ms;
+		runtime->tgt_eye_openness = 0;
+	}
+
+	/* Blink / eye openness update */
+	update_blink_state(runtime, recipe, blink_profile_id, state, now_ms, ambient);
+
+	step_channels(runtime, recipe, now_ms);
+
 	(void)memset(&plan, 0, sizeof(plan));
 	plan.recipe_id = recipe_id;
 	plan.reaction_id = reaction_id;
@@ -723,7 +1167,8 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 		recipe->special_eye_mode ||
 		((left_eye_asset->flags & KERFUR_FACE_ASSET_FLAG_SPECIAL_MODE) != 0U) ||
 		((right_eye_asset->flags & KERFUR_FACE_ASSET_FLAG_SPECIAL_MODE) != 0U);
-	blink_active = should_blink(state, reaction_id, blink_profile_id, now_ms, ambient);
+	/* Derive blink_active from the eye openness channel */
+	blink_active = (runtime->ch_eye_openness < 30);
 
 	resolve_look_target(recipe, reaction, state, &target_x, &target_y);
 
@@ -829,6 +1274,12 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 
 	resolve_effects(&plan, recipe, reaction);
 
+	/* Stage 3: Pupil swap policy (may defer asset change) */
+	resolve_pupil_swap(runtime, recipe, reaction, &plan, now_ms);
+
+	/* Stage 3: Reaction stagger (may revert some assets to base) */
+	resolve_reaction_stagger(runtime, reaction, &plan, recipe, now_ms);
+
 	plan.look_target_x = target_x;
 	plan.look_target_y = target_y;
 	plan.look_render_x = runtime->look_render_x;
@@ -838,6 +1289,31 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	plan.blink_left_active = blink_active;
 	plan.blink_right_active = blink_active;
 	plan.dynamic_reason = dynamic_reason;
+
+	/* Copy interpolation channel values to plan */
+	plan.left_brow_dy = runtime->ch_left_brow_dy;
+	plan.right_brow_dy = runtime->ch_right_brow_dy;
+	plan.mouth_dy = runtime->ch_mouth_dy;
+	plan.left_whisker_dy = runtime->ch_left_whisker_dy;
+	plan.right_whisker_dy = runtime->ch_right_whisker_dy;
+	plan.eye_openness = (uint8_t)clamp_s16(runtime->ch_eye_openness, 0, 100);
+	plan.left_eye_openness = plan.eye_openness;
+	plan.right_eye_openness = plan.eye_openness;
+	plan.per_eye_openness = false;
+	plan.transition_active = runtime->transition_active;
+
+	/* Stage 3: Microanimations (modify plan after channel copy) */
+	apply_notif_ping_wink(runtime, &plan, now_ms);
+	apply_annoyed_jitter(runtime, &plan);
+	update_tear_drift(runtime, &plan, now_ms);
+	plan.tear_drift_dy = runtime->tear_drift_dy;
+
+	/* Stage 3: STARTLE forces eyes wide open */
+	if (reaction_id == KERFUR_FACE_REACTION_REACTION_STARTLE) {
+		plan.eye_openness = 100U;
+		plan.left_eye_openness = 100U;
+		plan.right_eye_openness = 100U;
+	}
 
 	runtime->current_expression_id = recipe_id;
 	runtime->current_reaction_id = reaction_id;
@@ -867,7 +1343,8 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 		     (previous_recipe_id != runtime->plan.recipe_id) ||
 		     (previous_reaction_id != runtime->plan.reaction_id) ||
 		     (previous_indicator_id != runtime->plan.indicator_id) ||
-		     (previous_overlay_id != runtime->plan.overlay_id);
+		     (previous_overlay_id != runtime->plan.overlay_id) ||
+		     runtime->transition_active;
 
 	if (IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG) && should_log) {
 		log_plan(&runtime->plan);
@@ -875,6 +1352,30 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 
 	return &runtime->plan;
 }
+
+#if IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG)
+
+void face_runtime_debug_force_blink(struct face_runtime_state *runtime)
+{
+	if (runtime == NULL) {
+		return;
+	}
+	runtime->blink_descending = true;
+	runtime->blink_phase_start_ms = runtime->last_step_ms;
+	runtime->tgt_eye_openness = 0;
+}
+
+void face_runtime_debug_force_openness(struct face_runtime_state *runtime, uint8_t openness)
+{
+	if (runtime == NULL) {
+		return;
+	}
+	runtime->tgt_eye_openness = (int16_t)MIN(openness, 100U);
+	runtime->blink_descending = false;
+	runtime->blink_next_ms = runtime->last_step_ms + 10000LL; /* suppress blink for 10s */
+}
+
+#endif /* CONFIG_KERFUR_FACE_DEBUG */
 
 const char *face_runtime_dynamic_reason_str(enum face_runtime_dynamic_reason reason)
 {

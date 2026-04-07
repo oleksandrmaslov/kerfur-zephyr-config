@@ -124,6 +124,13 @@ def format_c_string(text: str) -> str:
 	return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+PUPIL_SWAP_MAP = {
+	"instant": 0,
+	"on_blink": 1,
+	"settle": 2,
+}
+
+
 def format_c_array(values: list[int], indent: str = "\t") -> str:
 	if not values:
 		return "{}"
@@ -312,7 +319,13 @@ def _bitmap_from_svg_primitives(path: Path, width: int, height: int) -> AssetBit
 		view_width = _parse_float(root.attrib.get("width"), float(width))
 		view_height = _parse_float(root.attrib.get("height"), float(height))
 
-	polygons: list[list[tuple[float, float]]] = []
+	# Each SVG element becomes its own polygon group. Sub-paths inside a
+	# single <path> are combined with the even-odd fill rule so that inner
+	# contours (mouth cavities, pupil highlights) cancel the enclosing
+	# region and become transparent holes. Separate top-level elements are
+	# OR-ed together so that overlapping rects in e.g. eye_white_blink_crying
+	# still form a union rather than carving holes in each other.
+	polygon_groups: list[list[list[tuple[float, float]]]] = []
 
 	for element in root:
 		tag = element.tag.rsplit("}", 1)[-1]
@@ -328,10 +341,12 @@ def _bitmap_from_svg_primitives(path: Path, width: int, height: int) -> AssetBit
 				(x, y + rect_height),
 				(x, y),
 			]
-			polygons.append(_transform_points(rect_points, element.attrib.get("transform")))
+			polygon_groups.append([
+				_transform_points(rect_points, element.attrib.get("transform")),
+			])
 		elif tag == "path":
 			path_data = element.attrib.get("d", "")
-			polygons.extend(_parse_svg_path_polygons(path_data))
+			polygon_groups.append(_parse_svg_path_polygons(path_data))
 		else:
 			raise ValueError(f"Unsupported SVG element <{tag}> in {path}")
 
@@ -344,8 +359,12 @@ def _bitmap_from_svg_primitives(path: Path, width: int, height: int) -> AssetBit
 			user_y = view_min_y + ((py + 0.5) * view_height / height)
 			is_on = False
 
-			for polygon in polygons:
-				if _point_in_polygon(user_x, user_y, polygon):
+			for group in polygon_groups:
+				group_inside = False
+				for polygon in group:
+					if _point_in_polygon(user_x, user_y, polygon):
+						group_inside = not group_inside
+				if group_inside:
 					is_on = True
 					break
 
@@ -1151,6 +1170,9 @@ struct kerfur_face_recipe {{
 \tuint8_t dynamic_pupil_scale_y;
 \tuint8_t dynamic_pupil_speed;
 \tuint8_t dead_zone_strength;
+\tuint8_t base_eye_openness;
+\tuint8_t transition_speed;
+\tuint8_t pupil_swap_style;
 \tuint8_t ambient_motion_count;
 \tconst enum kerfur_face_micro_anim_id *ambient_motion;
 \tuint8_t default_effect_count;
@@ -1205,6 +1227,9 @@ struct kerfur_face_reaction {{
 \tstruct kerfur_face_override effect_override;
 \tuint8_t temporary_effect_count;
 \tstruct kerfur_face_effect_instance temporary_effects[KERFUR_FACE_MAX_EFFECTS];
+\tbool has_whisker_wiggle;
+\tuint16_t stagger_delay_ms;
+\tuint8_t pupil_swap_override;
 }};
 
 const struct kerfur_face_recipe *kerfur_face_recipe_get(enum kerfur_face_recipe_id id);
@@ -1253,6 +1278,11 @@ const char *kerfur_face_reaction_name(enum kerfur_face_reaction_id id);
 			int(override.get("dx", 0)),
 			int(override.get("dy", 0)),
 		)
+
+	def _pupil_swap_enum(self, style: str | None) -> str:
+		if style is None:
+			return "0"
+		return str(PUPIL_SWAP_MAP.get(str(style).lower(), 0))
 
 	def _render_reaction_effects(self, reaction: dict[str, Any]) -> list[dict[str, Any]]:
 		effects: list[dict[str, Any]] = []
@@ -1373,6 +1403,9 @@ const char *kerfur_face_reaction_name(enum kerfur_face_reaction_id id);
 				f"\t\t.dynamic_pupil_scale_y = {int(expr.get('dynamic_pupil_scale_y', 100))},\n"
 				f"\t\t.dynamic_pupil_speed = {int(expr.get('dynamic_pupil_speed', 32))},\n"
 				f"\t\t.dead_zone_strength = {int(expr.get('dead_zone_strength', 0))},\n"
+				f"\t\t.base_eye_openness = {int(expr.get('base_eye_openness', 100))},\n"
+				f"\t\t.transition_speed = {int(expr.get('transition_speed', 40))},\n"
+				f"\t\t.pupil_swap_style = {self._pupil_swap_enum(expr.get('pupil_swap_style', 'instant'))},\n"
 				f"\t\t.ambient_motion_count = {len(ambient)},\n"
 				f"\t\t.ambient_motion = {ambient_ref},\n"
 				f"\t\t.default_effect_count = {len(default_effects)},\n"
@@ -1458,6 +1491,9 @@ const char *kerfur_face_reaction_name(enum kerfur_face_reaction_id id);
 				f"\t\t.effect_override = {self._format_override(self._reaction_override(reaction, 'effect'))},\n"
 				f"\t\t.temporary_effect_count = {len(effects)},\n"
 				f"\t\t.temporary_effects = {{ {', '.join(effect_lines)} }},\n"
+				f"\t\t.has_whisker_wiggle = {'true' if reaction.get('whisker_wiggle', False) else 'false'},\n"
+				f"\t\t.stagger_delay_ms = {int(reaction.get('stagger_delay_ms', 0))},\n"
+				f"\t\t.pupil_swap_override = {self._pupil_swap_enum(reaction.get('pupil_swap_override'))},\n"
 				f"\t}},"
 			)
 

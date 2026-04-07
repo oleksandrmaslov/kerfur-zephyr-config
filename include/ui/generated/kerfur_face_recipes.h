@@ -145,6 +145,9 @@ struct kerfur_face_recipe {
 	uint8_t dynamic_pupil_scale_y;
 	uint8_t dynamic_pupil_speed;
 	uint8_t dead_zone_strength;
+	uint8_t base_eye_openness;
+	uint8_t transition_speed;
+	uint8_t pupil_swap_style;
 	uint8_t ambient_motion_count;
 	const enum kerfur_face_micro_anim_id *ambient_motion;
 	uint8_t default_effect_count;
@@ -199,6 +202,9 @@ struct kerfur_face_reaction {
 	struct kerfur_face_override effect_override;
 	uint8_t temporary_effect_count;
 	struct kerfur_face_effect_instance temporary_effects[KERFUR_FACE_MAX_EFFECTS];
+	bool has_whisker_wiggle;
+	uint16_t stagger_delay_ms;
+	uint8_t pupil_swap_override;
 };
 
 const struct kerfur_face_recipe *kerfur_face_recipe_get(enum kerfur_face_recipe_id id);

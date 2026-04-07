@@ -629,9 +629,12 @@ static void update_look_target(const struct in_hand_detector_output *det,
 		     !g_mc.look_reference_valid;
 
 	if (suppressed) {
-		/* Smoothly return to center. */
-		g_mc.look_target_x = move_towards(g_mc.look_target_x, 0, 6);
-		g_mc.look_target_y = move_towards(g_mc.look_target_y, 0, 6);
+		/* Smoothly return to center. Keep this slow so the pupils don't
+		 * snap back the moment confidence dips — at 25Hz a delta of 2
+		 * means a full ~2s glide from one extreme to center, which feels
+		 * natural to the eye. */
+		g_mc.look_target_x = move_towards(g_mc.look_target_x, 0, 2);
+		g_mc.look_target_y = move_towards(g_mc.look_target_y, 0, 2);
 		g_mc.look_confidence = 0U;
 		return;
 	}

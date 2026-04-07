@@ -242,17 +242,43 @@ static void draw_face_plan(const struct face_runtime_plan *plan, lv_opa_t opa)
 								  plan->blink_right_eye_white);
 	enum kerfur_face_asset_id left_eye_asset = plan->left_eye_white;
 	enum kerfur_face_asset_id right_eye_asset = plan->right_eye_white;
+	uint8_t left_openness;
+	uint8_t right_openness;
+	bool left_eyes_closed;
+	bool right_eyes_closed;
 	uint8_t index;
 
 	left_blink_pos = point_with_shift(left_blink_pos);
 	right_blink_pos = point_with_shift(right_blink_pos);
 
-	if (plan->blink_left_active && (plan->blink_left_eye_white != KERFUR_FACE_ASSET_NONE)) {
+	/* Eye openness-based asset selection (replaces binary blink) */
+	left_openness = plan->per_eye_openness ? plan->left_eye_openness : plan->eye_openness;
+	right_openness = plan->per_eye_openness ? plan->right_eye_openness : plan->eye_openness;
+
+	/* Use hysteresis: close at <25, reopen at >=35 */
+	left_eyes_closed = plan->blink_left_active &&
+			   (plan->blink_left_eye_white != KERFUR_FACE_ASSET_NONE);
+	right_eyes_closed = plan->blink_right_active &&
+			    (plan->blink_right_eye_white != KERFUR_FACE_ASSET_NONE);
+
+	if (left_openness < 25U) {
+		left_eyes_closed = (plan->blink_left_eye_white != KERFUR_FACE_ASSET_NONE);
+	} else if (left_openness >= 35U) {
+		left_eyes_closed = false;
+	}
+
+	if (right_openness < 25U) {
+		right_eyes_closed = (plan->blink_right_eye_white != KERFUR_FACE_ASSET_NONE);
+	} else if (right_openness >= 35U) {
+		right_eyes_closed = false;
+	}
+
+	if (left_eyes_closed) {
 		left_eye_pos = left_blink_pos;
 		left_eye_asset = plan->blink_left_eye_white;
 	}
 
-	if (plan->blink_right_active && (plan->blink_right_eye_white != KERFUR_FACE_ASSET_NONE)) {
+	if (right_eyes_closed) {
 		right_eye_pos = right_blink_pos;
 		right_eye_asset = plan->blink_right_eye_white;
 	}
@@ -260,32 +286,56 @@ static void draw_face_plan(const struct face_runtime_plan *plan, lv_opa_t opa)
 	draw_asset(left_eye_asset, left_eye_pos.x, left_eye_pos.y, false, opa);
 	draw_asset(right_eye_asset, right_eye_pos.x, right_eye_pos.y, true, opa);
 
-	if (!plan->blink_left_active && (plan->left_eyeball != KERFUR_FACE_ASSET_NONE)) {
+	if (!left_eyes_closed && (plan->left_eyeball != KERFUR_FACE_ASSET_NONE)) {
 		struct kerfur_face_point left_pupil = pupil_draw_position(plan, recipe, true);
 
 		draw_asset(plan->left_eyeball, left_pupil.x, left_pupil.y, false, opa);
 	}
 
-	if (!plan->blink_right_active && (plan->right_eyeball != KERFUR_FACE_ASSET_NONE)) {
+	if (!right_eyes_closed && (plan->right_eyeball != KERFUR_FACE_ASSET_NONE)) {
 		struct kerfur_face_point right_pupil = pupil_draw_position(plan, recipe, false);
 
 		draw_asset(plan->right_eyeball, right_pupil.x, right_pupil.y, true, opa);
 	}
 
-	draw_asset(plan->left_brow, point_with_shift(plan->layout.left_brow).x,
-		  point_with_shift(plan->layout.left_brow).y, false, opa);
-	draw_asset(plan->right_brow, point_with_shift(plan->layout.right_brow).x,
-		  point_with_shift(plan->layout.right_brow).y, true, opa);
-	draw_asset(plan->mouth, point_with_shift(plan->layout.mouth).x,
-		  point_with_shift(plan->layout.mouth).y, false, opa);
-	draw_asset(plan->whiskers, point_with_shift(plan->layout.left_whisker).x,
-		  point_with_shift(plan->layout.left_whisker).y, false, opa);
-	draw_asset(plan->whiskers, point_with_shift(plan->layout.right_whisker).x,
-		  point_with_shift(plan->layout.right_whisker).y, true, opa);
+	/* Brows with smooth offset */
+	{
+		struct kerfur_face_point lbrow = point_with_shift(plan->layout.left_brow);
+		struct kerfur_face_point rbrow = point_with_shift(plan->layout.right_brow);
+
+		lbrow.y += plan->left_brow_dy;
+		rbrow.y += plan->right_brow_dy;
+		draw_asset(plan->left_brow, lbrow.x, lbrow.y, false, opa);
+		draw_asset(plan->right_brow, rbrow.x, rbrow.y, true, opa);
+	}
+
+	/* Mouth with smooth offset */
+	{
+		struct kerfur_face_point mpos = point_with_shift(plan->layout.mouth);
+
+		mpos.y += plan->mouth_dy;
+		draw_asset(plan->mouth, mpos.x, mpos.y, false, opa);
+	}
+
+	/* Whiskers with smooth offset (includes wiggle) */
+	{
+		struct kerfur_face_point lwh = point_with_shift(plan->layout.left_whisker);
+		struct kerfur_face_point rwh = point_with_shift(plan->layout.right_whisker);
+
+		lwh.y += plan->left_whisker_dy;
+		rwh.y += plan->right_whisker_dy;
+		draw_asset(plan->whiskers, lwh.x, lwh.y, false, opa);
+		draw_asset(plan->whiskers, rwh.x, rwh.y, true, opa);
+	}
 
 	for (index = 0U; index < plan->effect_count; index++) {
 		struct kerfur_face_point point = point_with_shift(plan->effects[index].position);
 
+		/* Tear drift: add vertical offset to tear effects */
+		if ((plan->tear_drift_dy != 0) &&
+		    (plan->effects[index].asset_id == KERFUR_FACE_ASSET_EFFECT_TEAR)) {
+			point.y += plan->tear_drift_dy;
+		}
 		draw_asset(plan->effects[index].asset_id, point.x, point.y, false, opa);
 	}
 

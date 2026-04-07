@@ -54,6 +54,20 @@ static bool is_surface_still(const struct in_hand_detector_input *in)
 	       in->orientation_rate_mg <= 50U;
 }
 
+/* Looser stillness window: low motion and no orientation drift, even if a
+ * stray vibration spike crosses the strict surface-still gate. Used to bias
+ * the in-hand detector toward exit when the device is clearly resting. */
+static bool is_near_still(const struct in_hand_detector_input *in)
+{
+	return !in->walking_active &&
+	       !in->rough_motion &&
+	       in->motion_mg          <= 200U &&
+	       in->smooth_motion_mg   <= 150U &&
+	       in->orientation_rate_mg <= 80U &&
+	       in->orientation_delta_mg <= 80U &&
+	       in->chaos_confidence    < 50U;
+}
+
 /* ── Hand-like motion classifier ──────────────────────────────────────── */
 
 static bool is_smooth_reorientation(const struct in_hand_detector_input *in)
@@ -77,8 +91,6 @@ static bool is_micro_motion(const struct in_hand_detector_input *in)
 
 static bool is_hand_like(const struct in_hand_detector_input *in)
 {
-	/* Anything that isn't rough, isn't walking, and isn't completely still
-	 * is likely hand-held motion. Be very permissive here. */
 	if (in->rough_motion || in->walking_active) {
 		return false;
 	}
@@ -88,9 +100,17 @@ static bool is_hand_like(const struct in_hand_detector_input *in)
 	if (in->chaos_confidence >= 65U) {
 		return false;
 	}
-	/* Some motion must be present — but very little is enough. */
-	return in->motion_mg >= 8U || in->orientation_delta_mg >= 5U ||
-	       in->smooth_motion_mg >= 10U;
+	/* Hand-held motion is small but persistent and almost always involves
+	 * gravity vector reorientation. Pure linear noise from a vibrating
+	 * surface (passing footsteps, fan, AC) routinely produces 30-60mg
+	 * spikes that must NOT count, otherwise the detector pins itself in
+	 * the in-hand state forever. Require either real reorientation, or
+	 * sustained inter-sample motion above the noise floor. */
+	const bool orientation_evidence =
+		in->orientation_delta_mg >= 25U || in->orientation_rate_mg >= 25U;
+	const bool sustained_motion =
+		in->smooth_motion_mg >= 40U && in->motion_mg >= 60U;
+	return orientation_evidence || sustained_motion;
 }
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -196,11 +216,25 @@ void in_hand_detector_process(struct in_hand_detector *det,
 		in_hand_delta += (int)in->stability_confidence / 15;
 		in_hand_delta -= (int)in->chaos_confidence / 20;
 	} else if (det->in_hand) {
-		/* Already in hand — very slow decay unless clearly on surface. */
+		/* No hand-like signal this tick but still flagged in_hand. We
+		 * have to discriminate between a genuine gentle hold (where the
+		 * user is holding the device steady but in a clearly different
+		 * orientation than the surface) and a vibrating surface (where
+		 * gravity stays parked at the saved surface reference). The
+		 * gravity-distance-from-surface check is the cleanest signal:
+		 * a held device almost always sits at a different tilt than the
+		 * surface it left, while a vibrating surface produces zero
+		 * gravity drift no matter how much linear noise it generates. */
 		if (surface_still) {
-			in_hand_delta = -3;
+			in_hand_delta = -8;
+		} else if (orientation_moved) {
+			/* Clearly displaced from the surface — keep the in_hand
+			 * state pinned so calm holds don't bleed out. */
+			in_hand_delta = 0;
+		} else if (is_near_still(in)) {
+			in_hand_delta = -4;
 		} else {
-			in_hand_delta = -1;  /* Hold confidence steady. */
+			in_hand_delta = -1;
 		}
 	} else if (surface_still) {
 		in_hand_delta = -3;
