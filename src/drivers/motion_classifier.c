@@ -36,8 +36,8 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 /* ── Tuning constants ─────────────────────────────────────────────────── */
 
 #define IDLE_POLL_MS               800
-#define IDLE_WAKE_THRESHOLD_MG     150U
-#define IDLE_WAKE_SMOOTH_MG        100U
+#define IDLE_WAKE_THRESHOLD_MG     250U
+#define IDLE_WAKE_SMOOTH_MG        180U
 
 #define FEATURE_WINDOW_FRAMES      12U
 
@@ -53,12 +53,12 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 #define GRAVITY_SLOW_ALPHA         14
 
 /* Gaze. */
-#define GAZE_DEADBAND              5
-#define GAZE_MAX_DELTA_NORMAL      12
-#define GAZE_MAX_DELTA_LOW_BATT    7
-#define LOOK_SUPPRESS_AFTER_ROUGH_MS 1200LL
-#define LOOK_SUPPRESS_AFTER_WALK_MS  800LL
-#define LOOK_REFERENCE_ADAPT_ALPHA   16
+#define GAZE_DEADBAND              3
+#define GAZE_MAX_DELTA_NORMAL      15
+#define GAZE_MAX_DELTA_LOW_BATT    8
+#define LOOK_SUPPRESS_AFTER_ROUGH_MS 800LL
+#define LOOK_SUPPRESS_AFTER_WALK_MS  500LL
+#define LOOK_REFERENCE_ADAPT_ALPHA   60
 
 /* Shake cooldowns. */
 #define SHAKE_COOLDOWN_LIGHT_MS    800
@@ -522,18 +522,20 @@ static void check_shake(uint16_t motion_mg, uint32_t gyro,
 	int cooldown = 0;
 	int64_t suppress = 0LL;
 
-	if (motion_mg >= 1800U || gyro >= 90000U) {
+	/* Thresholds tuned so normal hand-twisting does NOT trigger shakes.
+	 * Gyro thresholds are high because rotation in hand easily hits 40-60k mdps. */
+	if (motion_mg >= 2200U || gyro >= 120000U) {
 		type = APP_EVENT_IMPACT;
 		cooldown = SHAKE_COOLDOWN_IMPACT_MS;
 		suppress = now_ms + 1400LL;
-	} else if (motion_mg >= 1200U || gyro >= 70000U) {
+	} else if (motion_mg >= 1500U || gyro >= 95000U) {
 		type = APP_EVENT_SHAKE_ROUGH;
 		cooldown = SHAKE_COOLDOWN_ROUGH_MS;
 		suppress = now_ms + 1200LL;
-	} else if (motion_mg >= 820U || gyro >= 50000U) {
+	} else if (motion_mg >= 1000U || gyro >= 75000U) {
 		type = APP_EVENT_SHAKE_PLAY;
 		cooldown = SHAKE_COOLDOWN_PLAY_MS;
-	} else if (motion_mg >= 600U || gyro >= 34000U) {
+	} else if (motion_mg >= 750U || gyro >= 55000U) {
 		type = APP_EVENT_SHAKE_LIGHT;
 		cooldown = SHAKE_COOLDOWN_LIGHT_MS;
 	}
@@ -544,10 +546,7 @@ static void check_shake(uint16_t motion_mg, uint32_t gyro,
 
 	/* Suppress light/play when in hand or hand-like context. */
 	if (type == APP_EVENT_SHAKE_LIGHT || type == APP_EVENT_SHAKE_PLAY) {
-		if (in_hand || in_hand_conf >= 45U) {
-			return;
-		}
-		if (stability >= 30U && chaos <= 50U) {
+		if (in_hand || in_hand_conf >= 30U) {
 			return;
 		}
 	}
@@ -582,21 +581,26 @@ static void capture_look_reference(void)
 static void update_look_reference(const struct in_hand_detector_output *det,
 				  const struct motion_feature_summary *fs)
 {
-	if (!det->in_hand) {
+	/* Reset only on confirmed surface still (not just !in_hand). */
+	if (det->state == IN_HAND_DETECTOR_SURFACE_STILL && !det->in_hand) {
 		reset_look_reference();
 		return;
 	}
 
-	if (det->in_hand_enter || !g_mc.look_reference_valid) {
-		/* Capture immediately on entering in-hand. */
+	/* Capture reference on enter, or as soon as any hand-like motion is detected. */
+	if (det->in_hand_enter || det->picked_up ||
+	    (!g_mc.look_reference_valid && det->in_hand_confidence >= 15U)) {
 		capture_look_reference();
 		return;
 	}
 
-	/* Slowly adapt reference while holding steady. */
-	if (fs->stability_confidence >= 40U &&
-	    fs->chaos_confidence <= 40U &&
-	    fs->cadence_confidence <= 45U) {
+	if (!g_mc.look_reference_valid) {
+		return;
+	}
+
+	/* Very slowly adapt reference so the "neutral" drifts with the hand position. */
+	if (fs->stability_confidence >= 30U &&
+	    fs->chaos_confidence <= 50U) {
 		g_mc.look_ref_x += (g_mc.gravity_x - g_mc.look_ref_x) / LOOK_REFERENCE_ADAPT_ALPHA;
 		g_mc.look_ref_y += (g_mc.gravity_y - g_mc.look_ref_y) / LOOK_REFERENCE_ADAPT_ALPHA;
 		g_mc.look_ref_z += (g_mc.gravity_z - g_mc.look_ref_z) / LOOK_REFERENCE_ADAPT_ALPHA;
@@ -620,9 +624,8 @@ static void update_look_target(const struct in_hand_detector_output *det,
 	bool suppressed;
 
 	suppressed = (now_ms < g_mc.suppress_look_until_ms) ||
-		     !det->in_hand ||
 		     g_mc.walking_active ||
-		     det->look_confidence < 25U ||
+		     (det->look_confidence < 10U && !det->in_hand) ||
 		     !g_mc.look_reference_valid;
 
 	if (suppressed) {
@@ -916,7 +919,7 @@ static void sample_work_handler(struct k_work *work)
 	g_mc.cadence_confidence   = summary.cadence_confidence;
 	g_mc.chaos_confidence     = summary.chaos_confidence;
 
-	rough = motion_mg >= 800U || gyro_sum >= 55000U || summary.chaos_confidence >= 70U;
+	rough = motion_mg >= 1200U || gyro_sum >= 80000U || summary.chaos_confidence >= 80U;
 
 	/* Step detection. */
 	if (!motion_sensor_get_capabilities()->backend_has_hw_step_counter) {

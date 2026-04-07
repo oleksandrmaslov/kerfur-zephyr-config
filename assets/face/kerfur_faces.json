@@ -920,6 +920,10 @@
       "right_eye_white": "eye_white_open_round",
       "left_eyeball": "pupil_startle",
       "right_eyeball": "pupil_startle",
+      "slot_overrides" :{
+      "left_eyeball": {"dx" : 14, "dy": 12},
+      "right_eyeball": {"dx" : 10, "dy": 12}
+      },
       "temporary_effects": [
         { "effect_id": "effect_tear", "x": 8, "y": 14 },
         { "effect_id": "effect_tear", "x": 15, "y": 52 },

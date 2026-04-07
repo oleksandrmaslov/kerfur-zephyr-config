@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
@@ -24,9 +25,12 @@ except Exception:  # pragma: no cover - exercised in user env
 try:
 	from PIL import Image
 except ImportError as exc:  # pragma: no cover - exercised in user env
+	interpreter = Path(sys.executable).resolve() if sys.executable else "python"
 	sys.stderr.write(
-		"face_codegen requires Pillow. Install with:\n"
-		"  python -m pip install --user cairosvg Pillow\n"
+		"face_codegen could not import Pillow in the active interpreter.\n"
+		f"Interpreter: {interpreter}\n"
+		"Install the dependencies into that exact interpreter with:\n"
+		f"  \"{interpreter}\" -m pip install --user cairosvg Pillow\n"
 	)
 	raise SystemExit(2) from exc
 
@@ -193,6 +197,42 @@ def _parse_float(value: str | None, default: float = 0.0) -> float:
 	return float(value)
 
 
+def _transform_points(
+	points: list[tuple[float, float]],
+	transform: str | None,
+) -> list[tuple[float, float]]:
+	if not transform:
+		return points
+
+	transform = transform.strip()
+	match = re.fullmatch(
+		r"rotate\(\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s*\)",
+		transform,
+	)
+	if match is None:
+		raise ValueError(f"Unsupported SVG transform {transform!r}")
+
+	angle = float(match.group(1))
+	origin_x = float(match.group(2))
+	origin_y = float(match.group(3))
+	angle_norm = angle % 360.0
+
+	def rotate_point(px: float, py: float) -> tuple[float, float]:
+		dx = px - origin_x
+		dy = py - origin_y
+		if angle_norm == 0.0:
+			return px, py
+		if angle_norm == 90.0:
+			return origin_x - dy, origin_y + dx
+		if angle_norm == 180.0:
+			return origin_x - dx, origin_y - dy
+		if angle_norm == 270.0:
+			return origin_x + dy, origin_y - dx
+		raise ValueError(f"Unsupported SVG rotation angle {angle!r}")
+
+	return [rotate_point(px, py) for px, py in points]
+
+
 def _parse_svg_path_polygons(path_data: str) -> list[list[tuple[float, float]]]:
 	tokens = re.findall(r"[MLHVZ]|-?\d+(?:\.\d+)?", path_data)
 	polygons: list[list[tuple[float, float]]] = []
@@ -272,7 +312,6 @@ def _bitmap_from_svg_primitives(path: Path, width: int, height: int) -> AssetBit
 		view_width = _parse_float(root.attrib.get("width"), float(width))
 		view_height = _parse_float(root.attrib.get("height"), float(height))
 
-	rectangles: list[tuple[float, float, float, float]] = []
 	polygons: list[list[tuple[float, float]]] = []
 
 	for element in root:
@@ -282,7 +321,14 @@ def _bitmap_from_svg_primitives(path: Path, width: int, height: int) -> AssetBit
 			y = _parse_float(element.attrib.get("y"), 0.0)
 			rect_width = _parse_float(element.attrib.get("width"), 0.0)
 			rect_height = _parse_float(element.attrib.get("height"), 0.0)
-			rectangles.append((x, y, rect_width, rect_height))
+			rect_points = [
+				(x, y),
+				(x + rect_width, y),
+				(x + rect_width, y + rect_height),
+				(x, y + rect_height),
+				(x, y),
+			]
+			polygons.append(_transform_points(rect_points, element.attrib.get("transform")))
 		elif tag == "path":
 			path_data = element.attrib.get("d", "")
 			polygons.extend(_parse_svg_path_polygons(path_data))
@@ -298,16 +344,10 @@ def _bitmap_from_svg_primitives(path: Path, width: int, height: int) -> AssetBit
 			user_y = view_min_y + ((py + 0.5) * view_height / height)
 			is_on = False
 
-			for rect_x, rect_y, rect_w, rect_h in rectangles:
-				if (rect_x <= user_x < (rect_x + rect_w)) and (rect_y <= user_y < (rect_y + rect_h)):
+			for polygon in polygons:
+				if _point_in_polygon(user_x, user_y, polygon):
 					is_on = True
 					break
-
-			if not is_on:
-				for polygon in polygons:
-					if _point_in_polygon(user_x, user_y, polygon):
-						is_on = True
-						break
 
 			if is_on:
 				index = (py * stride) + (px // 8)
@@ -332,18 +372,29 @@ def _render_svg_with_chrome(path: Path, width: int, height: int) -> Image.Image:
 		"</body></html>"
 	)
 
-	with tempfile.TemporaryDirectory() as temp_dir:
-		temp_root = Path(temp_dir)
-		html_path = temp_root / "render.html"
-		png_path = temp_root / "render.png"
+	temp_root = REPO_ROOT / ".tmp" / f"face_codegen_{os.getpid()}_{threading.get_ident()}"
+	if temp_root.exists():
+		shutil.rmtree(temp_root, ignore_errors=True)
+	temp_root.mkdir(parents=True, exist_ok=True)
+	html_path = temp_root / "render.html"
+	png_path = temp_root / "render.png"
+	profile_path = temp_root / "chrome-profile"
+	profile_path.mkdir(parents=True, exist_ok=True)
+
+	try:
 		html_path.write_text(html, encoding="utf-8")
 		command = [
 			str(chrome),
 			"--headless",
 			"--disable-gpu",
+			"--disable-crash-reporter",
+			"--disable-breakpad",
+			"--no-first-run",
+			"--no-default-browser-check",
 			"--hide-scrollbars",
 			"--default-background-color=00000000",
 			"--force-device-scale-factor=1",
+			f"--user-data-dir={profile_path}",
 			f"--window-size={width},{height}",
 			f"--screenshot={png_path}",
 			str(html_path),
@@ -354,9 +405,16 @@ def _render_svg_with_chrome(path: Path, width: int, height: int) -> Image.Image:
 				f"Chrome SVG rasterization failed for {path}: {result.stderr.strip() or result.stdout.strip()}"
 			)
 		return Image.open(png_path).convert("RGBA")
+	finally:
+		shutil.rmtree(temp_root, ignore_errors=True)
 
 
 def rasterize_svg_to_bitmap(path: Path, width: int, height: int, draw_black: bool) -> AssetBitmap:
+	try:
+		return _bitmap_from_svg_primitives(path, width, height)
+	except ValueError:
+		pass
+
 	if cairosvg is not None:
 		try:
 			png_bytes = cairosvg.svg2png(

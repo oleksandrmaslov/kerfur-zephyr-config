@@ -451,15 +451,13 @@ static enum face_runtime_dynamic_reason resolve_dynamic_reason(
 	if (!has_zone) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_NO_ZONE;
 	}
-	if (!state->in_hand && (state->in_hand_confidence < 30U)) {
+	if (!state->in_hand && (state->in_hand_confidence < 15U) &&
+	    (state->look_confidence < 10U)) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND;
 	}
 	if ((state->last_rough_event_timestamp_ms > 0LL) &&
-	    ((now_ms - state->last_rough_event_timestamp_ms) < 1000LL)) {
+	    ((now_ms - state->last_rough_event_timestamp_ms) < 800LL)) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_ROUGH;
-	}
-	if (state->look_confidence < 20U) {
-		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_LOW_CONFIDENCE;
 	}
 
 	return FACE_RUNTIME_DYNAMIC_ALLOWED;
@@ -809,19 +807,22 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 		runtime->look_render_y = smooth_axis(runtime->look_render_y, target_y, motion_speed);
 	}
 
-	resolve_ambient_pupil_drift(recipe, now_ms, &ambient_dx, &ambient_dy);
+	/* Only use idle drift when dynamic pupils are NOT active. */
+	if (!dynamic_allowed) {
+		resolve_ambient_pupil_drift(recipe, now_ms, &ambient_dx, &ambient_dy);
+	}
 
 	if (dynamic_allowed) {
 		if (zone_is_available(left_eye_asset)) {
 			resolve_pupil_offsets(left_eye_asset, runtime->look_render_x, runtime->look_render_y,
 					      recipe->dynamic_pupil_scale_x,
-					      recipe->dynamic_pupil_scale_y, ambient_dx, ambient_dy,
+					      recipe->dynamic_pupil_scale_y, 0, 0,
 					      &plan.left_pupil_offset_x, &plan.left_pupil_offset_y);
 		}
 		if (zone_is_available(right_eye_asset)) {
 			resolve_pupil_offsets(right_eye_asset, runtime->look_render_x, runtime->look_render_y,
 					      recipe->dynamic_pupil_scale_x,
-					      recipe->dynamic_pupil_scale_y, ambient_dx, ambient_dy,
+					      recipe->dynamic_pupil_scale_y, 0, 0,
 					      &plan.right_pupil_offset_x, &plan.right_pupil_offset_y);
 		}
 	}

@@ -5,10 +5,10 @@
 #include "drivers/in_hand_detector.h"
 
 /* Confidence thresholds. */
-#define PICKUP_CANDIDATE_THRESHOLD 40U
-#define PICKED_UP_THRESHOLD        60U
-#define IN_HAND_ENTER_THRESHOLD    65U
-#define IN_HAND_EXIT_THRESHOLD     40U
+#define PICKUP_CANDIDATE_THRESHOLD 35U
+#define PICKED_UP_THRESHOLD        40U
+#define IN_HAND_ENTER_THRESHOLD    70U
+#define IN_HAND_EXIT_THRESHOLD     60U
 
 /* Timing. */
 #define IN_HAND_EXIT_CONFIRM_MS        600LL
@@ -77,12 +77,20 @@ static bool is_micro_motion(const struct in_hand_detector_input *in)
 
 static bool is_hand_like(const struct in_hand_detector_input *in)
 {
-	bool smooth   = is_smooth_reorientation(in);
-	bool micro    = is_micro_motion(in);
-	bool low_walk = in->walking_confidence < 55U && in->cadence_confidence < 50U;
-	bool low_chaos = in->chaos_confidence < 55U;
-
-	return (smooth || micro) && low_walk && low_chaos;
+	/* Anything that isn't rough, isn't walking, and isn't completely still
+	 * is likely hand-held motion. Be very permissive here. */
+	if (in->rough_motion || in->walking_active) {
+		return false;
+	}
+	if (in->walking_confidence >= 60U || in->cadence_confidence >= 60U) {
+		return false;
+	}
+	if (in->chaos_confidence >= 65U) {
+		return false;
+	}
+	/* Some motion must be present — but very little is enough. */
+	return in->motion_mg >= 8U || in->orientation_delta_mg >= 5U ||
+	       in->smooth_motion_mg >= 10U;
 }
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -173,35 +181,31 @@ void in_hand_detector_process(struct in_hand_detector *det,
 	/* ── In-hand confidence ────────────────────────────────────────── */
 
 	if (in->rough_motion) {
-		in_hand_delta = -12;
+		in_hand_delta = -8;
 	} else if (hand_like) {
-		in_hand_delta = 5;
-		if (det->pickup_confidence >= 40U) {
+		in_hand_delta = 8;
+		if (det->pickup_confidence >= 30U) {
 			in_hand_delta += 4;
 		}
 		if (orientation_moved) {
 			in_hand_delta += 3;
 		}
 		if (had_surface_recently) {
-			in_hand_delta += 2;
+			in_hand_delta += 3;
 		}
-		in_hand_delta += (int)in->stability_confidence / 18;
-		in_hand_delta -= (int)in->chaos_confidence / 18;
-	} else if (det->in_hand && is_micro_motion(in) &&
-		   in->chaos_confidence < 40U && in->cadence_confidence < 40U) {
-		/* Holding still but with micro-tremor — keep confidence. */
-		in_hand_delta = 1;
-	} else if (surface_still) {
-		in_hand_delta = -5;
+		in_hand_delta += (int)in->stability_confidence / 15;
+		in_hand_delta -= (int)in->chaos_confidence / 20;
 	} else if (det->in_hand) {
-		in_hand_delta = -1;
+		/* Already in hand — very slow decay unless clearly on surface. */
+		if (surface_still) {
+			in_hand_delta = -3;
+		} else {
+			in_hand_delta = -1;  /* Hold confidence steady. */
+		}
+	} else if (surface_still) {
+		in_hand_delta = -3;
 	} else {
-		in_hand_delta = -2;
-	}
-
-	/* Extra decay for violent motion while supposedly in-hand. */
-	if (!hand_like && (in->gyro_sum_mdps >= 35000U || in->jerk_mg >= 300U)) {
-		in_hand_delta -= 3;
+		in_hand_delta = -1;
 	}
 
 	det->pickup_confidence   = clamp_u8((int)det->pickup_confidence + pickup_delta);
