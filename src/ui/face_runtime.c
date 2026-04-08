@@ -837,16 +837,21 @@ static void step_channels(struct face_runtime_state *runtime,
 
 	(void)now_ms;
 
-	/* Apply context bias to position channel targets */
+	/* Bake context bias into the effective target so the smoothing pass
+	 * and the settled check both compare against the same value. */
+	const int16_t left_brow_target =
+		runtime->tgt_left_brow_dy + runtime->ctx_brow_bias_dy;
+	const int16_t right_brow_target =
+		runtime->tgt_right_brow_dy + runtime->ctx_brow_bias_dy;
+	const int16_t mouth_target =
+		runtime->tgt_mouth_dy + runtime->ctx_mouth_bias_dy;
+
 	runtime->ch_left_brow_dy =
-		smooth_axis(runtime->ch_left_brow_dy,
-			    runtime->tgt_left_brow_dy + runtime->ctx_brow_bias_dy, speed);
+		smooth_axis(runtime->ch_left_brow_dy, left_brow_target, speed);
 	runtime->ch_right_brow_dy =
-		smooth_axis(runtime->ch_right_brow_dy,
-			    runtime->tgt_right_brow_dy + runtime->ctx_brow_bias_dy, speed);
+		smooth_axis(runtime->ch_right_brow_dy, right_brow_target, speed);
 	runtime->ch_mouth_dy =
-		smooth_axis(runtime->ch_mouth_dy,
-			    runtime->tgt_mouth_dy + runtime->ctx_mouth_bias_dy, speed);
+		smooth_axis(runtime->ch_mouth_dy, mouth_target, speed);
 	runtime->ch_left_whisker_dy =
 		smooth_axis(runtime->ch_left_whisker_dy, runtime->tgt_left_whisker_dy, speed);
 	runtime->ch_right_whisker_dy =
@@ -862,9 +867,9 @@ static void step_channels(struct face_runtime_state *runtime,
 	runtime->ch_eye_openness =
 		smooth_axis(runtime->ch_eye_openness, runtime->tgt_eye_openness, eye_speed);
 
-	all_settled = (runtime->ch_left_brow_dy == runtime->tgt_left_brow_dy) &&
-		      (runtime->ch_right_brow_dy == runtime->tgt_right_brow_dy) &&
-		      (runtime->ch_mouth_dy == runtime->tgt_mouth_dy) &&
+	all_settled = (runtime->ch_left_brow_dy == left_brow_target) &&
+		      (runtime->ch_right_brow_dy == right_brow_target) &&
+		      (runtime->ch_mouth_dy == mouth_target) &&
 		      (runtime->ch_left_whisker_dy == runtime->tgt_left_whisker_dy) &&
 		      (runtime->ch_right_whisker_dy == runtime->tgt_right_whisker_dy) &&
 		      (runtime->ch_eye_openness == runtime->tgt_eye_openness);
