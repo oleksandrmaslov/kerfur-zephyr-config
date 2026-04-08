@@ -57,6 +57,15 @@ enum app_event_type {
 	APP_EVENT_FACE_SET_DYNAMIC_PUPILS_DEBUG,
 	APP_EVENT_FACE_DEBUG_DUMP,
 
+	APP_EVENT_PEER_SEEN,
+	APP_EVENT_PEER_CHECKING,
+	APP_EVENT_PEER_NEAR,
+	APP_EVENT_PEER_LOST,
+	APP_EVENT_ENCOUNTER_START,
+	APP_EVENT_ENCOUNTER_END,
+	APP_EVENT_PEER_PLAY_INVITE,
+	APP_EVENT_PEER_PLAY_ACK,
+
 	APP_EVENT_COUNT
 };
 
@@ -84,11 +93,24 @@ struct app_event_battery_percent {
 	bool known;
 };
 
+struct app_event_peer {
+	uint32_t ephemeral_id;
+	uint32_t encounter_id;       /* 0 if not applicable */
+	int8_t   rssi;
+	bool     is_friend;
+	uint8_t  character_id;
+	uint8_t  mode_summary;
+	uint8_t  expression_summary;
+	uint8_t  status_flags;
+	int32_t  duration_s;         /* used by ENCOUNTER_END */
+};
+
 struct app_event_payload {
 	struct app_event_look_target look_target;
 	struct app_event_carry_state carry_state;
 	struct app_event_step_batch step_batch;
 	struct app_event_battery_percent battery_percent;
+	struct app_event_peer peer;
 };
 
 struct app_event {

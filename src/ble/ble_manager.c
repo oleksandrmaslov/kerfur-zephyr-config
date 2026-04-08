@@ -20,6 +20,9 @@
 
 #include "ble/ble_manager.h"
 #include "core/event_bus.h"
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+#include "nearby/kerfur_nearby.h"
+#endif
 
 LOG_MODULE_REGISTER(ble_manager, CONFIG_LOG_DEFAULT_LEVEL);
 
@@ -197,9 +200,18 @@ static uint8_t g_notify_discovery_retries;
 static uint8_t g_adv_restart_retries;
 
 static struct bt_data g_adv_data[3];
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+static struct bt_data g_scan_rsp_data[5];
+#else
 static struct bt_data g_scan_rsp_data[3];
+#endif
 static size_t g_adv_data_len;
 static size_t g_scan_rsp_data_len;
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+static uint8_t g_kerfur_beacon_buf[sizeof(struct kerfur_beacon_v1)];
+static size_t g_kerfur_beacon_len;
+static struct k_work_delayable g_kerfur_rotate_work;
+#endif
 static uint8_t g_adv_name[KERFUR_ADV_MAX_NAME_LEN + 1U];
 static uint8_t g_adv_uuid16_visible[KERFUR_ADV_UUID16_MAX_LEN];
 static size_t g_adv_uuid16_visible_len;
@@ -1788,6 +1800,19 @@ static void build_advertising_payloads(void)
 		.data_len = sizeof(g_adv_appearance_keyring),
 		.data = g_adv_appearance_keyring,
 	};
+
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+	g_kerfur_beacon_len = kerfur_nearby_build_beacon(g_kerfur_beacon_buf,
+							 sizeof(g_kerfur_beacon_buf));
+	if ((g_kerfur_beacon_len > 0U) &&
+	    (g_scan_rsp_data_len < ARRAY_SIZE(g_scan_rsp_data))) {
+		g_scan_rsp_data[g_scan_rsp_data_len++] = (struct bt_data){
+			.type = BT_DATA_MANUFACTURER_DATA,
+			.data_len = g_kerfur_beacon_len,
+			.data = g_kerfur_beacon_buf,
+		};
+	}
+#endif
 }
 
 static int ble_start_advertising(void)
@@ -1932,6 +1957,199 @@ int ble_manager_rsc_notify(uint16_t speed_256ms, uint8_t cadence_spm, bool runni
 	return -ENOTSUP;
 #endif
 }
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+static void kerfur_rotate_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	kerfur_nearby_rotate_ephemeral_id(k_uptime_get());
+	(void)k_work_reschedule(&g_adv_restart_work, KERFUR_ADV_RESTART_INITIAL_DELAY);
+	(void)k_work_reschedule(&g_kerfur_rotate_work,
+				K_SECONDS(CONFIG_KERFUR_NEARBY_ID_ROTATE_S));
+}
+
+/* -- Kerfur scan path ------------------------------------------------------ */
+
+#define KERFUR_SCAN_Q_LEN 16
+
+struct kerfur_scan_params {
+	uint16_t window_ms;
+	uint16_t interval_ms;
+	uint16_t period_ms;
+	bool     enabled;
+};
+
+K_MSGQ_DEFINE(g_kerfur_scan_q, sizeof(struct kerfur_scan_candidate),
+	      KERFUR_SCAN_Q_LEN, 4);
+
+static struct k_work_delayable g_kerfur_scan_start_work;
+static struct k_work_delayable g_kerfur_scan_stop_work;
+static struct k_work g_kerfur_scan_drain_work;
+static bool g_kerfur_scan_active;
+static struct kerfur_scan_params g_kerfur_scan_params;
+
+static struct kerfur_scan_params kerfur_select_scan_params(
+	const struct kerfur_pet_snapshot *snap)
+{
+	struct kerfur_scan_params p = { .window_ms = 60, .interval_ms = 80,
+					.period_ms = 3000, .enabled = true };
+
+	if (snap->battery_critical) {
+		p.enabled = false;
+		return p;
+	}
+
+	switch (snap->mode) {
+	case PET_MODE_ASLEEP:
+	case PET_MODE_DROWSY:
+		p.window_ms = 30; p.interval_ms = 60; p.period_ms = 8000;
+		break;
+	case PET_MODE_IDLE:
+		p.window_ms = 60; p.interval_ms = 80; p.period_ms = 3000;
+		break;
+	case PET_MODE_WALK_AWAKE:
+		p.window_ms = 120; p.interval_ms = 160; p.period_ms = 1000;
+		break;
+	case PET_MODE_INTERACTING:
+		p.window_ms = 100; p.interval_ms = 120; p.period_ms = 800;
+		break;
+	case PET_MODE_CHARGING:
+		p.window_ms = 100; p.interval_ms = 120; p.period_ms = 2000;
+		break;
+	case PET_MODE_LOW_POWER:
+		p.window_ms = 30; p.interval_ms = 80; p.period_ms = 10000;
+		break;
+	default:
+		p.window_ms = 60; p.interval_ms = 80; p.period_ms = 3000;
+		break;
+	}
+
+	if (snap->battery_low && (p.period_ms < 5000)) {
+		p.period_ms = 5000;
+	}
+
+	return p;
+}
+
+static void kerfur_scan_adv_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
+			       struct net_buf_simple *buf)
+{
+	struct kerfur_scan_candidate candidate = {0};
+	bool parsed = false;
+
+	ARG_UNUSED(addr);
+
+	if ((adv_type != BT_GAP_ADV_TYPE_SCAN_RSP) &&
+	    (adv_type != BT_GAP_ADV_TYPE_ADV_IND) &&
+	    (adv_type != BT_GAP_ADV_TYPE_ADV_SCAN_IND)) {
+		return;
+	}
+
+	while (buf->len > 1U) {
+		uint8_t field_len = net_buf_simple_pull_u8(buf);
+		uint8_t field_type;
+
+		if ((field_len == 0U) || (field_len > buf->len)) {
+			return;
+		}
+
+		field_type = net_buf_simple_pull_u8(buf);
+		field_len--;
+
+		if (field_type == BT_DATA_MANUFACTURER_DATA) {
+			if (kerfur_nearby_parse_beacon(buf->data, field_len, &candidate)) {
+				candidate.rssi = rssi;
+				candidate.timestamp_ms = k_uptime_get();
+				parsed = true;
+			}
+			net_buf_simple_pull(buf, field_len);
+			break;
+		}
+
+		net_buf_simple_pull(buf, field_len);
+	}
+
+	if (parsed) {
+		if (k_msgq_put(&g_kerfur_scan_q, &candidate, K_NO_WAIT) == 0) {
+			(void)k_work_submit(&g_kerfur_scan_drain_work);
+		}
+	}
+}
+
+static void kerfur_scan_drain_work_handler(struct k_work *work)
+{
+	struct kerfur_scan_candidate candidate;
+
+	ARG_UNUSED(work);
+
+	while (k_msgq_get(&g_kerfur_scan_q, &candidate, K_NO_WAIT) == 0) {
+		kerfur_nearby_ingest_candidate(&candidate);
+	}
+}
+
+static void kerfur_scan_stop_work_handler(struct k_work *work)
+{
+	int err;
+
+	ARG_UNUSED(work);
+
+	if (!g_kerfur_scan_active) {
+		return;
+	}
+
+	err = bt_le_scan_stop();
+	if ((err != 0) && (err != -EALREADY)) {
+		LOG_DBG("bt_le_scan_stop err=%d", err);
+	}
+	g_kerfur_scan_active = false;
+}
+
+static void kerfur_scan_start_work_handler(struct k_work *work)
+{
+	struct kerfur_pet_snapshot snap;
+	struct kerfur_scan_params params;
+	struct bt_le_scan_param scan_param = {0};
+	int err;
+
+	ARG_UNUSED(work);
+
+	kerfur_nearby_get_snapshot(&snap);
+	params = kerfur_select_scan_params(&snap);
+	g_kerfur_scan_params = params;
+
+	if (!params.enabled) {
+		if (g_kerfur_scan_active) {
+			(void)bt_le_scan_stop();
+			g_kerfur_scan_active = false;
+		}
+		/* Retry every 5s while scanning is suppressed. */
+		(void)k_work_reschedule(&g_kerfur_scan_start_work, K_SECONDS(5));
+		return;
+	}
+
+	if (g_kerfur_scan_active) {
+		(void)bt_le_scan_stop();
+		g_kerfur_scan_active = false;
+	}
+
+	scan_param.type = BT_LE_SCAN_TYPE_ACTIVE;
+	scan_param.options = BT_LE_SCAN_OPT_NONE;
+	scan_param.interval = (uint16_t)((params.interval_ms * 8) / 5); /* ms → 0.625 ms */
+	scan_param.window = (uint16_t)((params.window_ms * 8) / 5);
+
+	err = bt_le_scan_start(&scan_param, kerfur_scan_adv_cb);
+	if (err == 0) {
+		g_kerfur_scan_active = true;
+		(void)k_work_reschedule(&g_kerfur_scan_stop_work, K_MSEC(params.window_ms));
+	} else if (err != -EALREADY) {
+		LOG_WRN("bt_le_scan_start err=%d (window=%ums interval=%ums)", err,
+			params.window_ms, params.interval_ms);
+	}
+
+	(void)k_work_reschedule(&g_kerfur_scan_start_work, K_MSEC(params.period_ms));
+}
+#endif /* CONFIG_KERFUR_ENABLE_NEARBY */
+
 int ble_manager_init(void)
 {
 	int err;
@@ -1945,6 +2163,13 @@ int ble_manager_init(void)
 	k_work_init_delayable(&g_conn_param_work, conn_param_work_handler);
 	k_work_init_delayable(&g_notify_discovery_work, notify_discovery_work_handler);
 	k_work_init_delayable(&g_adv_restart_work, adv_restart_work_handler);
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+	k_work_init_delayable(&g_kerfur_rotate_work, kerfur_rotate_work_handler);
+	k_work_init_delayable(&g_kerfur_scan_start_work, kerfur_scan_start_work_handler);
+	k_work_init_delayable(&g_kerfur_scan_stop_work, kerfur_scan_stop_work_handler);
+	k_work_init(&g_kerfur_scan_drain_work, kerfur_scan_drain_work_handler);
+	g_kerfur_scan_active = false;
+#endif
 	g_prefer_directed_reconnect = false;
 	g_notify_discovery_retries = 0U;
 	g_adv_restart_retries = 0U;
@@ -1985,6 +2210,12 @@ int ble_manager_init(void)
 		LOG_ERR("Advertising start failed (%d)", err);
 		return err;
 	}
+
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+	(void)k_work_reschedule(&g_kerfur_rotate_work,
+				K_SECONDS(CONFIG_KERFUR_NEARBY_ID_ROTATE_S));
+	(void)k_work_reschedule(&g_kerfur_scan_start_work, K_MSEC(500));
+#endif
 
 	LOG_INF("BLE manager ready");
 	LOG_INF("BLE peripheral cannot initiate links directly; directed advertising is used as short bonded reconnect hint");

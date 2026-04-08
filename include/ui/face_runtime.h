@@ -9,6 +9,8 @@
 #include "behavior/pet_state.h"
 #include "ui/generated/kerfur_face_recipes.h"
 
+#define KERFUR_FACE_MAX_INDICATORS 3
+
 enum face_pupil_swap_style {
 	FACE_PUPIL_SWAP_INSTANT = 0,
 	FACE_PUPIL_SWAP_ON_BLINK,
@@ -53,6 +55,8 @@ struct face_runtime_plan {
 	enum kerfur_face_asset_id mouth;
 	enum kerfur_face_asset_id whiskers;
 	enum kerfur_face_asset_id indicator_asset;
+	enum kerfur_face_indicator_id indicator_ids[KERFUR_FACE_MAX_INDICATORS];
+	uint8_t indicator_count;
 	enum kerfur_face_asset_id overlay_asset;
 	struct kerfur_face_layout layout;
 	struct face_runtime_effect_draw effects[KERFUR_FACE_MAX_EFFECTS];

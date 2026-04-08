@@ -7,6 +7,10 @@
 #include <zephyr/shell/shell.h>
 
 #include "ble/ble_manager.h"
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+#include "core/app_event.h"
+#include "core/event_bus.h"
+#endif
 #if defined(CONFIG_KERFUR_ENABLE_FACE_SHELL_CMDS)
 #include "behavior/behavior_engine.h"
 #include "behavior/micro_reaction.h"
@@ -135,6 +139,50 @@ static int parse_i32_arg(const char *arg, int32_t *value)
 	*value = (int32_t)parsed;
 	return 0;
 }
+
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+static int parse_u32_arg(const char *arg, uint32_t *value)
+{
+	char *endptr;
+	unsigned long parsed;
+
+	if ((arg == NULL) || (value == NULL)) {
+		return -EINVAL;
+	}
+
+	parsed = strtoul(arg, &endptr, 0);
+	if ((*arg == '\0') || (*endptr != '\0')) {
+		return -EINVAL;
+	}
+	if (parsed > UINT32_MAX) {
+		return -ERANGE;
+	}
+
+	*value = (uint32_t)parsed;
+	return 0;
+}
+
+static int parse_i8_arg(const char *arg, int8_t *value)
+{
+	char *endptr;
+	long parsed;
+
+	if ((arg == NULL) || (value == NULL)) {
+		return -EINVAL;
+	}
+
+	parsed = strtol(arg, &endptr, 0);
+	if ((*arg == '\0') || (*endptr != '\0')) {
+		return -EINVAL;
+	}
+	if ((parsed < INT8_MIN) || (parsed > INT8_MAX)) {
+		return -ERANGE;
+	}
+
+	*value = (int8_t)parsed;
+	return 0;
+}
+#endif /* CONFIG_KERFUR_ENABLE_NEARBY */
 
 #if defined(CONFIG_KERFUR_ENABLE_FACE_SHELL_CMDS)
 static int parse_i16_arg(const char *arg, int16_t *value)
@@ -691,6 +739,298 @@ static int cmd_face_react_trigger(const struct shell *shell, size_t argc, char *
 }
 #endif /* CONFIG_KERFUR_ENABLE_FACE_SHELL_CMDS */
 
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+static int cmd_nearby_inject_seen(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby inject seen <ephemeral_id>");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+
+	peer.ephemeral_id = id;
+	peer.rssi = -80;
+
+	err = app_event_publish_peer(APP_EVENT_PEER_SEEN, &peer);
+	if (err != 0) {
+		shell_error(shell, "PEER_SEEN publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "PEER_SEEN queued id=0x%08x", id);
+	return 0;
+}
+
+static int cmd_nearby_inject_checking(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby inject checking <ephemeral_id>");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+
+	peer.ephemeral_id = id;
+	peer.rssi = -75;
+
+	err = app_event_publish_peer(APP_EVENT_PEER_CHECKING, &peer);
+	if (err != 0) {
+		shell_error(shell, "PEER_CHECKING publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "PEER_CHECKING queued id=0x%08x", id);
+	return 0;
+}
+
+static int cmd_nearby_inject_near(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int8_t rssi = -65;
+	int err;
+
+	if ((argc < 2U) || (argc > 3U)) {
+		shell_error(shell, "usage: kerfur nearby inject near <ephemeral_id> [rssi]");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+	if (argc == 3U) {
+		err = parse_i8_arg(argv[2], &rssi);
+		if (err != 0) {
+			shell_error(shell, "invalid rssi: %s", argv[2]);
+			return err;
+		}
+	}
+
+	peer.ephemeral_id = id;
+	peer.rssi = rssi;
+
+	err = app_event_publish_peer(APP_EVENT_PEER_NEAR, &peer);
+	if (err != 0) {
+		shell_error(shell, "PEER_NEAR publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "PEER_NEAR queued id=0x%08x rssi=%d", id, rssi);
+	return 0;
+}
+
+static int cmd_nearby_inject_friend(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby inject friend <ephemeral_id>");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+
+	peer.ephemeral_id = id;
+	peer.encounter_id = id ^ 0xA5A5A5A5U;
+	peer.is_friend = true;
+	peer.rssi = -55;
+
+	err = app_event_publish_peer(APP_EVENT_ENCOUNTER_START, &peer);
+	if (err != 0) {
+		shell_error(shell, "ENCOUNTER_START publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "ENCOUNTER_START (friend) queued id=0x%08x", id);
+	return 0;
+}
+
+static int cmd_nearby_inject_unknown(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby inject unknown <ephemeral_id>");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+
+	peer.ephemeral_id = id;
+	peer.encounter_id = id ^ 0x5A5A5A5AU;
+	peer.is_friend = false;
+	peer.rssi = -60;
+
+	err = app_event_publish_peer(APP_EVENT_ENCOUNTER_START, &peer);
+	if (err != 0) {
+		shell_error(shell, "ENCOUNTER_START publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "ENCOUNTER_START (unknown) queued id=0x%08x", id);
+	return 0;
+}
+
+static int cmd_nearby_inject_play_invite(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby inject play_invite <ephemeral_id>");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+
+	peer.ephemeral_id = id;
+	peer.rssi = -55;
+
+	err = app_event_publish_peer(APP_EVENT_PEER_PLAY_INVITE, &peer);
+	if (err != 0) {
+		shell_error(shell, "PEER_PLAY_INVITE publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "PEER_PLAY_INVITE queued id=0x%08x", id);
+	return 0;
+}
+
+static int cmd_nearby_inject_play_ack(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby inject play_ack <ephemeral_id>");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+
+	peer.ephemeral_id = id;
+	peer.rssi = -55;
+
+	err = app_event_publish_peer(APP_EVENT_PEER_PLAY_ACK, &peer);
+	if (err != 0) {
+		shell_error(shell, "PEER_PLAY_ACK publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "PEER_PLAY_ACK queued id=0x%08x", id);
+	return 0;
+}
+
+static int cmd_nearby_inject_lost(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby inject lost <ephemeral_id>");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+
+	peer.ephemeral_id = id;
+
+	err = app_event_publish_peer(APP_EVENT_PEER_LOST, &peer);
+	if (err != 0) {
+		shell_error(shell, "PEER_LOST publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "PEER_LOST queued id=0x%08x", id);
+	return 0;
+}
+
+static int cmd_nearby_end(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int32_t duration_s = 0;
+	int err;
+
+	if ((argc < 2U) || (argc > 3U)) {
+		shell_error(shell, "usage: kerfur nearby end <ephemeral_id> [duration_s]");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+	if (argc == 3U) {
+		err = parse_i32_arg(argv[2], &duration_s);
+		if (err != 0) {
+			shell_error(shell, "invalid duration_s: %s", argv[2]);
+			return err;
+		}
+	}
+
+	peer.ephemeral_id = id;
+	peer.encounter_id = id ^ 0xA5A5A5A5U;
+	peer.duration_s = duration_s;
+
+	err = app_event_publish_peer(APP_EVENT_ENCOUNTER_END, &peer);
+	if (err != 0) {
+		shell_error(shell, "ENCOUNTER_END publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "ENCOUNTER_END queued id=0x%08x duration=%ds", id, duration_s);
+	return 0;
+}
+#endif /* CONFIG_KERFUR_ENABLE_NEARBY */
+
 static int cmd_ble_gb_test(const struct shell *shell, size_t argc, char **argv)
 {
 	uint8_t category = 1U;
@@ -741,6 +1081,26 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_ble,
 	SHELL_SUBCMD_SET_END
 );
 
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_nearby_inject,
+	SHELL_CMD(seen, NULL, "Inject PEER_SEEN <id>", cmd_nearby_inject_seen),
+	SHELL_CMD(checking, NULL, "Inject PEER_CHECKING <id>", cmd_nearby_inject_checking),
+	SHELL_CMD(near, NULL, "Inject PEER_NEAR <id> [rssi]", cmd_nearby_inject_near),
+	SHELL_CMD(friend, NULL, "Inject ENCOUNTER_START as friend <id>", cmd_nearby_inject_friend),
+	SHELL_CMD(unknown, NULL, "Inject ENCOUNTER_START as unknown <id>", cmd_nearby_inject_unknown),
+	SHELL_CMD(play_invite, NULL, "Inject PEER_PLAY_INVITE <id>", cmd_nearby_inject_play_invite),
+	SHELL_CMD(play_ack, NULL, "Inject PEER_PLAY_ACK <id>", cmd_nearby_inject_play_ack),
+	SHELL_CMD(lost, NULL, "Inject PEER_LOST <id>", cmd_nearby_inject_lost),
+	SHELL_SUBCMD_SET_END
+);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_nearby,
+	SHELL_CMD(inject, &sub_kerfur_nearby_inject, "Inject nearby/encounter events", NULL),
+	SHELL_CMD(end, NULL, "Force ENCOUNTER_END <id> [duration_s]", cmd_nearby_end),
+	SHELL_SUBCMD_SET_END
+);
+#endif /* CONFIG_KERFUR_ENABLE_NEARBY */
+
 #if defined(CONFIG_KERFUR_ENABLE_FACE_SHELL_CMDS)
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_face_expr,
 	SHELL_CMD(list, NULL, "List all expressions", cmd_face_expr_list),
@@ -778,11 +1138,17 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_face,
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur,
 	SHELL_CMD(ble, &sub_kerfur_ble, "BLE maintenance commands", NULL),
 	SHELL_CMD(face, &sub_kerfur_face, "Face state debug commands", NULL),
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+	SHELL_CMD(nearby, &sub_kerfur_nearby, "Kerfur-to-Kerfur nearby debug commands", NULL),
+#endif
 	SHELL_SUBCMD_SET_END
 );
 #else
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur,
 	SHELL_CMD(ble, &sub_kerfur_ble, "BLE maintenance commands", NULL),
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+	SHELL_CMD(nearby, &sub_kerfur_nearby, "Kerfur-to-Kerfur nearby debug commands", NULL),
+#endif
 	SHELL_SUBCMD_SET_END
 );
 #endif

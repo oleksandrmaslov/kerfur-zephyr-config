@@ -75,6 +75,13 @@ target_sources(app PRIVATE
     src/ble/ble_manager.c
 )
 
+if(CONFIG_KERFUR_ENABLE_NEARBY)
+    target_sources(app PRIVATE
+        src/nearby/kerfur_nearby.c
+        src/nearby/encounter_log.c
+    )
+endif()
+
 if(CONFIG_KERFUR_ENABLE_SHELL_CMDS)
     target_sources(app PRIVATE
         src/ble/ble_shell.c

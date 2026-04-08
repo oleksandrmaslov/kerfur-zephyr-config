@@ -11,6 +11,9 @@
 #include "drivers/motion_classifier.h"
 #include "drivers/mock_inputs.h"
 #include "drivers/touch_input.h"
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+#include "nearby/kerfur_nearby.h"
+#endif
 #include "power/power_manager.h"
 #include "ui/ui_renderer.h"
 
@@ -38,6 +41,14 @@ static void app_handle_event(struct pet_state *pet, const struct app_event *even
 	power_manager_on_event(event, pet);
 	display_policy_on_event(pet, event);
 	motion_classifier_on_event(event, pet);
+
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+	if (event->type == APP_EVENT_TICK_1S) {
+		kerfur_nearby_on_pet_tick(pet);
+		kerfur_nearby_tick(event->timestamp_ms);
+		pet->social_overload = (kerfur_nearby_active_peer_count() > 3U);
+	}
+#endif
 
 	if (event->type == APP_EVENT_FACE_DEBUG_DUMP) {
 		ui_renderer_request_debug_dump();
@@ -81,6 +92,15 @@ int app_run(void)
 	if (err) {
 		LOG_WRN("Touch input init issue (%d), continuing", err);
 	}
+
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+	/* Must run before ble_manager_init() so that build_advertising_payloads()
+	 * captures a non-zero ephemeral_id into the scan-response beacon. */
+	err = kerfur_nearby_init();
+	if (err) {
+		LOG_WRN("Kerfur nearby init issue (%d), continuing", err);
+	}
+#endif
 
 	err = ble_manager_init();
 	if (err) {

@@ -179,26 +179,104 @@ static enum kerfur_face_asset_id choose_asset(enum kerfur_face_asset_id base_ass
 	return (override_asset != KERFUR_FACE_ASSET_NONE) ? override_asset : base_asset;
 }
 
-static enum kerfur_face_indicator_id resolve_indicator(const struct pet_state *state,
-						       const struct kerfur_face_recipe *recipe,
-						       const struct kerfur_face_reaction *reaction)
-{
-	bool explicit_override;
-	enum kerfur_face_indicator_id indicator =
-		sanitize_indicator_id(state->current_indicator, &explicit_override);
+/*
+ * Indicator render priority — first entries are drawn leftmost.
+ * Mirrors assets/face/kerfur_faces.json `ui_rules.indicator_priority`.
+ * TODO: have tools/face_codegen.py emit this from the JSON so it does
+ * not have to be hand-maintained here.
+ */
+static const enum kerfur_face_indicator_id g_indicator_priority[] = {
+	KERFUR_FACE_INDICATOR_ICON_QUESTION,
+	KERFUR_FACE_INDICATOR_ICON_HEART_FILLED,
+	KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+	KERFUR_FACE_INDICATOR_ICON_BT,
+	KERFUR_FACE_INDICATOR_ICON_X,
+};
 
-	if (!explicit_override) {
-		indicator = recipe->default_indicator;
-		if ((indicator == KERFUR_FACE_INDICATOR_NONE) && state->ble_connected) {
-			indicator = KERFUR_FACE_INDICATOR_ICON_BT;
+static void candidate_add(enum kerfur_face_indicator_id *candidates, uint8_t *count,
+			  enum kerfur_face_indicator_id id)
+{
+	uint8_t i;
+
+	if (id == KERFUR_FACE_INDICATOR_NONE) {
+		return;
+	}
+
+	for (i = 0U; i < *count; i++) {
+		if (candidates[i] == id) {
+			return;
 		}
 	}
 
-	if (reaction->indicator != KERFUR_FACE_INDICATOR_NONE) {
-		indicator = reaction->indicator;
+	if (*count >= KERFUR_FACE_INDICATOR_COUNT) {
+		return;
 	}
 
-	return indicator;
+	candidates[(*count)++] = id;
+}
+
+static uint8_t resolve_indicators(const struct pet_state *state,
+				  const struct kerfur_face_recipe *recipe,
+				  const struct kerfur_face_reaction *reaction,
+				  int64_t now_ms,
+				  enum kerfur_face_indicator_id *out_ids,
+				  uint8_t out_capacity)
+{
+	enum kerfur_face_indicator_id candidates[KERFUR_FACE_INDICATOR_COUNT];
+	uint8_t candidate_count = 0U;
+	bool explicit_override;
+	enum kerfur_face_indicator_id explicit_id;
+	enum kerfur_face_indicator_id social_id;
+	uint8_t out_count = 0U;
+	uint8_t i;
+
+	/* 1. reaction override (always wins as the leftmost slot when present) */
+	if (reaction->indicator != KERFUR_FACE_INDICATOR_NONE) {
+		candidate_add(candidates, &candidate_count, reaction->indicator);
+	}
+
+	/* 2. explicit pet_state.current_indicator */
+	explicit_id = sanitize_indicator_id(state->current_indicator, &explicit_override);
+	if (explicit_override && (explicit_id != KERFUR_FACE_INDICATOR_NONE)) {
+		candidate_add(candidates, &candidate_count, explicit_id);
+	}
+
+	/* 3. transient social indicator (peer/encounter) while its TTL is alive */
+	if ((state->social_indicator > 0) &&
+	    (state->social_indicator < KERFUR_FACE_INDICATOR_COUNT) &&
+	    (state->social_indicator_until_ms > now_ms)) {
+		social_id = (enum kerfur_face_indicator_id)state->social_indicator;
+		candidate_add(candidates, &candidate_count, social_id);
+	}
+
+	/* 4. recipe default */
+	candidate_add(candidates, &candidate_count, recipe->default_indicator);
+
+	/* 5. BLE-connected fallback (companion phone) */
+	if (state->ble_connected) {
+		candidate_add(candidates, &candidate_count, KERFUR_FACE_INDICATOR_ICON_BT);
+	}
+
+	/* Emit in priority order, clipped to capacity. */
+	for (i = 0U; i < ARRAY_SIZE(g_indicator_priority); i++) {
+		uint8_t j;
+		enum kerfur_face_indicator_id pri = g_indicator_priority[i];
+
+		for (j = 0U; j < candidate_count; j++) {
+			if (candidates[j] == pri) {
+				if (out_count < out_capacity) {
+					out_ids[out_count++] = pri;
+				}
+				break;
+			}
+		}
+
+		if (out_count >= out_capacity) {
+			break;
+		}
+	}
+
+	return out_count;
 }
 
 static enum kerfur_face_overlay_id resolve_overlay(const struct pet_state *state,
@@ -1151,7 +1229,11 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	plan.right_brow = choose_asset(recipe->right_brow, reaction->right_brow);
 	plan.mouth = choose_asset(recipe->mouth, reaction->mouth);
 	plan.whiskers = choose_asset(recipe->whiskers, reaction->whiskers);
-	plan.indicator_id = resolve_indicator(state, recipe, reaction);
+	plan.indicator_count = resolve_indicators(state, recipe, reaction, now_ms,
+						  plan.indicator_ids,
+						  KERFUR_FACE_MAX_INDICATORS);
+	plan.indicator_id = (plan.indicator_count > 0U) ? plan.indicator_ids[0]
+							: KERFUR_FACE_INDICATOR_NONE;
 	plan.overlay_id = resolve_overlay(state, recipe, reaction);
 	plan.blink_profile_id = blink_profile_id;
 	plan.layout = resolve_layout(recipe, reaction);

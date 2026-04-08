@@ -260,6 +260,14 @@ void display_policy_on_event(struct pet_state *state, const struct app_event *ev
 	case APP_EVENT_WAKE:
 		set_foreground_window(state, now_ms, 8 * MSEC_PER_SEC, 30 * MSEC_PER_SEC);
 		break;
+	case APP_EVENT_PEER_NEAR:
+		/* Wake the screen so the human can see the heart indicator
+		 * the moment another Kerfur shows up. */
+		set_foreground_window(state, now_ms, 12 * MSEC_PER_SEC, 60 * MSEC_PER_SEC);
+		break;
+	case APP_EVENT_ENCOUNTER_START:
+		set_foreground_window(state, now_ms, 20 * MSEC_PER_SEC, 120 * MSEC_PER_SEC);
+		break;
 	case APP_EVENT_SELF_WAKE_TIMER:
 		if (state->battery_critical) {
 			break;

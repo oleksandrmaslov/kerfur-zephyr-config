@@ -69,6 +69,14 @@ static const char *const g_event_names[APP_EVENT_COUNT] = {
 	[APP_EVENT_FACE_TRIGGER_REACTION] = "FACE_TRIGGER_REACTION",
 	[APP_EVENT_FACE_SET_DYNAMIC_PUPILS_DEBUG] = "FACE_SET_DYNAMIC_PUPILS_DEBUG",
 	[APP_EVENT_FACE_DEBUG_DUMP] = "FACE_DEBUG_DUMP",
+	[APP_EVENT_PEER_SEEN] = "PEER_SEEN",
+	[APP_EVENT_PEER_CHECKING] = "PEER_CHECKING",
+	[APP_EVENT_PEER_NEAR] = "PEER_NEAR",
+	[APP_EVENT_PEER_LOST] = "PEER_LOST",
+	[APP_EVENT_ENCOUNTER_START] = "ENCOUNTER_START",
+	[APP_EVENT_ENCOUNTER_END] = "ENCOUNTER_END",
+	[APP_EVENT_PEER_PLAY_INVITE] = "PEER_PLAY_INVITE",
+	[APP_EVENT_PEER_PLAY_ACK] = "PEER_PLAY_ACK",
 };
 
 static void log_event_payload(const struct app_event *event)
@@ -254,6 +262,28 @@ int app_event_publish_battery_percent_with_timestamp(int8_t percent, bool known,
 int app_event_publish_battery_percent(int8_t percent, bool known)
 {
 	return app_event_publish_battery_percent_with_timestamp(percent, known, k_uptime_get());
+}
+
+int app_event_publish_peer_with_timestamp(enum app_event_type type,
+					  const struct app_event_peer *peer,
+					  int64_t timestamp_ms)
+{
+	struct app_event event = {
+		.type = type,
+		.timestamp_ms = timestamp_ms,
+		.param = (peer != NULL) ? (int32_t)peer->ephemeral_id : 0,
+	};
+
+	if (peer != NULL) {
+		event.payload.peer = *peer;
+	}
+
+	return publish_event(&event);
+}
+
+int app_event_publish_peer(enum app_event_type type, const struct app_event_peer *peer)
+{
+	return app_event_publish_peer_with_timestamp(type, peer, k_uptime_get());
 }
 
 bool app_event_wait(struct app_event *event, k_timeout_t timeout)

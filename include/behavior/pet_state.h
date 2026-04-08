@@ -113,6 +113,16 @@ struct pet_state {
 	bool ambient_wake_enabled;
 	bool time_valid;
 	bool dynamic_pupils_forced_disabled;
+
+	/* Social / nearby (Kerfur-to-Kerfur). */
+	bool peer_nearby;
+	bool peer_known_friend;
+	bool social_overload;
+	bool encounter_sync_pending;
+	uint32_t current_active_peer_id;
+	int16_t social_indicator;             /* enum kerfur_face_indicator_id; 0 = none */
+	int64_t social_indicator_until_ms;
+	int64_t last_social_glance_ms;
 };
 
 #endif /* KERFUR_PET_STATE_H_ */

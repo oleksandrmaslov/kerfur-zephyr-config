@@ -55,6 +55,56 @@ config KERFUR_ENABLE_RSC_SERVICE
 	  Exposes standard RSCS (UUID 0x1814) as future foundation for
 	  pedometer/step cadence telemetry without custom BLE service.
 
+config KERFUR_ENABLE_NEARBY
+	bool "Enable Kerfur-to-Kerfur nearby detection"
+	default y
+	depends on KERFUR_ENABLE_BLE
+	select BT_OBSERVER
+	help
+	  Enables an anonymous Kerfur nearby beacon (in scan response
+	  manufacturer data) and a duty-cycled active scanner that tracks
+	  other Kerfur devices, runs a small encounter state machine, and
+	  feeds peer events into the behavior engine.
+
+if KERFUR_ENABLE_NEARBY
+
+config KERFUR_NEARBY_PEER_TABLE_SIZE
+	int "Max tracked nearby peers"
+	range 2 16
+	default 8
+
+config KERFUR_NEARBY_ENCOUNTER_LOG_SIZE
+	int "Encounter log ring buffer size"
+	range 4 64
+	default 16
+
+config KERFUR_NEARBY_RSSI_NEAR_DBM
+	int "RSSI threshold to enter NEAR (dBm)"
+	range -100 -30
+	default -75
+
+config KERFUR_NEARBY_RSSI_LOST_DBM
+	int "RSSI hysteresis to leave NEAR (dBm)"
+	range -100 -30
+	default -90
+
+config KERFUR_NEARBY_INTERACT_HOLD_MS
+	int "Time stable in NEAR before INTERACTING (ms)"
+	range 500 30000
+	default 3000
+
+config KERFUR_NEARBY_COOLDOWN_MS
+	int "Cooldown after encounter ends (ms)"
+	range 5000 600000
+	default 60000
+
+config KERFUR_NEARBY_ID_ROTATE_S
+	int "Ephemeral id rotation period (s)"
+	range 60 86400
+	default 900
+
+endif
+
 config KERFUR_ENABLE_SHELL_CMDS
 	bool "Enable Kerfur USB shell BLE maintenance commands"
 	default y

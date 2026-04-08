@@ -339,10 +339,28 @@ static void draw_face_plan(const struct face_runtime_plan *plan, lv_opa_t opa)
 		draw_asset(plan->effects[index].asset_id, point.x, point.y, false, opa);
 	}
 
-	if (plan->indicator_asset != KERFUR_FACE_ASSET_NONE) {
-		struct kerfur_face_point point = point_with_shift(plan->layout.indicator);
+	{
+		struct kerfur_face_point base = point_with_shift(plan->layout.indicator);
+		int16_t cursor_x = base.x;
+		uint8_t i;
 
-		draw_asset(plan->indicator_asset, point.x, point.y, false, opa);
+		for (i = 0U; i < plan->indicator_count; i++) {
+			const struct kerfur_face_indicator_def *def =
+				kerfur_face_indicator_get(plan->indicator_ids[i]);
+			const struct kerfur_face_asset_metadata *meta;
+
+			if ((def == NULL) || (def->asset_id == KERFUR_FACE_ASSET_NONE)) {
+				continue;
+			}
+
+			meta = kerfur_face_asset_get(def->asset_id);
+			if ((meta == NULL) || (meta->bitmap == NULL)) {
+				continue;
+			}
+
+			draw_asset(def->asset_id, cursor_x, base.y, false, opa);
+			cursor_x = (int16_t)(cursor_x + meta->bitmap->width + 1);
+		}
 	}
 
 	if (plan->overlay_asset != KERFUR_FACE_ASSET_NONE &&

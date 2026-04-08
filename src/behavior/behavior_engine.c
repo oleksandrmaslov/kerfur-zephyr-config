@@ -7,6 +7,7 @@
 
 #include "behavior/behavior_engine.h"
 #include "behavior/micro_reaction.h"
+#include "ui/generated/kerfur_face_assets.h"
 
 LOG_MODULE_REGISTER(behavior_engine, CONFIG_LOG_DEFAULT_LEVEL);
 
@@ -173,6 +174,19 @@ static void trigger_reaction(struct pet_state *state, enum micro_reaction_type r
 	state->current_reaction = micro_reaction_get_active(now_ms);
 }
 
+static void show_social_indicator(struct pet_state *state,
+				  enum kerfur_face_indicator_id id,
+				  int64_t now_ms,
+				  int32_t ttl_ms)
+{
+	if ((id <= KERFUR_FACE_INDICATOR_NONE) || (id >= KERFUR_FACE_INDICATOR_COUNT)) {
+		return;
+	}
+
+	state->social_indicator = (int16_t)id;
+	state->social_indicator_until_ms = now_ms + ttl_ms;
+}
+
 static void log_face_snapshot(const struct pet_state *state, const char *reason)
 {
 	LOG_INF("%s face mode=%s expr=%s force=%s react=%s ind=%d ov=%d look_t=%d,%d look_r=%d,%d look_c=%u carry=%d/%u/%u/%u batt=%d known=%d",
@@ -255,6 +269,38 @@ static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 	if (state->walking_active &&
 	    ((now_ms - state->last_walk_timestamp_ms) > (18 * MSEC_PER_SEC))) {
 		state->walking_active = false;
+	}
+
+	/* Expire transient social indicators (peer encounter glyphs). While a
+	 * peer is still nearby keep the heart icon visible — it should only
+	 * disappear once the peer is lost (PEER_LOST / ENCOUNTER_END). */
+	if ((state->social_indicator != 0) &&
+	    (state->social_indicator_until_ms != 0) &&
+	    (now_ms >= state->social_indicator_until_ms)) {
+		const bool is_heart =
+			(state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_FILLED) ||
+			(state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE);
+
+		if (state->peer_nearby && is_heart) {
+			/* Refresh the deadline so the icon stays on. */
+			state->social_indicator_until_ms = now_ms + (10 * MSEC_PER_SEC);
+		} else {
+			state->social_indicator = 0;
+			state->social_indicator_until_ms = 0;
+		}
+	}
+
+	/* Walk-together social hint: while walking with a peer nearby,
+	 * boredom decays a bit faster and the pet allows the occasional
+	 * glance toward the peer. */
+	if (state->walking_active && state->peer_nearby) {
+		state->boredom -= 1;
+		if ((now_ms - state->last_social_glance_ms) >= (8 * MSEC_PER_SEC)) {
+			state->last_social_glance_ms = now_ms;
+			trigger_reaction(state,
+					 (now_ms & 1LL) ? REACTION_GLANCE_RIGHT : REACTION_GLANCE_LEFT,
+					 now_ms);
+		}
 	}
 
 	sync_daily_step_counter(state, now_ms);
@@ -775,6 +821,102 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->curiosity += 1;
 		state->last_self_wake_timestamp_ms = event->timestamp_ms;
 		trigger_reaction(state, REACTION_GLANCE_LEFT, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_PEER_SEEN:
+		state->curiosity += 2;
+		break;
+
+	case APP_EVENT_PEER_CHECKING:
+		/* Briefly indicate "I think I see another Kerfur" while we
+		 * still need more samples to be sure. */
+		show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_QUESTION,
+				      event->timestamp_ms, 1500);
+		break;
+
+	case APP_EVENT_PEER_NEAR:
+		state->peer_nearby = true;
+		state->current_active_peer_id = event->payload.peer.ephemeral_id;
+		state->peer_known_friend = event->payload.peer.is_friend;
+		state->curiosity += 5;
+		state->social_load += 1;
+		/* Show the heart immediately while a peer is in range; the
+		 * apply_tick_1s() refresh keeps it alive until PEER_LOST. */
+		show_social_indicator(state,
+				      event->payload.peer.is_friend ?
+					      KERFUR_FACE_INDICATOR_ICON_HEART_FILLED :
+					      KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+				      event->timestamp_ms,
+				      10 * MSEC_PER_SEC);
+		if (!state->social_overload &&
+		    ((event->timestamp_ms - state->last_social_glance_ms) >= (4 * MSEC_PER_SEC))) {
+			state->last_social_glance_ms = event->timestamp_ms;
+			trigger_reaction(state, REACTION_GLANCE_LEFT, event->timestamp_ms);
+		}
+		break;
+
+	case APP_EVENT_PEER_LOST:
+		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
+			state->peer_nearby = false;
+			state->peer_known_friend = false;
+			state->current_active_peer_id = 0U;
+		}
+		if (state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE ||
+		    state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_FILLED) {
+			state->social_indicator = 0;
+			state->social_indicator_until_ms = 0;
+		}
+		break;
+
+	case APP_EVENT_ENCOUNTER_START:
+		state->peer_nearby = true;
+		state->current_active_peer_id = event->payload.peer.ephemeral_id;
+		state->peer_known_friend = event->payload.peer.is_friend;
+		if (event->payload.peer.is_friend) {
+			state->attachment += 6;
+			state->trust += 3;
+			state->stress -= 2;
+			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_FILLED,
+					      event->timestamp_ms, 3000);
+			trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
+		} else {
+			state->curiosity += 6;
+			state->attachment += 2;
+			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+					      event->timestamp_ms, 3000);
+			trigger_reaction(state, REACTION_PET_BOW, event->timestamp_ms);
+		}
+		state->encounter_sync_pending = true;
+		break;
+
+	case APP_EVENT_ENCOUNTER_END:
+		if (event->payload.peer.duration_s >= 30) {
+			state->boredom += 4;
+		}
+		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
+			state->peer_nearby = false;
+			state->peer_known_friend = false;
+			state->current_active_peer_id = 0U;
+		}
+		state->social_indicator = 0;
+		state->social_indicator_until_ms = 0;
+		trigger_reaction(state, REACTION_GLANCE_RIGHT, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_PEER_PLAY_INVITE:
+		state->arousal += 8;
+		state->boredom -= 4;
+		state->curiosity += 2;
+		show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+				      event->timestamp_ms, 2500);
+		trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_PEER_PLAY_ACK:
+		state->arousal += 6;
+		state->boredom -= 3;
+		state->attachment += 2;
+		trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
 		break;
 
 	default:

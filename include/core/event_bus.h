@@ -28,6 +28,10 @@ int app_event_publish_carry_state_with_timestamp(bool in_hand, uint8_t pickup_co
 int app_event_publish_battery_percent(int8_t percent, bool known);
 int app_event_publish_battery_percent_with_timestamp(int8_t percent, bool known,
 						     int64_t timestamp_ms);
+int app_event_publish_peer(enum app_event_type type, const struct app_event_peer *peer);
+int app_event_publish_peer_with_timestamp(enum app_event_type type,
+					  const struct app_event_peer *peer,
+					  int64_t timestamp_ms);
 bool app_event_wait(struct app_event *event, k_timeout_t timeout);
 
 #endif /* KERFUR_EVENT_BUS_H_ */
