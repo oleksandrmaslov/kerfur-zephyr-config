@@ -216,20 +216,13 @@ void in_hand_detector_process(struct in_hand_detector *det,
 		in_hand_delta += (int)in->stability_confidence / 15;
 		in_hand_delta -= (int)in->chaos_confidence / 20;
 	} else if (det->in_hand) {
-		/* No hand-like signal this tick but still flagged in_hand. We
-		 * have to discriminate between a genuine gentle hold (where the
-		 * user is holding the device steady but in a clearly different
-		 * orientation than the surface) and a vibrating surface (where
-		 * gravity stays parked at the saved surface reference). The
-		 * gravity-distance-from-surface check is the cleanest signal:
-		 * a held device almost always sits at a different tilt than the
-		 * surface it left, while a vibrating surface produces zero
-		 * gravity drift no matter how much linear noise it generates. */
+		/* No hand-like signal this tick but still flagged in_hand.
+		 * Gravity drift from the saved surface reference is the cleanest
+		 * way to tell a gentle hold (drift > 0) from a vibrating surface
+		 * (drift == 0) — pin confidence in the former, decay in the latter. */
 		if (surface_still) {
 			in_hand_delta = -8;
 		} else if (orientation_moved) {
-			/* Clearly displaced from the surface — keep the in_hand
-			 * state pinned so calm holds don't bleed out. */
 			in_hand_delta = 0;
 		} else if (is_near_still(in)) {
 			in_hand_delta = -4;

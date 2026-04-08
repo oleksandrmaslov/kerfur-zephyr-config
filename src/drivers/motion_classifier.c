@@ -53,9 +53,11 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 #define GRAVITY_SLOW_ALPHA         14
 
 /* Gaze. */
-#define GAZE_DEADBAND              3
-#define GAZE_MAX_DELTA_NORMAL      15
-#define GAZE_MAX_DELTA_LOW_BATT    8
+#define GAZE_DEADBAND                3
+#define GAZE_MAX_DELTA_NORMAL        15
+#define GAZE_MAX_DELTA_LOW_BATT      8
+#define GAZE_RETURN_TO_CENTER_DELTA  2
+#define GAZE_IDLE_HOLD_MS            15000LL
 #define LOOK_SUPPRESS_AFTER_ROUGH_MS 800LL
 #define LOOK_SUPPRESS_AFTER_WALK_MS  500LL
 #define LOOK_REFERENCE_ADAPT_ALPHA   60
@@ -167,6 +169,7 @@ struct motion_classifier_state {
 	int64_t active_until_ms;
 	int64_t last_motion_wake_ms;
 	int64_t suppress_look_until_ms;
+	int64_t look_suppress_idle_since_ms;
 	int64_t last_shake_event_ms;
 	int64_t last_active_motion_ms;
 	int64_t last_carry_publish_ms;
@@ -629,15 +632,23 @@ static void update_look_target(const struct in_hand_detector_output *det,
 		     !g_mc.look_reference_valid;
 
 	if (suppressed) {
-		/* Smoothly return to center. Keep this slow so the pupils don't
-		 * snap back the moment confidence dips — at 25Hz a delta of 2
-		 * means a full ~2s glide from one extreme to center, which feels
-		 * natural to the eye. */
-		g_mc.look_target_x = move_towards(g_mc.look_target_x, 0, 2);
-		g_mc.look_target_y = move_towards(g_mc.look_target_y, 0, 2);
+		/* Freeze the gaze where it is for GAZE_IDLE_HOLD_MS, then smoothly
+		 * glide to center. The hold prevents a startled-looking snap back
+		 * the instant the user puts the device down for a moment. */
+		if (g_mc.look_suppress_idle_since_ms == 0LL) {
+			g_mc.look_suppress_idle_since_ms = now_ms;
+		}
+		if ((now_ms - g_mc.look_suppress_idle_since_ms) >= GAZE_IDLE_HOLD_MS) {
+			g_mc.look_target_x = move_towards(g_mc.look_target_x, 0,
+							  GAZE_RETURN_TO_CENTER_DELTA);
+			g_mc.look_target_y = move_towards(g_mc.look_target_y, 0,
+							  GAZE_RETURN_TO_CENTER_DELTA);
+		}
 		g_mc.look_confidence = 0U;
 		return;
 	}
+
+	g_mc.look_suppress_idle_since_ms = 0LL;
 
 	raw_x = clamp_look((-(g_mc.gravity_x - g_mc.look_ref_x) * 100) /
 			   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
