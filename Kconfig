@@ -127,6 +127,15 @@ config KERFUR_ENABLE_MOCK_INPUTS
 	help
 	  Keeps the pet behavior active before all real sensors are added.
 
+config KERFUR_UI
+	bool "Enable Kerfur OLED/LVGL UI"
+	default y
+	depends on DISPLAY && LVGL
+	help
+	  Enables the OLED/LVGL face renderer and face asset pipeline. Disable this
+	  for a headless BLE or sensor test build that should keep running without a
+	  display.
+
 config KERFUR_MOTION
 	bool "Enable Kerfur motion sensing and classification"
 	default y

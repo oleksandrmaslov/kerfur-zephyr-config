@@ -45,16 +45,18 @@ file(GLOB_RECURSE KERFUR_FACE_ASSET_INPUTS
 )
 list(TRANSFORM KERFUR_FACE_ASSET_INPUTS PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
 
-add_custom_command(
-    OUTPUT ${KERFUR_FACE_GEN_HEADERS} ${KERFUR_FACE_GEN_SOURCES}
-    COMMAND ${Python3_EXECUTABLE} ${KERFUR_FACE_CODEGEN}
-            --input ${KERFUR_FACE_JSON}
-            --out-include ${KERFUR_FACE_GEN_INCLUDE_DIR}
-            --out-src ${KERFUR_FACE_GEN_SRC_DIR}
-    DEPENDS ${KERFUR_FACE_CODEGEN} ${KERFUR_FACE_ASSET_INPUTS}
-    COMMENT "Generating Kerfur face assets and recipes"
-    VERBATIM
-)
+if(CONFIG_KERFUR_UI)
+    add_custom_command(
+        OUTPUT ${KERFUR_FACE_GEN_HEADERS} ${KERFUR_FACE_GEN_SOURCES}
+        COMMAND ${Python3_EXECUTABLE} ${KERFUR_FACE_CODEGEN}
+                --input ${KERFUR_FACE_JSON}
+                --out-include ${KERFUR_FACE_GEN_INCLUDE_DIR}
+                --out-src ${KERFUR_FACE_GEN_SRC_DIR}
+        DEPENDS ${KERFUR_FACE_CODEGEN} ${KERFUR_FACE_ASSET_INPUTS}
+        COMMENT "Generating Kerfur face assets and recipes"
+        VERBATIM
+    )
+endif()
 
 target_sources(app PRIVATE
     src/main.c
@@ -63,9 +65,6 @@ target_sources(app PRIVATE
     src/behavior/behavior_engine.c
     src/behavior/micro_reaction.c
     src/display/display_policy.c
-    src/ui/ui_renderer.c
-    src/ui/face_runtime.c
-    ${KERFUR_FACE_GEN_SOURCES}
     src/drivers/motion_sensor.c
     src/drivers/motion_classifier.c
     src/drivers/in_hand_detector.c
@@ -74,6 +73,18 @@ target_sources(app PRIVATE
     src/power/power_manager.c
     src/ble/ble_manager.c
 )
+
+if(CONFIG_KERFUR_UI)
+    target_sources(app PRIVATE
+        src/ui/ui_renderer.c
+        src/ui/face_runtime.c
+        ${KERFUR_FACE_GEN_SOURCES}
+    )
+else()
+    target_sources(app PRIVATE
+        src/ui/ui_renderer_stub.c
+    )
+endif()
 
 if(CONFIG_KERFUR_ENABLE_NEARBY)
     target_sources(app PRIVATE
