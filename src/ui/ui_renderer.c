@@ -17,8 +17,10 @@
 
 LOG_MODULE_REGISTER(ui_renderer, CONFIG_LOG_DEFAULT_LEVEL);
 
-#if !DT_HAS_CHOSEN(zephyr_display)
-#error "No zephyr,display chosen node. Select a display shield."
+#if DT_HAS_CHOSEN(zephyr_display)
+#define UI_RENDERER_HAS_DISPLAY 1
+#else
+#define UI_RENDERER_HAS_DISPLAY 0
 #endif
 
 #if !defined(CONFIG_LV_USE_IMAGE) || !defined(CONFIG_LV_USE_CANVAS) || \
@@ -377,9 +379,14 @@ int ui_renderer_init(void)
 	struct display_capabilities caps;
 	int err;
 
+#if !UI_RENDERER_HAS_DISPLAY
+	LOG_WRN("No zephyr,display chosen node; UI disabled");
+	return -ENODEV;
+#else
 	g_ui.display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 	if (!device_is_ready(g_ui.display)) {
-		LOG_ERR("Display device not ready");
+		g_ui.display = NULL;
+		LOG_WRN("Display device not ready; UI disabled");
 		return -ENODEV;
 	}
 
@@ -426,6 +433,7 @@ int ui_renderer_init(void)
 	face_runtime_init(&g_ui.face_runtime);
 	lv_timer_handler();
 	return 0;
+#endif
 }
 
 void ui_renderer_set_blanked(bool blanked)

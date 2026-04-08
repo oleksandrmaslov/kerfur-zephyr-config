@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdbool.h>
 
 #include <zephyr/kernel.h>
@@ -79,8 +80,12 @@ int app_run(void)
 
 	err = ui_renderer_init();
 	if (err) {
-		LOG_ERR("UI init failed (%d)", err);
-		return err;
+		if (err == -ENODEV) {
+			LOG_WRN("UI unavailable (%d), continuing headless", err);
+		} else {
+			LOG_ERR("UI init failed (%d)", err);
+			return err;
+		}
 	}
 
 	err = mock_inputs_init();
