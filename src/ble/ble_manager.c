@@ -1429,6 +1429,8 @@ static void adv_phase_work_handler(struct k_work *work)
 		err = ble_set_advertising_phase(BLE_ADV_PHASE_FAST, true);
 		if (err != 0) {
 			LOG_WRN("Failed switching directed->fast advertising (%d)", err);
+			(void)k_work_reschedule(&g_adv_restart_work,
+						KERFUR_ADV_RESTART_RETRY_DELAY);
 		}
 		return;
 	}
@@ -1437,6 +1439,8 @@ static void adv_phase_work_handler(struct k_work *work)
 		err = ble_set_advertising_phase(BLE_ADV_PHASE_SLOW, true);
 		if (err != 0) {
 			LOG_WRN("Failed switching fast->slow advertising (%d)", err);
+			(void)k_work_reschedule(&g_adv_restart_work,
+						KERFUR_ADV_RESTART_RETRY_DELAY);
 		}
 	}
 }
@@ -1545,6 +1549,8 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 
 	if (err != 0U) {
 		LOG_WRN("BLE connect failed (err=0x%02x)", err);
+		(void)k_work_reschedule(&g_adv_restart_work,
+					KERFUR_ADV_RESTART_INITIAL_DELAY);
 		return;
 	}
 
@@ -1560,6 +1566,9 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 	g_adv_restart_retries = 0U;
 	g_adv_phase = BLE_ADV_PHASE_IDLE;
 	g_prefer_directed_reconnect = false;
+
+	ancs_release_conn();
+	ans_release_conn();
 
 #if defined(CONFIG_KERFUR_ENABLE_COMPANION) && CONFIG_KERFUR_ENABLE_COMPANION
 	g_companion_notify_enabled = false;
@@ -1677,11 +1686,26 @@ static void pairing_complete_cb(struct bt_conn *conn, bool bonded)
 
 static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason)
 {
-	ARG_UNUSED(conn);
 	LOG_WRN("BLE pairing failed (%d: %s)", reason, bt_security_err_to_str(reason));
 
 	if (reason == BT_SECURITY_ERR_AUTH_REQUIREMENT) {
 		LOG_WRN("Peer rejected pairing auth requirements (possible MITM/IO capability mismatch)");
+	}
+
+	if ((reason == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) ||
+	    (reason == BT_SECURITY_ERR_AUTH_FAIL) ||
+	    (reason == BT_SECURITY_ERR_AUTH_REQUIREMENT)) {
+		const bt_addr_le_t *peer = bt_conn_get_dst(conn);
+
+		if (peer != NULL) {
+			int unpair_err = bt_unpair(BT_ID_DEFAULT, peer);
+
+			if (unpair_err == 0) {
+				LOG_WRN("Removed stale bond for peer (pairing err=%d)", reason);
+			} else if (unpair_err != -ENOENT) {
+				LOG_WRN("bt_unpair failed (%d)", unpair_err);
+			}
+		}
 	}
 }
 
