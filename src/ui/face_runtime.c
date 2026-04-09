@@ -498,7 +498,7 @@ static enum face_runtime_dynamic_reason resolve_dynamic_reason(
 		return FACE_RUNTIME_DYNAMIC_DISABLED_NO_ZONE;
 	}
 	if (!state->in_hand && (state->in_hand_confidence < 15U) &&
-	    (state->look_confidence < 10U)) {
+	    (state->look_confidence < 5U)) {
 		return FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND;
 	}
 	if ((state->last_rough_event_timestamp_ms > 0LL) &&
@@ -1276,13 +1276,24 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 						 has_pupil);
 	dynamic_allowed = dynamic_reason == FACE_RUNTIME_DYNAMIC_ALLOWED;
 
-	motion_confidence = MIN(state->look_confidence, state->in_hand_confidence);
-	if (state->walking_confidence > 0U) {
-		motion_confidence = (uint8_t)MIN(motion_confidence,
-						(uint8_t)MAX(0, 100 - state->walking_confidence));
+	/* The motion classifier already incorporates in-hand quality and
+	 * chaos into look_confidence.  Don't double-penalize by taking
+	 * MIN(look_conf, in_hand_conf) — that kills gaze during the
+	 * transition edges when in_hand_confidence is moderate but the
+	 * classifier is still producing good tilt data.
+	 *
+	 * Use look_confidence directly, with a gentle walking penalty
+	 * (not a hard subtraction that zeroes it out). */
+	motion_confidence = state->look_confidence;
+	if (state->walking_confidence >= 50U) {
+		/* Actively walking: strongly reduce gaze (mostly noise). */
+		motion_confidence = (uint8_t)(motion_confidence / 4U);
+	} else if (state->walking_confidence > 0U) {
+		/* Ambiguous walk/carry: modest reduction. */
+		motion_confidence = (uint8_t)((motion_confidence * 3U) / 4U);
 	}
 	if (state->battery_low) {
-		motion_confidence = (uint8_t)MIN(motion_confidence, 60U);
+		motion_confidence = (uint8_t)MIN(motion_confidence, 70U);
 	}
 	motion_scale = motion_scale_for_recipe(recipe_id);
 	motion_speed = motion_speed_for_recipe(recipe_id);
@@ -1304,11 +1315,17 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 			motion_speed = MAX(motion_speed, 55U);
 			break;
 		case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_LOW_CONFIDENCE:
-		case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND:
-			target_x /= 3;
-			target_y /= 3;
-			motion_confidence = (uint8_t)(motion_confidence / 2U);
+			target_x /= 2;
+			target_y /= 2;
+			motion_confidence = (uint8_t)((motion_confidence * 2U) / 3U);
 			motion_speed = MAX(motion_speed, 25U);
+			break;
+		case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND:
+			/* Gaze is decaying back to center — keep enough
+			 * confidence/speed that the drift looks deliberate. */
+			target_x = (target_x * 2) / 3;
+			target_y = (target_y * 2) / 3;
+			motion_speed = MAX(motion_speed, 30U);
 			break;
 		case FACE_RUNTIME_DYNAMIC_DISABLED_BATTERY_SAVE:
 			target_x /= 4;
@@ -1328,7 +1345,10 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	} else {
 		target_x = (target_x * motion_scale) / 100;
 		target_y = (target_y * motion_scale) / 100;
-		motion_speed = MAX(8U, (uint8_t)((motion_speed * MAX(motion_confidence, 15U)) / 100U));
+		/* Speed scaling: use confidence to gently modulate, but keep
+		 * a high floor so the pupil actually moves at reasonable pace.
+		 * Old formula produced speed=11 at conf=20 — far too slow. */
+		motion_speed = MAX(20U, (uint8_t)((motion_speed * MAX(motion_confidence, 35U)) / 100U));
 	}
 
 	if ((runtime->last_step_ms == 0) || (now_ms < runtime->last_step_ms)) {

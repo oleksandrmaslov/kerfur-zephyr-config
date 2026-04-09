@@ -54,11 +54,13 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 
 /* Gaze. */
 #define GAZE_DEADBAND                3
-#define GAZE_MAX_DELTA_NORMAL        10
-#define GAZE_MAX_DELTA_LOW_BATT      6
-#define GAZE_HOLD_AFTER_RELEASE_MS   6000LL
-#define GAZE_HOLD_RESIDUAL_CONF      30U
-#define GAZE_DECAY_RESIDUAL_CONF     20U
+#define GAZE_IDLE_RAW_THRESHOLD      8       /* raw change needed to reset idle timer (was 4, too sensitive to gravity noise) */
+#define GAZE_MAX_DELTA_NORMAL        18      /* per-sample max step toward raw target (was 10, felt sluggish) */
+#define GAZE_MAX_DELTA_LOW_BATT      8
+#define GAZE_HOLD_AFTER_RELEASE_MS   4000LL  /* hold gaze position after hand goes still before decaying */
+#define GAZE_DECAY_SPEED             2       /* per-sample step toward center during decay */
+#define GAZE_HOLD_RESIDUAL_CONF      40U     /* confidence while gaze is held (keeps renderer using look_target) */
+#define GAZE_DECAY_RESIDUAL_CONF     25U     /* confidence during slow decay to center */
 #define LOOK_SUPPRESS_AFTER_ROUGH_MS 800LL
 #define LOOK_SUPPRESS_AFTER_WALK_MS  500LL
 
@@ -596,9 +598,17 @@ static void update_look_reference(const struct in_hand_detector_output *det,
 {
 	ARG_UNUSED(fs);
 
-	/* Reset only on confirmed surface still (not just !in_hand). */
+	/* When confirmed on surface: don't nuke reference immediately.
+	 * Instead, start the idle timer so the gaze decays gracefully.
+	 * Only reset the reference once gaze has fully returned to center. */
 	if (det->state == IN_HAND_DETECTOR_SURFACE_STILL && !det->in_hand) {
-		reset_look_reference();
+		if (g_mc.look_idle_since_ms == 0LL) {
+			g_mc.look_idle_since_ms = k_uptime_get();
+		}
+		/* Once gaze has decayed to center, clean up the reference. */
+		if (g_mc.look_target_x == 0 && g_mc.look_target_y == 0) {
+			reset_look_reference();
+		}
 		return;
 	}
 
@@ -626,60 +636,81 @@ static void update_look_target(const struct in_hand_detector_output *det,
 {
 	int16_t raw_x, raw_y;
 	int max_delta;
-	bool suppressed;
+	bool tracking;
 	bool decaying;
 
-	suppressed = (now_ms < g_mc.suppress_look_until_ms) ||
-		     g_mc.walking_active ||
-		     (det->look_confidence < 10U && !det->in_hand) ||
-		     !g_mc.look_reference_valid;
+	/* "tracking" means we can compute new raw tilt values. When suppressed
+	 * we can still decay the gaze to center — we just can't track new input. */
+	tracking = (now_ms >= g_mc.suppress_look_until_ms) &&
+		   !g_mc.walking_active &&
+		   g_mc.look_reference_valid &&
+		   (det->look_confidence >= 10U || det->in_hand);
 
-	if (suppressed) {
-		/* Freeze raw input — gaze should HOLD where it is, not snap. */
-		raw_x = g_mc.look_target_x;
-		raw_y = g_mc.look_target_y;
-	} else {
+	if (tracking) {
 		raw_x = clamp_look((-(g_mc.gravity_x - g_mc.look_ref_x) * 100) /
 				   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
 		raw_y = clamp_look(((g_mc.gravity_y - g_mc.look_ref_y) * 100) /
 				   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
 		if (abs16(raw_x) <= GAZE_DEADBAND) { raw_x = 0; }
 		if (abs16(raw_y) <= GAZE_DEADBAND) { raw_y = 0; }
+	} else {
+		/* Not tracking — use current target as raw so idle timer
+		 * doesn't get confused by stale values. */
+		raw_x = g_mc.look_target_x;
+		raw_y = g_mc.look_target_y;
 	}
 
-	/* Idle tracker: any meaningful change in raw INPUT resets the timer.
-	 * Compare against the previous raw (not look_target) so the decay
-	 * phase doesn't accidentally reset itself when target drifts away
-	 * from a still-held raw value. */
-	if (abs16(raw_x - g_mc.look_raw_prev_x) >= 4 ||
-	    abs16(raw_y - g_mc.look_raw_prev_y) >= 4) {
+	/* Idle tracker: meaningful change in raw INPUT resets the timer.
+	 * Threshold must be above gravity low-pass noise (~2-3 units)
+	 * to prevent constant resetting. */
+	if (tracking &&
+	    (abs16(raw_x - g_mc.look_raw_prev_x) >= GAZE_IDLE_RAW_THRESHOLD ||
+	     abs16(raw_y - g_mc.look_raw_prev_y) >= GAZE_IDLE_RAW_THRESHOLD)) {
 		g_mc.look_idle_since_ms = now_ms;
 	}
 	g_mc.look_raw_prev_x = raw_x;
 	g_mc.look_raw_prev_y = raw_y;
 
-	decaying = (g_mc.look_idle_since_ms != 0LL) &&
-		   ((now_ms - g_mc.look_idle_since_ms) >= GAZE_HOLD_AFTER_RELEASE_MS);
+	/* Decay starts when:
+	 *  - idle timer expired (hand stopped moving), OR
+	 *  - not tracking at all (put down, walking, etc.) and gaze is non-zero */
+	decaying = false;
+	if (g_mc.look_idle_since_ms != 0LL &&
+	    (now_ms - g_mc.look_idle_since_ms) >= GAZE_HOLD_AFTER_RELEASE_MS) {
+		decaying = true;
+	}
+	if (!tracking && (g_mc.look_target_x != 0 || g_mc.look_target_y != 0)) {
+		/* Not tracking — always decay back to center. Start the
+		 * timer if it wasn't running so we get a clean hold→decay. */
+		if (g_mc.look_idle_since_ms == 0LL) {
+			g_mc.look_idle_since_ms = now_ms;
+		} else if ((now_ms - g_mc.look_idle_since_ms) >= GAZE_HOLD_AFTER_RELEASE_MS) {
+			decaying = true;
+		}
+	}
 
 	if (decaying) {
-		/* Slow drift back to center after the hold expires. Delta=1 at
-		 * ~25 Hz means a full extreme→center glide takes ~4 s, which
-		 * reads as a deliberate "looking away" rather than a snap. */
-		g_mc.look_target_x = move_towards(g_mc.look_target_x, 0, 1);
-		g_mc.look_target_y = move_towards(g_mc.look_target_y, 0, 1);
-	} else {
-		max_delta = g_mc.battery_low ? GAZE_MAX_DELTA_LOW_BATT : GAZE_MAX_DELTA_NORMAL;
+		/* Gradual drift back to center. GAZE_DECAY_SPEED=2 at 26 Hz
+		 * means full extreme→center glide takes ~2 s — deliberate
+		 * "looking away" rather than a snap. */
+		g_mc.look_target_x = move_towards(g_mc.look_target_x, 0,
+						  GAZE_DECAY_SPEED);
+		g_mc.look_target_y = move_towards(g_mc.look_target_y, 0,
+						  GAZE_DECAY_SPEED);
+	} else if (tracking) {
+		max_delta = g_mc.battery_low ? GAZE_MAX_DELTA_LOW_BATT
+					     : GAZE_MAX_DELTA_NORMAL;
 		g_mc.look_target_x = move_towards(g_mc.look_target_x, raw_x,
 						  (int16_t)max_delta);
 		g_mc.look_target_y = move_towards(g_mc.look_target_y, raw_y,
 						  (int16_t)max_delta);
 	}
+	/* else: not tracking and not yet decaying (in hold period) — freeze */
 
-	/* Confidence: full while actively tracking, residual while held or
-	 * decaying so the renderer keeps applying look_target instead of
-	 * snapping the pupils to base. Drop to 0 only once we've fully
-	 * returned to center. */
-	if (!suppressed) {
+	/* Confidence: full while tracking, residual while held or decaying
+	 * so the renderer keeps applying look_target instead of snapping
+	 * pupils to base. Drop to 0 only once fully returned to center. */
+	if (tracking) {
 		g_mc.look_confidence = clamp_u8(
 			(int)det->look_confidence -
 			(int)fs->chaos_confidence / 3 -
@@ -1144,8 +1175,10 @@ void motion_classifier_on_event(const struct app_event *event, const struct pet_
 		g_mc.pickup_confidence = event->payload.carry_state.pickup_confidence;
 		g_mc.in_hand_confidence = event->payload.carry_state.in_hand_confidence;
 		g_mc.walking_confidence = event->payload.carry_state.walking_confidence;
-		if (!g_mc.in_hand) {
-			reset_look_reference();
+		/* Don't nuke reference on exit — let update_look_target decay
+		 * the gaze gracefully via the idle timer. */
+		if (!g_mc.in_hand && g_mc.look_idle_since_ms == 0LL) {
+			g_mc.look_idle_since_ms = event->timestamp_ms;
 		}
 		break;
 	case APP_EVENT_PICKED_UP:
@@ -1158,7 +1191,11 @@ void motion_classifier_on_event(const struct app_event *event, const struct pet_
 		break;
 	case APP_EVENT_IN_HAND_EXIT:
 		g_mc.in_hand = false;
-		reset_look_reference();
+		/* Start decay timer instead of nuking reference. The gaze
+		 * will hold briefly then drift back to center. */
+		if (g_mc.look_idle_since_ms == 0LL) {
+			g_mc.look_idle_since_ms = event->timestamp_ms;
+		}
 		break;
 	default:
 		break;

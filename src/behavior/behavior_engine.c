@@ -530,6 +530,21 @@ static void apply_tick_10s(struct pet_state *state, int64_t now_ms)
 		}
 	}
 
+	/* Curiosity decay: interest fades when nothing new is happening.
+	 * −1/10s = −6/min base.  Faster when truly idle. */
+	if (g_runtime.ctx.stimulation < 15) {
+		state->curiosity -= 2;
+	} else {
+		state->curiosity -= 1;
+	}
+
+	/* Attachment drift: slowly returns toward baseline (~50) when
+	 * not reinforced by interaction.  Prevents permanent 100. */
+	if (state->attachment > 50 &&
+	    (now_ms - state->last_real_interaction_timestamp_ms) > (60 * MSEC_PER_SEC)) {
+		state->attachment -= 1;
+	}
+
 	/* Context-influenced passive effects:
 	 * Lingering comfort soothes residual stress. */
 	if (g_runtime.ctx.comfort > 40 && state->stress > 0) {
@@ -563,6 +578,11 @@ static void apply_tick_60s(struct pet_state *state, int64_t now_ms)
 
 	if (state->notification_burst_level > 0U) {
 		state->notification_burst_level--;
+	}
+
+	/* Extra curiosity decay during long idle — prevents stale 100. */
+	if (no_real_interaction_ms >= (3LL * 60 * MSEC_PER_SEC) && state->curiosity > 30) {
+		state->curiosity -= 1;
 	}
 
 	g_runtime.five_min_accum++;
@@ -775,17 +795,23 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 	case APP_EVENT_SHAKE_LIGHT: {
 		const bool sleepy = state->sleepiness > 60;
+		const bool carried = in_hand_motion_context_recent(state, now);
 
-		g_runtime.ctx.stimulation += 10;
 		state->last_motion_timestamp_ms = now;
 		state->last_motion_sample_timestamp_ms = now;
 
-		state->arousal += 5;
-		state->curiosity += 3;
-		state->sleepiness -= 4;
-		state->stress += 1;
+		if (carried) {
+			/* In-hand jostling: barely registers emotionally */
+			g_runtime.ctx.stimulation += 3;
+			state->arousal += 1;
+		} else {
+			/* Bumped on a surface: noticeable */
+			g_runtime.ctx.stimulation += 6;
+			state->arousal += 3;
+			state->curiosity += 2;
+			state->sleepiness -= 2;
+			state->stress += 1;
 
-		if (!in_hand_motion_context_recent(state, now)) {
 			if (sleepy) {
 				trigger_reaction(state, REACTION_WAKE_BLINK, now);
 			} else if (state->arousal <= 50) {
@@ -798,28 +824,43 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 	case APP_EVENT_SHAKE_PLAY: {
 		const bool sleepy = state->sleepiness > 60;
 		const bool stressed_already = state->stress > 50;
+		const bool carried = in_hand_motion_context_recent(state, now);
 		const bool playful = g_runtime.intent == PET_INTENT_PLAY ||
 				     state->arousal > 45;
 
-		g_runtime.ctx.stimulation += 15;
 		state->last_motion_timestamp_ms = now;
 		state->last_motion_sample_timestamp_ms = now;
 
-		state->arousal += 7;
-		state->curiosity += 5;
-		state->boredom -= 4;
-		state->sleepiness -= 6;
-		state->stress += (state->trust >= 40) ? 1 : 4;
+		if (carried) {
+			/* Deliberate play shake while held */
+			g_runtime.ctx.stimulation += 8;
+			state->arousal += 4;
+			state->curiosity += 2;
+			state->boredom -= 2;
+			state->sleepiness -= 3;
+			state->stress += (state->trust >= 40) ? 0 : 2;
 
-		/* Playful + trusting: this is fun! */
-		if (playful && state->trust > 40) {
+			if (playful && state->trust > 40) {
+				state->boredom -= 2;
+				trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
+			} else if (stressed_already) {
+				trigger_reaction(state, REACTION_STARTLE, now);
+			}
+		} else {
+			/* Play shake on surface: more startling */
+			g_runtime.ctx.stimulation += 10;
+			state->arousal += 5;
+			state->curiosity += 3;
 			state->boredom -= 3;
-			state->attachment += 1;
-		} else if (stressed_already) {
-			state->stress += 3;
-		}
+			state->sleepiness -= 4;
+			state->stress += (state->trust >= 40) ? 1 : 3;
 
-		if (!in_hand_motion_context_recent(state, now)) {
+			if (playful && state->trust > 40) {
+				state->boredom -= 2;
+			} else if (stressed_already) {
+				state->stress += 2;
+			}
+
 			if (sleepy) {
 				trigger_reaction(state, REACTION_WAKE_BLINK, now);
 			} else if (stressed_already) {
@@ -832,8 +873,7 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 	}
 
 	case APP_EVENT_SHAKE_ROUGH: {
-		g_runtime.ctx.stimulation += 25;
-		g_runtime.ctx.comfort -= 10;
+		const bool carried = in_hand_motion_context_recent(state, now);
 
 		state->last_motion_timestamp_ms = now;
 		state->last_motion_sample_timestamp_ms = now;
@@ -842,18 +882,29 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		state->in_hand_confidence = (uint8_t)MAX(0, (int)state->in_hand_confidence - 25);
 		state->walking_active = false;
 
-		state->arousal += 8;
-		state->sleepiness -= 8;
+		if (carried) {
+			/* Rough handling while held: scary but trust-context applies */
+			g_runtime.ctx.stimulation += 15;
+			g_runtime.ctx.comfort -= 6;
+			state->arousal += 5;
+			state->sleepiness -= 5;
+		} else {
+			/* Rough shake on surface: more alarming */
+			g_runtime.ctx.stimulation += 20;
+			g_runtime.ctx.comfort -= 10;
+			state->arousal += 7;
+			state->sleepiness -= 7;
+		}
 
 		/* Trust-dependent damage: familiar handler vs stranger */
 		if (state->trust >= 50) {
-			state->stress += 7;
+			state->stress += 5;
 			state->trust -= 2;
 			state->attachment -= 1;
 		} else {
-			state->stress += 13;
-			state->trust -= 6;
-			state->attachment -= 3;
+			state->stress += 10;
+			state->trust -= 4;
+			state->attachment -= 2;
 		}
 
 		trigger_reaction(state, REACTION_STARTLE, now);
@@ -861,12 +912,12 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 	}
 
 	case APP_EVENT_IMPACT: {
-		g_runtime.ctx.stimulation += 20;
-		g_runtime.ctx.comfort -= 5;
+		g_runtime.ctx.stimulation += 15;
+		g_runtime.ctx.comfort -= 4;
 
-		state->stress += 8;
+		state->stress += 6;
 		state->trust -= 1;
-		state->arousal += 8;
+		state->arousal += 5;
 		state->last_motion_timestamp_ms = now;
 		state->last_motion_sample_timestamp_ms = now;
 		state->last_rough_event_timestamp_ms = now;
@@ -899,8 +950,8 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 	case APP_EVENT_WALKING_START: {
 		const bool was_bored = state->boredom > 40;
-
-		g_runtime.ctx.stimulation += 8;
+		const bool carried = state->in_hand ||
+				     state->in_hand_confidence > 50;
 
 		state->walk_confidence = (uint8_t)MAX(state->walk_confidence, 80);
 		state->walking_confidence = (uint8_t)MAX(state->walking_confidence, 80);
@@ -910,13 +961,20 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		state->last_motion_timestamp_ms = now;
 		state->last_motion_sample_timestamp_ms = now;
 
-		/* Starting a walk while bored: extra curiosity boost */
-		if (was_bored) {
-			state->curiosity += 4;
-			state->boredom -= 3;
+		if (carried) {
+			/* Being carried: pleasant but passive transport */
+			g_runtime.ctx.stimulation += 4;
+			g_runtime.ctx.comfort += 4;
+			state->attachment += 1;
+		} else {
+			/* Actually walking: exploring the world */
+			g_runtime.ctx.stimulation += 8;
+			if (was_bored) {
+				state->curiosity += 4;
+				state->boredom -= 3;
+			}
+			trigger_reaction(state, REACTION_LOOK_UP, now);
 		}
-
-		trigger_reaction(state, REACTION_LOOK_UP, now);
 		break;
 	}
 
@@ -931,27 +989,40 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 	case APP_EVENT_STEP_BATCH: {
 		int boredom_factor;
 		int curiosity_add;
+		const bool carried = state->in_hand ||
+				     state->in_hand_confidence > 50;
 
-		g_runtime.ctx.stimulation += 2;
+		g_runtime.ctx.stimulation += carried ? 1 : 2;
 
 		steps = MAX(event->param, 0);
 
 		/* Diminishing boredom reduction: first 500 steps most impactful */
 		boredom_factor = (state->step_count_today < 500U) ? 3 :
 				 (state->step_count_today < 2000U) ? 2 : 1;
-		/* Curiosity: more impactful early in walk */
-		curiosity_add = (state->walking_session_start_ms > 0LL &&
-			(now - state->walking_session_start_ms) < (120LL * MSEC_PER_SEC))
-			? MIN(steps, 4) : 1;
 
-		state->boredom -= MIN((steps * boredom_factor / 2), 8);
+		if (carried) {
+			/* Being carried: passive motion, reduced exploration gains */
+			state->boredom -= MIN((steps * boredom_factor / 4), 4);
+			/* No curiosity gain — the pet isn't exploring, it's along for the ride */
+			curiosity_add = 0;
+		} else {
+			/* Walking: full exploration benefit */
+			state->boredom -= MIN((steps * boredom_factor / 2), 8);
+			/* Curiosity: more impactful early in walk */
+			curiosity_add = (state->walking_session_start_ms > 0LL &&
+				(now - state->walking_session_start_ms) < (120LL * MSEC_PER_SEC))
+				? MIN(steps, 4) : 1;
+		}
+
 		state->curiosity += curiosity_add;
-		state->sleepiness -= 2;
+		state->sleepiness -= carried ? 1 : 2;
 
 		if (state->walking_active || (effective_walking_confidence(state) >= 60U)) {
 			state->walking_active = true;
 		}
-		if (state->ble_connected && (steps > 0)) {
+		/* Walking together with phone: gentle attachment, but only
+		 * when attachment isn't already saturated (prevents ratchet). */
+		if (state->ble_connected && (steps > 0) && state->attachment < 70) {
 			state->attachment += 1;
 		}
 		if (steps > 0) {
@@ -1475,10 +1546,15 @@ static void update_mode(struct pet_state *state, int64_t now_ms)
 		mode = PET_MODE_TASK_ALERT;
 	} else if (state->app_session_active) {
 		mode = PET_MODE_INTERACTING;
-	} else if (state->walking_active ||
+	} else if ((state->walking_active ||
 		   ((walk_recent_ms <= (12 * MSEC_PER_SEC)) &&
-		    (effective_walking_confidence(state) >= 30U))) {
+		    (effective_walking_confidence(state) >= 30U))) &&
+		   !(state->in_hand || state->in_hand_confidence > 50)) {
 		mode = PET_MODE_WALK_AWAKE;
+	} else if (state->walking_active &&
+		   (state->in_hand || state->in_hand_confidence > 50)) {
+		/* Being carried: counts as interaction, not a walk */
+		mode = PET_MODE_INTERACTING;
 	} else if (self_wake_recent_ms < (20 * MSEC_PER_SEC)) {
 		mode = PET_MODE_INTERACTING;
 	} else if ((state->sleepiness > 88) && (state->arousal < 25) &&
