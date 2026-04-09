@@ -54,20 +54,6 @@ static bool is_surface_still(const struct in_hand_detector_input *in)
 	       in->orientation_rate_mg <= 50U;
 }
 
-/* Looser stillness window: low motion and no orientation drift, even if a
- * stray vibration spike crosses the strict surface-still gate. Used to bias
- * the in-hand detector toward exit when the device is clearly resting. */
-static bool is_near_still(const struct in_hand_detector_input *in)
-{
-	return !in->walking_active &&
-	       !in->rough_motion &&
-	       in->motion_mg          <= 200U &&
-	       in->smooth_motion_mg   <= 150U &&
-	       in->orientation_rate_mg <= 80U &&
-	       in->orientation_delta_mg <= 80U &&
-	       in->chaos_confidence    < 50U;
-}
-
 /* ── Hand-like motion classifier ──────────────────────────────────────── */
 
 static bool is_smooth_reorientation(const struct in_hand_detector_input *in)
@@ -218,14 +204,13 @@ void in_hand_detector_process(struct in_hand_detector *det,
 	} else if (det->in_hand) {
 		/* No hand-like signal this tick but still flagged in_hand.
 		 * Gravity drift from the saved surface reference is the cleanest
-		 * way to tell a gentle hold (drift > 0) from a vibrating surface
-		 * (drift == 0) — pin confidence in the former, decay in the latter. */
-		if (surface_still) {
-			in_hand_delta = -8;
-		} else if (orientation_moved) {
+		 * way to tell a gentle hold (drift > 0) from a confirmed surface
+		 * (drift == 0). Check drift FIRST so a held device with subtle
+		 * reorientation never gets fast-decayed by the surface_still gate. */
+		if (orientation_moved) {
 			in_hand_delta = 0;
-		} else if (is_near_still(in)) {
-			in_hand_delta = -4;
+		} else if (surface_still) {
+			in_hand_delta = -8;
 		} else {
 			in_hand_delta = -1;
 		}

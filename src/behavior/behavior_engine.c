@@ -1,3 +1,23 @@
+/*
+ * Behavior engine — "mini AI" rewrite.
+ *
+ * Pipeline (every event):
+ *   1. Interpret incoming event in context
+ *   2. Apply immediate micro-reaction
+ *   3. Update long-lived pet_state variables
+ *   4. Update short-lived afterglow context
+ *   5. Resolve behavioral intent (throttled)
+ *   6. Resolve mode
+ *   7. Resolve expression (with hysteresis)
+ *
+ * Design goals:
+ *   - Same event feels different depending on current emotional state
+ *   - Short-lived context creates emotional momentum / afterglow
+ *   - Intent gives the pet a brief behavioral "leaning"
+ *   - Expression scoring integrates context + intent for stability
+ *   - Zero new fields in pet_state (all new state is file-local runtime)
+ */
+
 #include <stdio.h>
 #include <string.h>
 
@@ -13,7 +33,44 @@ LOG_MODULE_REGISTER(behavior_engine, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define PET_EXPR_COUNT (PET_EXPR_ASLEEP + 1)
 
+/* ── Short-lived context ("afterglow") ───────────────────────────────
+ *
+ * These decay naturally every second and give the pet the illusion of
+ * remembering what just happened.  They live only in file-local runtime,
+ * NOT in pet_state.
+ *
+ *   stimulation  — how much has been going on recently  (decay −3/s)
+ *   comfort      — recent soothing / positive touch     (decay −2/s)
+ *   social_warmth — recent social / peer presence        (decay −1/s)
+ */
+
+struct behavior_context {
+	int16_t stimulation;
+	int16_t comfort;
+	int16_t social_warmth;
+};
+
+/* ── Behavioral intent ───────────────────────────────────────────────
+ *
+ * What the pet "wants" right now.  Resolved every few seconds from
+ * current state + context, with hysteresis to prevent jitter.
+ */
+
+enum pet_intent {
+	PET_INTENT_NONE = 0,
+	PET_INTENT_REST,
+	PET_INTENT_SEEK_ATTENTION,
+	PET_INTENT_OBSERVE,
+	PET_INTENT_PLAY,
+	PET_INTENT_SELF_SOOTHE,
+	PET_INTENT_WITHDRAW,
+	PET_INTENT_COUNT
+};
+
+/* ── Engine runtime (file-local, NOT in pet_state) ───────────────── */
+
 struct behavior_runtime {
+	/* Accumulator / session bookkeeping (unchanged) */
 	uint8_t arousal_decay_accum_s;
 	uint8_t ambient_energy_decay_accum;
 	uint8_t five_min_accum;
@@ -22,9 +79,19 @@ struct behavior_runtime {
 	enum pet_expression forced_expression;
 	bool forced_expression_active;
 	bool step_day_valid;
+
+	/* Afterglow context */
+	struct behavior_context ctx;
+
+	/* Intent */
+	enum pet_intent intent;
+	int16_t intent_strength;       /* 0..100 */
+	int64_t intent_resolved_at_ms;
 };
 
 static struct behavior_runtime g_runtime;
+
+/* ── Utility helpers ─────────────────────────────────────────────── */
 
 static int16_t clamp_0_100(int value)
 {
@@ -211,6 +278,140 @@ static void log_face_snapshot(const struct pet_state *state, const char *reason)
 		state->battery_percent_known ? 1 : 0);
 }
 
+/* ── Context (afterglow) management ──────────────────────────────── */
+
+static void clamp_context(void)
+{
+	g_runtime.ctx.stimulation = (int16_t)CLAMP(g_runtime.ctx.stimulation, 0, 100);
+	g_runtime.ctx.comfort = (int16_t)CLAMP(g_runtime.ctx.comfort, 0, 100);
+	g_runtime.ctx.social_warmth = (int16_t)CLAMP(g_runtime.ctx.social_warmth, 0, 100);
+}
+
+static void decay_context(void)
+{
+	/* Called every 1 s from the tick handler. */
+	g_runtime.ctx.stimulation -= 3;
+	g_runtime.ctx.comfort -= 2;
+	g_runtime.ctx.social_warmth -= 1;
+	clamp_context();
+}
+
+/* ── Intent resolution ───────────────────────────────────────────── */
+
+#define INTENT_RESOLVE_INTERVAL_MS 5000LL
+#define INTENT_SWITCH_MARGIN       8
+
+static const char *pet_intent_str(enum pet_intent intent)
+{
+	switch (intent) {
+	case PET_INTENT_NONE:           return "NONE";
+	case PET_INTENT_REST:           return "REST";
+	case PET_INTENT_SEEK_ATTENTION: return "SEEK_ATTN";
+	case PET_INTENT_OBSERVE:        return "OBSERVE";
+	case PET_INTENT_PLAY:           return "PLAY";
+	case PET_INTENT_SELF_SOOTHE:    return "SOOTHE";
+	case PET_INTENT_WITHDRAW:       return "WITHDRAW";
+	default:                        return "?";
+	}
+}
+
+static void resolve_intent(struct pet_state *state, int64_t now_ms)
+{
+	int16_t scores[PET_INTENT_COUNT];
+	enum pet_intent best;
+	int16_t best_score;
+	int16_t current_score;
+	int64_t no_interaction_ms;
+	int i;
+
+	if ((now_ms - g_runtime.intent_resolved_at_ms) < INTENT_RESOLVE_INTERVAL_MS) {
+		return;
+	}
+	g_runtime.intent_resolved_at_ms = now_ms;
+	no_interaction_ms = now_ms - state->last_real_interaction_timestamp_ms;
+
+	(void)memset(scores, 0, sizeof(scores));
+
+	/* REST: sleepy + calm */
+	if (state->sleepiness > 50 && state->arousal < 45) {
+		scores[PET_INTENT_REST] = (int16_t)(
+			(state->sleepiness - 35) +
+			(45 - state->arousal) / 3 +
+			(g_runtime.ctx.comfort > 30 ? 8 : 0));
+	}
+
+	/* SEEK_ATTENTION: bored or lonely */
+	if (state->boredom > 35 || no_interaction_ms > (5LL * 60 * MSEC_PER_SEC)) {
+		scores[PET_INTENT_SEEK_ATTENTION] = (int16_t)(
+			state->boredom / 2 +
+			(no_interaction_ms > (10LL * 60 * MSEC_PER_SEC) ? 15 : 0) +
+			(no_interaction_ms > (5LL * 60 * MSEC_PER_SEC) ? 8 : 0));
+	}
+
+	/* OBSERVE: curious + moderate arousal */
+	if (state->curiosity > 35 && state->arousal > 15) {
+		scores[PET_INTENT_OBSERVE] = (int16_t)(
+			state->curiosity / 2 +
+			state->arousal / 5 +
+			((g_runtime.ctx.stimulation > 15 && g_runtime.ctx.stimulation < 50) ? 6 : 0));
+	}
+
+	/* PLAY: energetic + trusting + not stressed */
+	if (state->arousal > 45 && state->trust > 35 && state->stress < 45) {
+		scores[PET_INTENT_PLAY] = (int16_t)(
+			state->arousal / 2 +
+			state->trust / 5 -
+			state->stress / 4 +
+			(state->energy > 40 ? 5 : 0));
+	}
+
+	/* SELF_SOOTHE: moderate stress + recent comfort */
+	if (state->stress > 25 && g_runtime.ctx.comfort > 15) {
+		scores[PET_INTENT_SELF_SOOTHE] = (int16_t)(
+			state->stress / 3 +
+			g_runtime.ctx.comfort / 3);
+	}
+
+	/* WITHDRAW: high stress or overstimulated */
+	if (state->stress > 45 || g_runtime.ctx.stimulation > 55) {
+		scores[PET_INTENT_WITHDRAW] = (int16_t)(
+			state->stress / 2 +
+			(g_runtime.ctx.stimulation > 55
+				? (g_runtime.ctx.stimulation - 35) / 3 : 0) -
+			(g_runtime.ctx.comfort > 30 ? 8 : 0));
+	}
+
+	/* Find best */
+	best = PET_INTENT_NONE;
+	best_score = 0;
+	for (i = 1; i < PET_INTENT_COUNT; i++) {
+		if (scores[i] > best_score) {
+			best = (enum pet_intent)i;
+			best_score = scores[i];
+		}
+	}
+
+	/* Hysteresis: require margin to switch */
+	if (best != g_runtime.intent) {
+		current_score = scores[g_runtime.intent];
+		if (best_score < current_score + INTENT_SWITCH_MARGIN) {
+			g_runtime.intent_strength =
+				(int16_t)CLAMP(current_score, 0, 100);
+			return;
+		}
+	}
+
+	if (g_runtime.intent != best) {
+		LOG_INF("Intent: %s(%d) -> %s(%d)",
+			pet_intent_str(g_runtime.intent), g_runtime.intent_strength,
+			pet_intent_str(best), best_score);
+	}
+	g_runtime.intent = best;
+	g_runtime.intent_strength = (int16_t)CLAMP(best_score, 0, 100);
+}
+
+/* ── Passive drift (tick handlers) ───────────────────────────────── */
+
 static void apply_5min_drift(struct pet_state *state, int64_t now_ms)
 {
 	const int64_t no_rough_ms = now_ms - state->last_rough_event_timestamp_ms;
@@ -224,11 +425,11 @@ static void apply_5min_drift(struct pet_state *state, int64_t now_ms)
 		state->energy -= 1;
 	}
 
-	if (no_rough_ms >= (30 * 60 * MSEC_PER_SEC)) {
+	if (no_rough_ms >= (30LL * 60 * MSEC_PER_SEC)) {
 		state->trust += 1;
 	}
 
-	if (no_interaction_ms >= (45 * 60 * MSEC_PER_SEC)) {
+	if (no_interaction_ms >= (45LL * 60 * MSEC_PER_SEC)) {
 		state->attachment -= 1;
 	}
 
@@ -242,23 +443,25 @@ static void apply_30min_drift(struct pet_state *state, int64_t now_ms)
 	const int64_t no_interaction_ms = now_ms - state->last_real_interaction_timestamp_ms;
 	const int64_t no_rough_ms = now_ms - state->last_rough_event_timestamp_ms;
 
-	if (no_interaction_ms >= (2 * 60 * 60 * MSEC_PER_SEC)) {
+	if (no_interaction_ms >= (2LL * 60 * 60 * MSEC_PER_SEC)) {
 		state->attachment -= 1;
 	}
 
-	if (no_rough_ms >= (2 * 60 * 60 * MSEC_PER_SEC)) {
+	if (no_rough_ms >= (2LL * 60 * 60 * MSEC_PER_SEC)) {
 		state->trust += 1;
 	}
 }
 
 static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 {
+	/* Arousal decay */
 	g_runtime.arousal_decay_accum_s++;
 	if (g_runtime.arousal_decay_accum_s >= 2U) {
 		g_runtime.arousal_decay_accum_s = 0U;
 		state->arousal -= 1;
 	}
 
+	/* Walk confidence timeout */
 	if ((state->current_mode == PET_MODE_WALK_AWAKE) &&
 	    ((now_ms - state->last_walk_timestamp_ms) > (12 * MSEC_PER_SEC))) {
 		state->walk_confidence = 0;
@@ -271,9 +474,7 @@ static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 		state->walking_active = false;
 	}
 
-	/* Expire transient social indicators (peer encounter glyphs). While a
-	 * peer is still nearby keep the heart icon visible — it should only
-	 * disappear once the peer is lost (PEER_LOST / ENCOUNTER_END). */
+	/* Social indicator expiry */
 	if ((state->social_indicator != 0) &&
 	    (state->social_indicator_until_ms != 0) &&
 	    (now_ms >= state->social_indicator_until_ms)) {
@@ -282,7 +483,6 @@ static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 			(state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE);
 
 		if (state->peer_nearby && is_heart) {
-			/* Refresh the deadline so the icon stays on. */
 			state->social_indicator_until_ms = now_ms + (10 * MSEC_PER_SEC);
 		} else {
 			state->social_indicator = 0;
@@ -290,18 +490,20 @@ static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 		}
 	}
 
-	/* Walk-together social hint: while walking with a peer nearby,
-	 * boredom decays a bit faster and the pet allows the occasional
-	 * glance toward the peer. */
+	/* Walk-together social hint */
 	if (state->walking_active && state->peer_nearby) {
 		state->boredom -= 1;
 		if ((now_ms - state->last_social_glance_ms) >= (8 * MSEC_PER_SEC)) {
 			state->last_social_glance_ms = now_ms;
 			trigger_reaction(state,
-					 (now_ms & 1LL) ? REACTION_GLANCE_RIGHT : REACTION_GLANCE_LEFT,
+					 (now_ms & 1LL) ? REACTION_GLANCE_RIGHT
+							: REACTION_GLANCE_LEFT,
 					 now_ms);
 		}
 	}
+
+	/* Context afterglow decay */
+	decay_context();
 
 	sync_daily_step_counter(state, now_ms);
 }
@@ -327,6 +529,16 @@ static void apply_tick_10s(struct pet_state *state, int64_t now_ms)
 			}
 		}
 	}
+
+	/* Context-influenced passive effects:
+	 * Lingering comfort soothes residual stress. */
+	if (g_runtime.ctx.comfort > 40 && state->stress > 0) {
+		state->stress -= 1;
+	}
+	/* Social warmth alleviates boredom. */
+	if (g_runtime.ctx.social_warmth > 30 && state->boredom > 0) {
+		state->boredom -= 1;
+	}
 }
 
 static void apply_tick_60s(struct pet_state *state, int64_t now_ms)
@@ -341,11 +553,11 @@ static void apply_tick_60s(struct pet_state *state, int64_t now_ms)
 
 	if (state->current_mode == PET_MODE_WALK_AWAKE) {
 		state->boredom -= 1;
-	} else if (no_real_interaction_ms >= (5 * 60 * MSEC_PER_SEC)) {
+	} else if (no_real_interaction_ms >= (5LL * 60 * MSEC_PER_SEC)) {
 		state->boredom += 1;
 	}
 
-	if (state->walking_active && (no_real_interaction_ms >= (2 * 60 * MSEC_PER_SEC))) {
+	if (state->walking_active && (no_real_interaction_ms >= (2LL * 60 * MSEC_PER_SEC))) {
 		state->walking_active = false;
 	}
 
@@ -366,6 +578,8 @@ static void apply_tick_60s(struct pet_state *state, int64_t now_ms)
 		apply_30min_drift(state, now_ms);
 	}
 }
+
+/* ── Event classification helpers ────────────────────────────────── */
 
 static bool event_is_real_interaction(enum app_event_type type, const struct pet_state *state)
 {
@@ -394,175 +608,346 @@ static bool in_hand_motion_context_recent(const struct pet_state *state, int64_t
 		(state->in_hand_confidence >= 30U));
 }
 
-static void apply_event_deltas(struct pet_state *state, const struct app_event *event)
+/* ── Event interpretation + application ──────────────────────────── *
+ *
+ * Each event handler:
+ *   1. Reads current emotional context (local const bools)
+ *   2. Updates afterglow context (stimulation / comfort / social_warmth)
+ *   3. Applies BASE stat deltas (close to original tuning)
+ *   4. Applies CONTEXTUAL modifiers (small adjustments based on how
+ *      the pet already feels)
+ *   5. Triggers the most appropriate micro-reaction for the context
+ */
+
+static void apply_event(struct pet_state *state, const struct app_event *event)
 {
+	const int64_t now = event->timestamp_ms;
 	int steps;
 
 	switch (event->type) {
+
+	/* ── Tick events ─────────────────────────────────────────────── */
+
 	case APP_EVENT_TICK_100MS:
-		micro_reaction_tick_100ms(event->timestamp_ms);
-		state->current_reaction = micro_reaction_get_active(event->timestamp_ms);
+		micro_reaction_tick_100ms(now);
+		state->current_reaction = micro_reaction_get_active(now);
 		break;
 
 	case APP_EVENT_TICK_1S:
-		apply_tick_1s(state, event->timestamp_ms);
+		apply_tick_1s(state, now);
 		break;
 
 	case APP_EVENT_TICK_10S:
-		apply_tick_10s(state, event->timestamp_ms);
+		apply_tick_10s(state, now);
 		break;
 
 	case APP_EVENT_TICK_60S:
-		apply_tick_60s(state, event->timestamp_ms);
+		apply_tick_60s(state, now);
 		break;
 
-	case APP_EVENT_USER_TAP:
+	/* ── Touch events ────────────────────────────────────────────── */
+
+	case APP_EVENT_USER_TAP: {
+		const bool drowsy = state->sleepiness > 60;
+		const bool lonely = state->boredom > 50;
+
+		g_runtime.ctx.stimulation += 5;
+		g_runtime.ctx.comfort += 3;
+
 		state->arousal += 2;
-		state->curiosity += 2;
 		state->boredom -= 1;
-		trigger_reaction(state, REACTION_BLINK, event->timestamp_ms);
-		break;
 
-	case APP_EVENT_USER_PET_SOFT:
+		if (drowsy) {
+			/* Reluctant wake — the pet was resting */
+			state->sleepiness -= 3;
+			state->curiosity += 1;
+			trigger_reaction(state, REACTION_WAKE_BLINK, now);
+		} else if (lonely) {
+			/* Happy to get attention */
+			state->curiosity += 3;
+			state->attachment += 2;
+			trigger_reaction(state, REACTION_BLINK, now);
+		} else {
+			state->curiosity += 2;
+			trigger_reaction(state, REACTION_BLINK, now);
+		}
+		break;
+	}
+
+	case APP_EVENT_USER_PET_SOFT: {
+		const bool drowsy = state->sleepiness > 60;
+		const bool stressed = state->stress > 40;
+		const bool buzzing = g_runtime.ctx.stimulation > 55;
+		const bool warm = g_runtime.ctx.comfort > 40;
+
+		g_runtime.ctx.comfort += 20;
+		g_runtime.ctx.stimulation += 6;
+		state->last_pet_timestamp_ms = now;
+
+		/* Base warmth and trust (preserved from original) */
 		state->attachment += 8;
 		state->trust += 6;
 		state->stress -= 7;
 		state->boredom -= 5;
-		state->sleepiness -= 2;
-		state->arousal += 3;
-		state->curiosity += 1;
-		state->last_pet_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_PET_BOW, event->timestamp_ms);
-		break;
 
-	case APP_EVENT_USER_PET_LONG:
+		/* Contextual modulation */
+		if (drowsy) {
+			/* Soothing: pet settles into coziness */
+			state->sleepiness += 2;
+			state->stress -= 4;
+			state->trust += 3;
+			state->arousal -= 1;
+		} else if (stressed) {
+			/* Relief: drawing comfort from touch */
+			state->stress -= 5;
+			state->trust += 3;
+			state->arousal -= 1;
+		} else if (buzzing) {
+			/* Overstimulated: nice but diminishing returns */
+			state->attachment -= 3;
+			state->arousal += 1;
+		} else {
+			/* Normal happy petting */
+			state->sleepiness -= 2;
+			state->arousal += 3;
+			state->curiosity += 1;
+		}
+
+		/* Contextual reaction: already warm -> happy bounce */
+		if (warm && !stressed) {
+			trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
+		} else {
+			trigger_reaction(state, REACTION_PET_BOW, now);
+		}
+		break;
+	}
+
+	case APP_EVENT_USER_PET_LONG: {
+		const bool drowsy = state->sleepiness > 60;
+		const bool stressed = state->stress > 40;
+
+		g_runtime.ctx.comfort += 25;
+		g_runtime.ctx.stimulation += 5;
+		state->last_pet_timestamp_ms = now;
+
 		state->attachment += 10;
 		state->trust += 4;
 		state->stress -= 6;
 		state->boredom -= 4;
-		state->sleepiness -= 3;
-		state->arousal += 2;
-		state->last_pet_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_PET_BOW, event->timestamp_ms);
-		break;
 
-	case APP_EVENT_USER_HOLD:
+		if (drowsy) {
+			/* Deep cozy — long petting while drowsy */
+			state->sleepiness += 4;
+			state->stress -= 5;
+			state->trust += 4;
+			state->arousal -= 2;
+		} else if (stressed) {
+			state->stress -= 6;
+			state->trust += 4;
+		} else {
+			state->sleepiness -= 3;
+			state->arousal += 2;
+		}
+
+		trigger_reaction(state, REACTION_PET_BOW, now);
+		break;
+	}
+
+	case APP_EVENT_USER_HOLD: {
+		g_runtime.ctx.comfort += 15;
+		g_runtime.ctx.stimulation += 3;
+		state->last_pet_timestamp_ms = now;
+
 		state->attachment += 4;
 		state->trust += 3;
 		state->stress -= 2;
 		state->boredom -= 2;
-		state->last_pet_timestamp_ms = event->timestamp_ms;
-		break;
 
-	case APP_EVENT_SHAKE_LIGHT:
+		/* Holding feels secure when anxious */
+		if (state->stress > 30) {
+			state->stress -= 2;
+			state->trust += 2;
+		}
+		break;
+	}
+
+	/* ── Motion events ───────────────────────────────────────────── */
+
+	case APP_EVENT_SHAKE_LIGHT: {
+		const bool sleepy = state->sleepiness > 60;
+
+		g_runtime.ctx.stimulation += 10;
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
+
 		state->arousal += 5;
 		state->curiosity += 3;
 		state->sleepiness -= 4;
 		state->stress += 1;
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		if (!in_hand_motion_context_recent(state, event->timestamp_ms)) {
-			if (state->sleepiness > 60) {
-				trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
+
+		if (!in_hand_motion_context_recent(state, now)) {
+			if (sleepy) {
+				trigger_reaction(state, REACTION_WAKE_BLINK, now);
 			} else if (state->arousal <= 50) {
-				trigger_reaction(state, REACTION_GLANCE_LEFT, event->timestamp_ms);
+				trigger_reaction(state, REACTION_GLANCE_LEFT, now);
 			}
 		}
 		break;
+	}
 
-	case APP_EVENT_SHAKE_PLAY:
+	case APP_EVENT_SHAKE_PLAY: {
+		const bool sleepy = state->sleepiness > 60;
+		const bool stressed_already = state->stress > 50;
+		const bool playful = g_runtime.intent == PET_INTENT_PLAY ||
+				     state->arousal > 45;
+
+		g_runtime.ctx.stimulation += 15;
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
+
 		state->arousal += 7;
 		state->curiosity += 5;
 		state->boredom -= 4;
 		state->sleepiness -= 6;
 		state->stress += (state->trust >= 40) ? 1 : 4;
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		if (!in_hand_motion_context_recent(state, event->timestamp_ms)) {
-			if (state->sleepiness > 60) {
-				trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
-			} else if (state->stress > 50) {
-				trigger_reaction(state, REACTION_STARTLE, event->timestamp_ms);
+
+		/* Playful + trusting: this is fun! */
+		if (playful && state->trust > 40) {
+			state->boredom -= 3;
+			state->attachment += 1;
+		} else if (stressed_already) {
+			state->stress += 3;
+		}
+
+		if (!in_hand_motion_context_recent(state, now)) {
+			if (sleepy) {
+				trigger_reaction(state, REACTION_WAKE_BLINK, now);
+			} else if (stressed_already) {
+				trigger_reaction(state, REACTION_STARTLE, now);
 			} else {
-				trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
+				trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
 			}
 		}
 		break;
+	}
 
-	case APP_EVENT_SHAKE_ROUGH:
-		state->stress += 10;
-		state->trust -= 4;
-		state->attachment -= 2;
-		state->arousal += 8;
-		state->sleepiness -= 8;
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		state->last_rough_event_timestamp_ms = event->timestamp_ms;
+	case APP_EVENT_SHAKE_ROUGH: {
+		g_runtime.ctx.stimulation += 25;
+		g_runtime.ctx.comfort -= 10;
+
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
+		state->last_rough_event_timestamp_ms = now;
 		state->pickup_confidence = (uint8_t)MAX(0, (int)state->pickup_confidence - 20);
 		state->in_hand_confidence = (uint8_t)MAX(0, (int)state->in_hand_confidence - 25);
 		state->walking_active = false;
-		trigger_reaction(state, REACTION_STARTLE, event->timestamp_ms);
-		break;
 
-	case APP_EVENT_IMPACT:
+		state->arousal += 8;
+		state->sleepiness -= 8;
+
+		/* Trust-dependent damage: familiar handler vs stranger */
+		if (state->trust >= 50) {
+			state->stress += 7;
+			state->trust -= 2;
+			state->attachment -= 1;
+		} else {
+			state->stress += 13;
+			state->trust -= 6;
+			state->attachment -= 3;
+		}
+
+		trigger_reaction(state, REACTION_STARTLE, now);
+		break;
+	}
+
+	case APP_EVENT_IMPACT: {
+		g_runtime.ctx.stimulation += 20;
+		g_runtime.ctx.comfort -= 5;
+
 		state->stress += 8;
 		state->trust -= 1;
 		state->arousal += 8;
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		state->last_rough_event_timestamp_ms = event->timestamp_ms;
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
+		state->last_rough_event_timestamp_ms = now;
 		state->pickup_confidence = (uint8_t)MAX(0, (int)state->pickup_confidence - 15);
 		state->in_hand_confidence = (uint8_t)MAX(0, (int)state->in_hand_confidence - 20);
 		state->walking_active = false;
-		trigger_reaction(state, REACTION_STARTLE, event->timestamp_ms);
-		break;
 
-	case APP_EVENT_MOTION_WAKE:
+		/* Recent comfort buffers trust damage */
+		if (g_runtime.ctx.comfort > 30) {
+			state->trust += 1;
+		}
+
+		trigger_reaction(state, REACTION_STARTLE, now);
+		break;
+	}
+
+	case APP_EVENT_MOTION_WAKE: {
+		g_runtime.ctx.stimulation += 5;
+
 		state->arousal += 2;
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		if (!in_hand_motion_context_recent(state, event->timestamp_ms) &&
-		    ((event->timestamp_ms - state->last_motion_wake_reaction_ms) >= 4000LL)) {
-			trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
-			state->last_motion_wake_reaction_ms = event->timestamp_ms;
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
+		if (!in_hand_motion_context_recent(state, now) &&
+		    ((now - state->last_motion_wake_reaction_ms) >= 4000LL)) {
+			trigger_reaction(state, REACTION_WAKE_BLINK, now);
+			state->last_motion_wake_reaction_ms = now;
 		}
 		break;
+	}
 
-	case APP_EVENT_WALKING_START:
+	case APP_EVENT_WALKING_START: {
+		const bool was_bored = state->boredom > 40;
+
+		g_runtime.ctx.stimulation += 8;
+
 		state->walk_confidence = (uint8_t)MAX(state->walk_confidence, 80);
 		state->walking_confidence = (uint8_t)MAX(state->walking_confidence, 80);
 		state->walking_active = true;
-		state->walking_session_start_ms = event->timestamp_ms;
-		state->last_walk_timestamp_ms = event->timestamp_ms;
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_LOOK_UP, event->timestamp_ms);
+		state->walking_session_start_ms = now;
+		state->last_walk_timestamp_ms = now;
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
+
+		/* Starting a walk while bored: extra curiosity boost */
+		if (was_bored) {
+			state->curiosity += 4;
+			state->boredom -= 3;
+		}
+
+		trigger_reaction(state, REACTION_LOOK_UP, now);
 		break;
+	}
 
 	case APP_EVENT_WALKING_STOP:
 		state->walking_confidence = (uint8_t)MAX(0, event->param);
 		state->walk_confidence = state->walking_confidence;
 		state->walking_active = false;
-		state->last_walk_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+		state->last_walk_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
 		break;
 
-	case APP_EVENT_STEP_BATCH:
-		steps = MAX(event->param, 0);
-		{
-			/* Diminishing boredom reduction: first 500 steps of day are most impactful. */
-			int boredom_factor = (state->step_count_today < 500U) ? 3 :
-					     (state->step_count_today < 2000U) ? 2 : 1;
-			/* Curiosity: more impactful early in a walk session. */
-			int curiosity_add = (state->walking_session_start_ms > 0LL &&
-				(event->timestamp_ms - state->walking_session_start_ms) <
-					(120 * MSEC_PER_SEC))
-				? MIN(steps, 4) : 1;
+	case APP_EVENT_STEP_BATCH: {
+		int boredom_factor;
+		int curiosity_add;
 
-			state->boredom -= MIN((steps * boredom_factor / 2), 8);
-			state->curiosity += curiosity_add;
-		}
+		g_runtime.ctx.stimulation += 2;
+
+		steps = MAX(event->param, 0);
+
+		/* Diminishing boredom reduction: first 500 steps most impactful */
+		boredom_factor = (state->step_count_today < 500U) ? 3 :
+				 (state->step_count_today < 2000U) ? 2 : 1;
+		/* Curiosity: more impactful early in walk */
+		curiosity_add = (state->walking_session_start_ms > 0LL &&
+			(now - state->walking_session_start_ms) < (120LL * MSEC_PER_SEC))
+			? MIN(steps, 4) : 1;
+
+		state->boredom -= MIN((steps * boredom_factor / 2), 8);
+		state->curiosity += curiosity_add;
 		state->sleepiness -= 2;
+
 		if (state->walking_active || (effective_walking_confidence(state) >= 60U)) {
 			state->walking_active = true;
 		}
@@ -572,9 +957,9 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		if (steps > 0) {
 			state->step_count_today += (uint32_t)steps;
 			state->total_steps_since_boot += (uint32_t)steps;
-			state->last_motion_timestamp_ms = event->timestamp_ms;
-			state->last_walk_timestamp_ms = event->timestamp_ms;
-			state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+			state->last_motion_timestamp_ms = now;
+			state->last_walk_timestamp_ms = now;
+			state->last_motion_sample_timestamp_ms = now;
 			if (event->payload.step_batch.from_hw_counter) {
 				state->last_hw_step_counter = event->payload.step_batch.hw_counter;
 			}
@@ -584,40 +969,49 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 			state->walking_confidence = state->walk_confidence;
 			state->walking_active = state->walking_confidence >= 70U;
 			if (state->walking_active && (state->walking_session_start_ms == 0LL)) {
-				state->walking_session_start_ms = event->timestamp_ms;
+				state->walking_session_start_ms = now;
 			}
 		}
 		break;
+	}
 
 	case APP_EVENT_PICKUP_CANDIDATE:
+		g_runtime.ctx.stimulation += 5;
 		state->pickup_confidence = (uint8_t)MAX(state->pickup_confidence,
 						      (uint8_t)MAX(event->param, 0));
 		state->picked_up_recently = true;
-		state->last_pickup_timestamp_ms = event->timestamp_ms;
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+		state->last_pickup_timestamp_ms = now;
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
 		break;
 
-	case APP_EVENT_PICKED_UP:
+	case APP_EVENT_PICKED_UP: {
+		g_runtime.ctx.stimulation += 8;
+		g_runtime.ctx.comfort += 5;
+
 		state->pickup_confidence = (uint8_t)MAX(state->pickup_confidence,
 						      (uint8_t)MAX(event->param, 0));
 		state->picked_up_recently = true;
-		state->last_pickup_timestamp_ms = event->timestamp_ms;
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+		state->last_pickup_timestamp_ms = now;
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
 		state->arousal += 2;
 		state->curiosity += 2;
 		state->attachment += 2;
 		break;
+	}
 
 	case APP_EVENT_IN_HAND_ENTER:
+		g_runtime.ctx.stimulation += 5;
+		g_runtime.ctx.comfort += 8;
+
 		state->in_hand = true;
 		state->picked_up_recently = true;
 		state->in_hand_confidence = (uint8_t)MAX(state->in_hand_confidence,
 							(uint8_t)MAX(event->param, 0));
-		state->last_in_hand_timestamp_ms = event->timestamp_ms;
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+		state->last_in_hand_timestamp_ms = now;
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
 		state->sleepiness -= 1;
 		state->curiosity += 2;
 		state->attachment += 2;
@@ -627,56 +1021,112 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->in_hand = false;
 		state->in_hand_confidence = (uint8_t)MIN(state->in_hand_confidence,
 							(uint8_t)MAX(0, 100 - MAX(event->param, 0)));
-		state->last_motion_timestamp_ms = event->timestamp_ms;
-		state->last_motion_sample_timestamp_ms = event->timestamp_ms;
+		state->last_motion_timestamp_ms = now;
+		state->last_motion_sample_timestamp_ms = now;
 		break;
 
 	case APP_EVENT_FLIP_FACE_DOWN:
+		g_runtime.ctx.stimulation += 3;
 		state->sleepiness += 2;
-		trigger_reaction(state, REACTION_LOOK_DOWN, event->timestamp_ms);
+		trigger_reaction(state, REACTION_LOOK_DOWN, now);
 		break;
 
-	case APP_EVENT_PHONE_NOTIFICATION_SINGLE:
+	/* ── Phone / notification events ─────────────────────────────── */
+
+	case APP_EVENT_PHONE_NOTIFICATION_SINGLE: {
+		const bool bored = state->boredom > 40;
+		const bool stressed = state->stress > 45;
+
+		g_runtime.ctx.stimulation += 8;
+		g_runtime.ctx.social_warmth += 5;
+		state->last_phone_event_timestamp_ms = now;
+
 		state->social_load += 5;
 		state->curiosity += 6;
 		state->arousal += 4;
 		state->boredom -= 2;
-		state->last_phone_event_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_NOTIF_PING, event->timestamp_ms);
-		break;
 
-	case APP_EVENT_PHONE_NOTIFICATION_BURST:
+		if (bored) {
+			/* Welcome distraction */
+			state->curiosity += 3;
+			state->boredom -= 2;
+		} else if (stressed) {
+			/* Another thing to deal with */
+			state->stress += 2;
+			state->curiosity -= 2;
+		}
+
+		trigger_reaction(state, REACTION_NOTIF_PING, now);
+		break;
+	}
+
+	case APP_EVENT_PHONE_NOTIFICATION_BURST: {
+		const bool already_loaded = state->social_load > 50 ||
+					    g_runtime.ctx.stimulation > 40;
+
+		g_runtime.ctx.stimulation += 18;
+		g_runtime.ctx.social_warmth += 8;
+		state->last_phone_event_timestamp_ms = now;
+
 		state->social_load += 15;
-		state->stress += 8;
 		state->arousal += 8;
 		state->boredom -= 6;
-		state->notification_burst_level = (uint8_t)MIN(100, state->notification_burst_level + 1);
-		state->last_phone_event_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_NOTIF_BURST, event->timestamp_ms);
-		break;
+		state->notification_burst_level =
+			(uint8_t)MIN(100, state->notification_burst_level + 1);
 
-	case APP_EVENT_PHONE_CONNECTED:
+		if (already_loaded) {
+			/* Overload: this is too much */
+			state->stress += 12;
+			state->curiosity -= 2;
+		} else {
+			/* First burst: stressful but manageable */
+			state->stress += 8;
+			state->curiosity += 2;
+		}
+
+		trigger_reaction(state, REACTION_NOTIF_BURST, now);
+		break;
+	}
+
+	case APP_EVENT_PHONE_CONNECTED: {
+		g_runtime.ctx.stimulation += 6;
+		g_runtime.ctx.social_warmth += 10;
+
 		state->ble_connected = true;
 		state->curiosity += 3;
 		state->social_load += 2;
 		state->boredom -= 1;
-		state->last_phone_event_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_CONNECT_SPARK, event->timestamp_ms);
+		state->last_phone_event_timestamp_ms = now;
+
+		/* Reconnecting when lonely is a relief */
+		if (state->boredom > 40) {
+			state->boredom -= 3;
+			state->attachment += 2;
+		}
+
+		trigger_reaction(state, REACTION_CONNECT_SPARK, now);
 		break;
+	}
 
 	case APP_EVENT_PHONE_DISCONNECTED:
+		g_runtime.ctx.stimulation += 5;
+		g_runtime.ctx.social_warmth -= 5;
+
 		state->ble_connected = false;
 		state->boredom += 3;
 		state->curiosity += 1;
-		state->last_phone_event_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_DISCONNECT_SCAN, event->timestamp_ms);
+		state->last_phone_event_timestamp_ms = now;
+		trigger_reaction(state, REACTION_DISCONNECT_SCAN, now);
 		break;
 
 	case APP_EVENT_APP_SESSION_START:
+		g_runtime.ctx.stimulation += 5;
+		g_runtime.ctx.social_warmth += 8;
+
 		state->app_session_active = true;
 		state->curiosity += 4;
 		state->trust += 2;
-		trigger_reaction(state, REACTION_CONNECT_SPARK, event->timestamp_ms);
+		trigger_reaction(state, REACTION_CONNECT_SPARK, now);
 		break;
 
 	case APP_EVENT_APP_SESSION_END:
@@ -685,21 +1135,26 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 
 	case APP_EVENT_TIME_SYNC:
 		state->time_valid = true;
-		state->uptime_at_sync_ms = event->timestamp_ms;
+		state->uptime_at_sync_ms = now;
 		if ((event->param >= -840) && (event->param <= 840)) {
 			state->tz_offset_minutes = (int16_t)event->param;
 		} else if (event->param >= 946684800) {
 			state->unix_time_at_sync = event->param;
 		}
-		sync_daily_step_counter(state, event->timestamp_ms);
+		sync_daily_step_counter(state, now);
 		break;
 
+	/* ── Power events ────────────────────────────────────────────── */
+
 	case APP_EVENT_CHARGER_CONNECTED:
+		g_runtime.ctx.stimulation += 3;
+		g_runtime.ctx.comfort += 8;
+
 		state->charging = true;
 		state->stress -= 4;
 		state->sleepiness += 2;
 		state->curiosity -= 1;
-		trigger_reaction(state, REACTION_CHARGE_PULSE, event->timestamp_ms);
+		trigger_reaction(state, REACTION_CHARGE_PULSE, now);
 		break;
 
 	case APP_EVENT_CHARGER_DISCONNECTED:
@@ -711,7 +1166,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->battery_low = true;
 		state->stress += 5;
 		state->sleepiness += 4;
-		trigger_reaction(state, REACTION_LOW_BATT_SAG, event->timestamp_ms);
+		trigger_reaction(state, REACTION_LOW_BATT_SAG, now);
 		break;
 
 	case APP_EVENT_BATTERY_CRITICAL:
@@ -722,6 +1177,173 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->sleepiness += 8;
 		break;
 
+	/* ── Social / peer events ────────────────────────────────────── */
+
+	case APP_EVENT_PEER_SEEN:
+		state->curiosity += 2;
+		break;
+
+	case APP_EVENT_PEER_CHECKING:
+		show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_QUESTION,
+				      now, 1500);
+		break;
+
+	case APP_EVENT_PEER_NEAR: {
+		const bool is_friend = event->payload.peer.is_friend;
+
+		state->peer_nearby = true;
+		state->current_active_peer_id = event->payload.peer.ephemeral_id;
+		state->peer_known_friend = is_friend;
+		state->social_load += 1;
+
+		if (is_friend) {
+			g_runtime.ctx.social_warmth += 25;
+			g_runtime.ctx.comfort += 10;
+			state->curiosity += 5;
+			state->attachment += 2;
+		} else {
+			g_runtime.ctx.social_warmth += 15;
+			g_runtime.ctx.stimulation += 5;
+			state->curiosity += 6;
+		}
+
+		show_social_indicator(state,
+				      is_friend ? KERFUR_FACE_INDICATOR_ICON_HEART_FILLED
+					       : KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+				      now, 10 * MSEC_PER_SEC);
+
+		if (!state->social_overload &&
+		    ((now - state->last_social_glance_ms) >= (4 * MSEC_PER_SEC))) {
+			state->last_social_glance_ms = now;
+			trigger_reaction(state, REACTION_GLANCE_LEFT, now);
+		}
+		break;
+	}
+
+	case APP_EVENT_PEER_LOST:
+		g_runtime.ctx.social_warmth -= 10;
+
+		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
+			state->peer_nearby = false;
+			state->peer_known_friend = false;
+			state->current_active_peer_id = 0U;
+		}
+		if (state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE ||
+		    state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_FILLED) {
+			state->social_indicator = 0;
+			state->social_indicator_until_ms = 0;
+		}
+		break;
+
+	case APP_EVENT_ENCOUNTER_START: {
+		const bool is_friend = event->payload.peer.is_friend;
+
+		state->peer_nearby = true;
+		state->current_active_peer_id = event->payload.peer.ephemeral_id;
+		state->peer_known_friend = is_friend;
+
+		if (is_friend) {
+			g_runtime.ctx.social_warmth += 30;
+			g_runtime.ctx.comfort += 15;
+			g_runtime.ctx.stimulation += 8;
+
+			state->attachment += 6;
+			state->trust += 3;
+			state->stress -= 2;
+
+			/* Reuniting when bored is extra warm */
+			if (state->boredom > 40) {
+				state->boredom -= 8;
+				state->attachment += 3;
+			}
+
+			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_FILLED,
+					      now, 3000);
+			trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
+		} else {
+			g_runtime.ctx.social_warmth += 20;
+			g_runtime.ctx.stimulation += 10;
+
+			state->curiosity += 6;
+			state->attachment += 2;
+
+			/* Observing intent amplifies curiosity */
+			if (g_runtime.intent == PET_INTENT_OBSERVE) {
+				state->curiosity += 3;
+			}
+
+			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+					      now, 3000);
+			trigger_reaction(state, REACTION_PET_BOW, now);
+		}
+		state->encounter_sync_pending = true;
+		break;
+	}
+
+	case APP_EVENT_ENCOUNTER_END:
+		g_runtime.ctx.social_warmth -= 15;
+
+		if (event->payload.peer.duration_s >= 30) {
+			state->boredom += 4;
+		}
+		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
+			state->peer_nearby = false;
+			state->peer_known_friend = false;
+			state->current_active_peer_id = 0U;
+		}
+		state->social_indicator = 0;
+		state->social_indicator_until_ms = 0;
+		trigger_reaction(state, REACTION_GLANCE_RIGHT, now);
+		break;
+
+	case APP_EVENT_PEER_PLAY_INVITE:
+		g_runtime.ctx.stimulation += 10;
+		g_runtime.ctx.social_warmth += 12;
+
+		state->arousal += 8;
+		state->boredom -= 4;
+		state->curiosity += 2;
+		show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+				      now, 2500);
+		trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
+		break;
+
+	case APP_EVENT_PEER_PLAY_ACK:
+		g_runtime.ctx.stimulation += 8;
+		g_runtime.ctx.social_warmth += 10;
+
+		state->arousal += 6;
+		state->boredom -= 3;
+		state->attachment += 2;
+		trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
+		break;
+
+	/* ── System / lifecycle events ───────────────────────────────── */
+
+	case APP_EVENT_WAKE:
+		g_runtime.ctx.stimulation += 10;
+
+		state->sleepiness -= 8;
+		state->arousal += 5;
+		trigger_reaction(state, REACTION_WAKE_BLINK, now);
+		break;
+
+	case APP_EVENT_SLEEP_REQUEST:
+		state->arousal -= 6;
+		trigger_reaction(state, REACTION_SLEEP_FADE, now);
+		break;
+
+	case APP_EVENT_SELF_WAKE_TIMER:
+		g_runtime.ctx.stimulation += 3;
+
+		state->arousal += 1;
+		state->curiosity += 1;
+		state->last_self_wake_timestamp_ms = now;
+		trigger_reaction(state, REACTION_GLANCE_LEFT, now);
+		break;
+
+	/* ── Sensor / look / carry pass-through ──────────────────────── */
+
 	case APP_EVENT_LOOK_TARGET_UPDATE:
 		state->look_target_x = event->payload.look_target.x;
 		state->look_target_y = event->payload.look_target.y;
@@ -730,7 +1352,8 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->look_render_y = state->look_target_y;
 		if (IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG_VERBOSE)) {
 			LOG_INF("Face look target -> x=%d y=%d conf=%u",
-				state->look_target_x, state->look_target_y, state->look_confidence);
+				state->look_target_x, state->look_target_y,
+				state->look_confidence);
 		}
 		break;
 
@@ -764,6 +1387,8 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		}
 		break;
 
+	/* ── Debug / override events ─────────────────────────────────── */
+
 	case APP_EVENT_FACE_FORCE_EXPRESSION:
 		if ((event->param < PET_EXPR_CALM) || (event->param >= PET_EXPR_COUNT)) {
 			LOG_WRN("Ignoring invalid forced expression id=%d", event->param);
@@ -774,9 +1399,10 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		g_runtime.forced_expression_active = true;
 		if (state->current_expression != g_runtime.forced_expression) {
 			state->current_expression = g_runtime.forced_expression;
-			state->last_expression_change_timestamp_ms = event->timestamp_ms;
+			state->last_expression_change_timestamp_ms = now;
 		}
-		LOG_INF("Forced expression -> %s", pet_expression_str(g_runtime.forced_expression));
+		LOG_INF("Forced expression -> %s",
+			pet_expression_str(g_runtime.forced_expression));
 		break;
 
 	case APP_EVENT_FACE_CLEAR_FORCED_EXPRESSION:
@@ -790,7 +1416,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 			break;
 		}
 
-		trigger_reaction(state, (enum micro_reaction_type)event->param, event->timestamp_ms);
+		trigger_reaction(state, (enum micro_reaction_type)event->param, now);
 		LOG_INF("Triggered reaction -> %s",
 			micro_reaction_str((enum micro_reaction_type)event->param));
 		break;
@@ -805,129 +1431,18 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 			state->dynamic_pupils_forced_disabled ? "disabled" : "enabled");
 		break;
 
-	case APP_EVENT_WAKE:
-		state->sleepiness -= 8;
-		state->arousal += 5;
-		trigger_reaction(state, REACTION_WAKE_BLINK, event->timestamp_ms);
-		break;
-
-	case APP_EVENT_SLEEP_REQUEST:
-		state->arousal -= 6;
-		trigger_reaction(state, REACTION_SLEEP_FADE, event->timestamp_ms);
-		break;
-
-	case APP_EVENT_SELF_WAKE_TIMER:
-		state->arousal += 1;
-		state->curiosity += 1;
-		state->last_self_wake_timestamp_ms = event->timestamp_ms;
-		trigger_reaction(state, REACTION_GLANCE_LEFT, event->timestamp_ms);
-		break;
-
-	case APP_EVENT_PEER_SEEN:
-		state->curiosity += 2;
-		break;
-
-	case APP_EVENT_PEER_CHECKING:
-		/* Briefly indicate "I think I see another Kerfur" while we
-		 * still need more samples to be sure. */
-		show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_QUESTION,
-				      event->timestamp_ms, 1500);
-		break;
-
-	case APP_EVENT_PEER_NEAR:
-		state->peer_nearby = true;
-		state->current_active_peer_id = event->payload.peer.ephemeral_id;
-		state->peer_known_friend = event->payload.peer.is_friend;
-		state->curiosity += 5;
-		state->social_load += 1;
-		/* Show the heart immediately while a peer is in range; the
-		 * apply_tick_1s() refresh keeps it alive until PEER_LOST. */
-		show_social_indicator(state,
-				      event->payload.peer.is_friend ?
-					      KERFUR_FACE_INDICATOR_ICON_HEART_FILLED :
-					      KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
-				      event->timestamp_ms,
-				      10 * MSEC_PER_SEC);
-		if (!state->social_overload &&
-		    ((event->timestamp_ms - state->last_social_glance_ms) >= (4 * MSEC_PER_SEC))) {
-			state->last_social_glance_ms = event->timestamp_ms;
-			trigger_reaction(state, REACTION_GLANCE_LEFT, event->timestamp_ms);
-		}
-		break;
-
-	case APP_EVENT_PEER_LOST:
-		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
-			state->peer_nearby = false;
-			state->peer_known_friend = false;
-			state->current_active_peer_id = 0U;
-		}
-		if (state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE ||
-		    state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_FILLED) {
-			state->social_indicator = 0;
-			state->social_indicator_until_ms = 0;
-		}
-		break;
-
-	case APP_EVENT_ENCOUNTER_START:
-		state->peer_nearby = true;
-		state->current_active_peer_id = event->payload.peer.ephemeral_id;
-		state->peer_known_friend = event->payload.peer.is_friend;
-		if (event->payload.peer.is_friend) {
-			state->attachment += 6;
-			state->trust += 3;
-			state->stress -= 2;
-			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_FILLED,
-					      event->timestamp_ms, 3000);
-			trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
-		} else {
-			state->curiosity += 6;
-			state->attachment += 2;
-			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
-					      event->timestamp_ms, 3000);
-			trigger_reaction(state, REACTION_PET_BOW, event->timestamp_ms);
-		}
-		state->encounter_sync_pending = true;
-		break;
-
-	case APP_EVENT_ENCOUNTER_END:
-		if (event->payload.peer.duration_s >= 30) {
-			state->boredom += 4;
-		}
-		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
-			state->peer_nearby = false;
-			state->peer_known_friend = false;
-			state->current_active_peer_id = 0U;
-		}
-		state->social_indicator = 0;
-		state->social_indicator_until_ms = 0;
-		trigger_reaction(state, REACTION_GLANCE_RIGHT, event->timestamp_ms);
-		break;
-
-	case APP_EVENT_PEER_PLAY_INVITE:
-		state->arousal += 8;
-		state->boredom -= 4;
-		state->curiosity += 2;
-		show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
-				      event->timestamp_ms, 2500);
-		trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
-		break;
-
-	case APP_EVENT_PEER_PLAY_ACK:
-		state->arousal += 6;
-		state->boredom -= 3;
-		state->attachment += 2;
-		trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
-		break;
-
 	default:
 		break;
 	}
 
-	sync_daily_step_counter(state, event->timestamp_ms);
+	/* Common post-processing */
+	sync_daily_step_counter(state, now);
 	if (event_is_real_interaction(event->type, state)) {
-		mark_real_interaction(state, event->timestamp_ms);
+		mark_real_interaction(state, now);
 	}
 }
+
+/* ── Mode resolution ─────────────────────────────────────────────── */
 
 static void update_mode(struct pet_state *state, int64_t now_ms)
 {
@@ -937,11 +1452,24 @@ static void update_mode(struct pet_state *state, int64_t now_ms)
 	const int64_t self_wake_recent_ms = now_ms - state->last_self_wake_timestamp_ms;
 	enum pet_mode mode = PET_MODE_IDLE;
 
+	/* Intent-adjusted thresholds:
+	 * REST intent → drowsy sooner.  WITHDRAW intent → overload sooner. */
+	int drowsy_threshold = 72;
+	int overload_social_threshold = 80;
+
+	if (g_runtime.intent == PET_INTENT_REST && g_runtime.intent_strength > 20) {
+		drowsy_threshold = 62;
+	}
+	if (g_runtime.intent == PET_INTENT_WITHDRAW && g_runtime.intent_strength > 20) {
+		overload_social_threshold = 65;
+	}
+
 	if (state->charging) {
 		mode = PET_MODE_CHARGING;
 	} else if (state->battery_critical) {
 		mode = (state->sleepiness > 85) ? PET_MODE_ASLEEP : PET_MODE_LOW_POWER;
-	} else if (state->social_load > 80 || state->notification_burst_level > 6) {
+	} else if (state->social_load > overload_social_threshold ||
+		   state->notification_burst_level > 6) {
 		mode = PET_MODE_OVERLOADED;
 	} else if (phone_recent_ms < (30 * MSEC_PER_SEC)) {
 		mode = PET_MODE_TASK_ALERT;
@@ -956,7 +1484,7 @@ static void update_mode(struct pet_state *state, int64_t now_ms)
 	} else if ((state->sleepiness > 88) && (state->arousal < 25) &&
 		   (state->current_display_state == DISPLAY_OFF)) {
 		mode = PET_MODE_ASLEEP;
-	} else if (state->sleepiness > 72) {
+	} else if (state->sleepiness > drowsy_threshold) {
 		mode = PET_MODE_DROWSY;
 	} else if (idle_ms < (45 * MSEC_PER_SEC)) {
 		mode = PET_MODE_INTERACTING;
@@ -967,24 +1495,43 @@ static void update_mode(struct pet_state *state, int64_t now_ms)
 	state->current_mode = mode;
 }
 
+/* ── Expression scoring ──────────────────────────────────────────── *
+ *
+ * Each expression gets:
+ *   base      — original scoring from pet_state variables (preserved)
+ *   ctx_bonus — afterglow context modulation (comfort / stimulation / warmth)
+ *   int_bonus — intent alignment bonus
+ */
+
 static int score_for_expression(enum pet_expression expr, const struct pet_state *state, int64_t now_ms)
 {
-	const bool recent_pet = (now_ms - state->last_pet_timestamp_ms) < (10 * 60 * MSEC_PER_SEC);
+	const bool recent_pet = (now_ms - state->last_pet_timestamp_ms) < (10LL * 60 * MSEC_PER_SEC);
 	const bool fresh_pet = (now_ms - state->last_pet_timestamp_ms) < (8 * MSEC_PER_SEC);
 	const bool recent_motion = (now_ms - state->last_motion_timestamp_ms) < (45 * MSEC_PER_SEC);
 	const bool recent_notif = (now_ms - state->last_phone_event_timestamp_ms) < (30 * MSEC_PER_SEC);
 	const bool rough_recent = (now_ms - state->last_rough_event_timestamp_ms) < (60 * MSEC_PER_SEC);
 	const int64_t no_real_interaction_ms = now_ms - state->last_real_interaction_timestamp_ms;
 	const bool long_disconnect = !state->ble_connected &&
-				     ((now_ms - state->last_phone_event_timestamp_ms) > (30 * 60 * MSEC_PER_SEC));
+				     ((now_ms - state->last_phone_event_timestamp_ms) > (30LL * 60 * MSEC_PER_SEC));
 	const bool night = is_night_time(state, now_ms);
+	int base = 0;
+	int ctx_bonus = 0;
+	int int_bonus = 0;
+	const int16_t is = g_runtime.intent_strength;
+
+	/* ── Base scoring (original logic preserved) ── */
 
 	switch (expr) {
 	case PET_EXPR_CALM:
-		return 60 - state->stress - (state->social_load / 2) - (state->boredom / 4) +
-		       (state->energy / 4);
+		base = 60 - state->stress - (state->social_load / 2) -
+		       (state->boredom / 4) + (state->energy / 4);
+		/* Context: calm benefits from low recent stimulation */
+		if (g_runtime.ctx.stimulation < 15) {
+			ctx_bonus = 5;
+		}
+		break;
+
 	case PET_EXPR_CURIOUS: {
-		/* Walking bonus diminishes over time: full for first 2 min, decays to 4 by 10 min. */
 		int walk_bonus = 0;
 
 		if (state->current_mode == PET_MODE_WALK_AWAKE) {
@@ -998,16 +1545,29 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 				walk_bonus = 4;
 			}
 		}
-		return state->curiosity + (recent_notif ? 16 : 0) + (recent_motion ? 12 : 0) +
-		       walk_bonus +
-		       (state->app_session_active ? 8 : 0) - (state->sleepiness / 3);
+		base = state->curiosity + (recent_notif ? 16 : 0) + (recent_motion ? 12 : 0) +
+		       walk_bonus + (state->app_session_active ? 8 : 0) - (state->sleepiness / 3);
+		/* Context: moderate stimulation feeds curiosity */
+		if (g_runtime.ctx.stimulation > 15 && g_runtime.ctx.stimulation < 55) {
+			ctx_bonus = g_runtime.ctx.stimulation / 7;
+		}
+		break;
 	}
+
 	case PET_EXPR_CONTENT:
-		return (state->attachment / 2) + (state->trust / 2) + (recent_pet ? 16 : 0) -
+		base = (state->attachment / 2) + (state->trust / 2) + (recent_pet ? 16 : 0) -
 		       (state->stress / 2);
+		/* Context: recent comfort boosts contentment */
+		ctx_bonus = g_runtime.ctx.comfort / 5;
+		break;
+
 	case PET_EXPR_HAPPY:
-		return (state->attachment / 2) + (state->energy / 3) + (recent_pet ? 18 : 0) +
+		base = (state->attachment / 2) + (state->energy / 3) + (recent_pet ? 18 : 0) +
 		       (fresh_pet ? 26 : 0) - (state->stress / 2);
+		/* Context: comfort afterglow lingers as happiness */
+		ctx_bonus = g_runtime.ctx.comfort / 5;
+		break;
+
 	case PET_EXPR_PLAYFUL: {
 		int walk_bonus = 0;
 
@@ -1022,39 +1582,131 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 				walk_bonus = 4;
 			}
 		}
-		return state->arousal + (state->trust / 3) +
-		       walk_bonus -
+		base = state->arousal + (state->trust / 3) + walk_bonus -
 		       (state->battery_low ? 20 : 0);
+		/* Context: moderate stimulation supports playfulness */
+		if (g_runtime.ctx.stimulation > 25 && g_runtime.ctx.stimulation < 65) {
+			ctx_bonus = g_runtime.ctx.stimulation / 8;
+		}
+		break;
 	}
+
 	case PET_EXPR_SLEEPY:
-		return state->sleepiness + ((state->arousal < 35) ? 8 : 0) + (night ? 6 : 0) +
-		       ((no_real_interaction_ms > (5 * 60 * MSEC_PER_SEC)) ? 10 : 0);
+		base = state->sleepiness + ((state->arousal < 35) ? 8 : 0) + (night ? 6 : 0) +
+		       ((no_real_interaction_ms > (5LL * 60 * MSEC_PER_SEC)) ? 10 : 0);
+		break;
+
 	case PET_EXPR_NEEDY:
-		return state->boredom + (state->attachment / 4) + (recent_pet ? -10 : 12) +
-		       ((no_real_interaction_ms > (8 * 60 * MSEC_PER_SEC)) ? 10 : 0);
+		base = state->boredom + (state->attachment / 4) + (recent_pet ? -10 : 12) +
+		       ((no_real_interaction_ms > (8LL * 60 * MSEC_PER_SEC)) ? 10 : 0);
+		/* Context: recent social warmth and comfort dampen neediness */
+		ctx_bonus = -(g_runtime.ctx.social_warmth / 4) -
+			    (g_runtime.ctx.comfort / 5);
+		break;
+
 	case PET_EXPR_LONELY:
-		return state->boredom + (long_disconnect ? 20 : 0) + (recent_motion ? -8 : 8) +
-		       ((no_real_interaction_ms > (20 * 60 * MSEC_PER_SEC)) ? 16 : 0);
+		base = state->boredom + (long_disconnect ? 20 : 0) + (recent_motion ? -8 : 8) +
+		       ((no_real_interaction_ms > (20LL * 60 * MSEC_PER_SEC)) ? 16 : 0);
+		/* Context: social warmth and comfort dampen loneliness */
+		ctx_bonus = -(g_runtime.ctx.social_warmth / 4) -
+			    (g_runtime.ctx.comfort / 5);
+		break;
+
 	case PET_EXPR_ANNOYED:
-		return state->stress + (rough_recent ? 24 : 0) + ((state->trust < 40) ? 12 : 0);
+		base = state->stress + (rough_recent ? 24 : 0) + ((state->trust < 40) ? 12 : 0);
+		/* Context: high stimulation feeds annoyance */
+		if (g_runtime.ctx.stimulation > 65) {
+			ctx_bonus = (g_runtime.ctx.stimulation - 45) / 5;
+		}
+		break;
+
 	case PET_EXPR_OVERSTIMULATED:
-		return state->social_load + (state->notification_burst_level * 10) + (state->arousal / 2);
+		base = state->social_load + (state->notification_burst_level * 10) +
+		       (state->arousal / 2);
+		/* Context: recent stimulation overload */
+		if (g_runtime.ctx.stimulation > 55) {
+			ctx_bonus = (g_runtime.ctx.stimulation - 35) / 4;
+		}
+		break;
+
 	case PET_EXPR_COZY:
-		return (state->charging ? 60 : 0) + ((100 - state->stress) / 2) + (recent_pet ? 10 : 0);
+		base = (state->charging ? 60 : 0) + ((100 - state->stress) / 2) +
+		       (recent_pet ? 10 : 0);
+		/* Context: comfort afterglow strongly boosts cozy */
+		ctx_bonus = g_runtime.ctx.comfort / 4;
+		break;
+
 	case PET_EXPR_DRAINED:
-		return (state->battery_critical ? 80 : 0) + (state->battery_low ? 40 : 0) +
+		base = (state->battery_critical ? 80 : 0) + (state->battery_low ? 40 : 0) +
 		       ((100 - state->energy) / 2) + (state->sleepiness / 2);
+		break;
+
 	case PET_EXPR_ASLEEP:
-		return (state->current_mode == PET_MODE_ASLEEP ? 100 : 0) +
+		base = (state->current_mode == PET_MODE_ASLEEP ? 100 : 0) +
 		       (state->current_display_state == DISPLAY_OFF ? 20 : 0);
+		break;
+
 	default:
 		return 0;
 	}
+
+	/* ── Intent alignment bonus ── */
+
+	switch (g_runtime.intent) {
+	case PET_INTENT_REST:
+		if (expr == PET_EXPR_SLEEPY) {
+			int_bonus = is / 6;
+		} else if (expr == PET_EXPR_COZY) {
+			int_bonus = is / 7;
+		} else if (expr == PET_EXPR_CALM) {
+			int_bonus = is / 9;
+		}
+		break;
+	case PET_INTENT_PLAY:
+		if (expr == PET_EXPR_PLAYFUL) {
+			int_bonus = is / 5;
+		} else if (expr == PET_EXPR_HAPPY) {
+			int_bonus = is / 7;
+		}
+		break;
+	case PET_INTENT_OBSERVE:
+		if (expr == PET_EXPR_CURIOUS) {
+			int_bonus = is / 5;
+		} else if (expr == PET_EXPR_CALM) {
+			int_bonus = is / 9;
+		}
+		break;
+	case PET_INTENT_SEEK_ATTENTION:
+		if (expr == PET_EXPR_NEEDY) {
+			int_bonus = is / 6;
+		} else if (expr == PET_EXPR_LONELY) {
+			int_bonus = is / 8;
+		}
+		break;
+	case PET_INTENT_WITHDRAW:
+		if (expr == PET_EXPR_ANNOYED) {
+			int_bonus = is / 6;
+		} else if (expr == PET_EXPR_OVERSTIMULATED) {
+			int_bonus = is / 7;
+		}
+		break;
+	case PET_INTENT_SELF_SOOTHE:
+		if (expr == PET_EXPR_CONTENT) {
+			int_bonus = is / 6;
+		} else if (expr == PET_EXPR_CALM) {
+			int_bonus = is / 7;
+		}
+		break;
+	default:
+		break;
+	}
+
+	return base + ctx_bonus + int_bonus;
 }
 
 /* Emotional adjacency: returns a small score bonus (0..5) for expressions
- * that feel like natural transitions from the current one. This prevents
- * jarring jumps like SLEEPY -> PLAYFUL and encourages gradual progressions. */
+ * that feel like natural transitions from the current one.  Prevents
+ * jarring jumps like SLEEPY → PLAYFUL and encourages gradual progressions. */
 static int transition_affinity(enum pet_expression current, enum pet_expression candidate)
 {
 	switch (current) {
@@ -1169,6 +1821,8 @@ static int transition_affinity(enum pet_expression current, enum pet_expression 
 	return 0;
 }
 
+/* ── Expression resolution ───────────────────────────────────────── */
+
 static void update_expression(struct pet_state *state, int64_t now_ms)
 {
 	int scores[PET_EXPR_COUNT];
@@ -1179,13 +1833,24 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 	int expr;
 	int32_t hold_ms;
 	int margin;
-	const bool pet_recent = (now_ms - state->last_pet_timestamp_ms) < (6 * MSEC_PER_SEC);
 
-	/* Dynamic hold: shorter when arousal is high or just picked up.
-	 * Range: 4s (highly stimulated) to 12s (calm). */
+	/* Context-sensitive petting window: drowsy petting shows COZY
+	 * and lingers a bit longer than the default HAPPY. */
+	const bool drowsy_pet = (state->sleepiness > 60) && (state->arousal < 35);
+	const int32_t pet_window_ms = drowsy_pet ? (8 * MSEC_PER_SEC) : (6 * MSEC_PER_SEC);
+	const bool pet_recent = (now_ms - state->last_pet_timestamp_ms) < pet_window_ms;
+
+	/* Dynamic hold: influenced by intent stability.
+	 *   High arousal / just picked up  → short hold, fast reactions
+	 *   Strong intent                  → long hold, stable leaning
+	 *   Moderate arousal               → medium hold
+	 *   Low arousal                    → long hold, stable calm */
 	if ((state->arousal >= 50) || state->picked_up_recently) {
 		hold_ms = 4 * MSEC_PER_SEC;
 		margin = 4;
+	} else if (g_runtime.intent_strength > 40) {
+		hold_ms = 10 * MSEC_PER_SEC;
+		margin = 10;
 	} else if (state->arousal >= 30) {
 		hold_ms = 7 * MSEC_PER_SEC;
 		margin = 6;
@@ -1194,6 +1859,7 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 		margin = 8;
 	}
 
+	/* Forced expression override */
 	if (g_runtime.forced_expression_active) {
 		if (state->current_expression != g_runtime.forced_expression) {
 			state->current_expression = g_runtime.forced_expression;
@@ -1202,6 +1868,7 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 		return;
 	}
 
+	/* Asleep override */
 	if (state->current_mode == PET_MODE_ASLEEP) {
 		if (state->current_expression != PET_EXPR_ASLEEP) {
 			state->current_expression = PET_EXPR_ASLEEP;
@@ -1210,20 +1877,25 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 		return;
 	}
 
+	/* Recent petting override: contextual expression */
 	if (pet_recent) {
-		if (state->current_expression != PET_EXPR_HAPPY) {
-			state->current_expression = PET_EXPR_HAPPY;
+		enum pet_expression pet_expr = drowsy_pet ? PET_EXPR_COZY : PET_EXPR_HAPPY;
+
+		if (state->current_expression != pet_expr) {
+			state->current_expression = pet_expr;
 			state->last_expression_change_timestamp_ms = now_ms;
 		}
 		return;
 	}
 
+	/* ── Score all expressions ── */
 	curr_expr = state->current_expression;
 
 	for (expr = 0; expr < PET_EXPR_COUNT; expr++) {
 		scores[expr] = score_for_expression((enum pet_expression)expr, state, now_ms);
 		scores[expr] += transition_affinity(curr_expr, (enum pet_expression)expr);
 	}
+
 	best_expr = PET_EXPR_CALM;
 	best_score = scores[PET_EXPR_CALM];
 
@@ -1236,6 +1908,7 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 
 	curr_score = scores[curr_expr];
 
+	/* Hysteresis: require margin to switch */
 	if (best_expr != curr_expr) {
 		if ((now_ms - state->last_expression_change_timestamp_ms) < hold_ms &&
 		    best_score < (curr_score + margin)) {
@@ -1251,6 +1924,8 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 	}
 }
 
+/* ── Init ────────────────────────────────────────────────────────── */
+
 void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 {
 	const int64_t stale_recent_event_ms = now_ms - (60 * MSEC_PER_SEC);
@@ -1261,6 +1936,17 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	g_runtime.forced_expression = PET_EXPR_CALM;
 	g_runtime.forced_expression_active = false;
 
+	/* Context starts at zero (no recent history) */
+	g_runtime.ctx.stimulation = 0;
+	g_runtime.ctx.comfort = 0;
+	g_runtime.ctx.social_warmth = 0;
+
+	/* Intent starts at NONE */
+	g_runtime.intent = PET_INTENT_NONE;
+	g_runtime.intent_strength = 0;
+	g_runtime.intent_resolved_at_ms = now_ms;
+
+	/* Core emotional state */
 	state->energy = 72;
 	state->sleepiness = 22;
 	state->attachment = 50;
@@ -1274,7 +1960,7 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->walking_confidence = 0;
 	state->notification_burst_level = 0;
 
-	/* Seed boot in a neutral state so the first visible expression is not a fake recent event. */
+	/* Seed boot in a neutral state */
 	state->last_pet_timestamp_ms = stale_pet_ms;
 	state->last_real_interaction_timestamp_ms = stale_recent_event_ms;
 	state->last_motion_timestamp_ms = stale_recent_event_ms;
@@ -1322,18 +2008,34 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	micro_reaction_init(now_ms);
 }
 
+/* ── Main pipeline ───────────────────────────────────────────────── */
+
 void behavior_engine_handle_event(struct pet_state *state, const struct app_event *event)
 {
 	const enum pet_mode prev_mode = state->current_mode;
 	const enum pet_expression prev_expr = state->current_expression;
 
-	apply_event_deltas(state, event);
+	/* 1-3. Interpret event, apply immediate reaction, update state */
+	apply_event(state, event);
+
+	/* 4. Clamp state + context */
 	clamp_state(state);
+	clamp_context();
+
+	/* 5. Resolve intent (throttled to every 5 s) */
+	resolve_intent(state, event->timestamp_ms);
+
+	/* 6. Resolve mode */
 	update_mode(state, event->timestamp_ms);
+
+	/* 7. Resolve expression (with hysteresis) */
 	update_expression(state, event->timestamp_ms);
+
+	/* Sync reaction state */
 	state->current_reaction = micro_reaction_get_active(event->timestamp_ms);
 	state->uptime_seconds = event->timestamp_ms / MSEC_PER_SEC;
 
+	/* Log transitions */
 	if (prev_mode != state->current_mode) {
 		LOG_INF("Mode: %s -> %s (event=%s)", pet_mode_str(prev_mode),
 			pet_mode_str(state->current_mode), app_event_type_str(event->type));
@@ -1341,81 +2043,56 @@ void behavior_engine_handle_event(struct pet_state *state, const struct app_even
 
 	if (prev_expr != state->current_expression) {
 		LOG_INF("Expr: %s -> %s (event=%s)", pet_expression_str(prev_expr),
-			pet_expression_str(state->current_expression), app_event_type_str(event->type));
+			pet_expression_str(state->current_expression),
+			app_event_type_str(event->type));
 	}
 }
+
+/* ── String helpers ──────────────────────────────────────────────── */
 
 const char *pet_mode_str(enum pet_mode mode)
 {
 	switch (mode) {
-	case PET_MODE_ASLEEP:
-		return "ASLEEP";
-	case PET_MODE_DROWSY:
-		return "DROWSY";
-	case PET_MODE_IDLE:
-		return "IDLE";
-	case PET_MODE_INTERACTING:
-		return "INTERACTING";
-	case PET_MODE_WALK_AWAKE:
-		return "WALK_AWAKE";
-	case PET_MODE_TASK_ALERT:
-		return "TASK_ALERT";
-	case PET_MODE_CHARGING:
-		return "CHARGING";
-	case PET_MODE_LOW_POWER:
-		return "LOW_POWER";
-	case PET_MODE_OVERLOADED:
-		return "OVERLOADED";
-	default:
-		return "UNKNOWN";
+	case PET_MODE_ASLEEP:      return "ASLEEP";
+	case PET_MODE_DROWSY:      return "DROWSY";
+	case PET_MODE_IDLE:        return "IDLE";
+	case PET_MODE_INTERACTING: return "INTERACTING";
+	case PET_MODE_WALK_AWAKE:  return "WALK_AWAKE";
+	case PET_MODE_TASK_ALERT:  return "TASK_ALERT";
+	case PET_MODE_CHARGING:    return "CHARGING";
+	case PET_MODE_LOW_POWER:   return "LOW_POWER";
+	case PET_MODE_OVERLOADED:  return "OVERLOADED";
+	default:                   return "UNKNOWN";
 	}
 }
 
 const char *pet_expression_str(enum pet_expression expression)
 {
 	switch (expression) {
-	case PET_EXPR_CALM:
-		return "CALM";
-	case PET_EXPR_CURIOUS:
-		return "CURIOUS";
-	case PET_EXPR_CONTENT:
-		return "CONTENT";
-	case PET_EXPR_HAPPY:
-		return "HAPPY";
-	case PET_EXPR_PLAYFUL:
-		return "PLAYFUL";
-	case PET_EXPR_SLEEPY:
-		return "SLEEPY";
-	case PET_EXPR_NEEDY:
-		return "NEEDY";
-	case PET_EXPR_LONELY:
-		return "LONELY";
-	case PET_EXPR_ANNOYED:
-		return "ANNOYED";
-	case PET_EXPR_OVERSTIMULATED:
-		return "OVERSTIMULATED";
-	case PET_EXPR_COZY:
-		return "COZY";
-	case PET_EXPR_DRAINED:
-		return "DRAINED";
-	case PET_EXPR_ASLEEP:
-		return "ASLEEP";
-	default:
-		return "UNKNOWN";
+	case PET_EXPR_CALM:           return "CALM";
+	case PET_EXPR_CURIOUS:        return "CURIOUS";
+	case PET_EXPR_CONTENT:        return "CONTENT";
+	case PET_EXPR_HAPPY:          return "HAPPY";
+	case PET_EXPR_PLAYFUL:        return "PLAYFUL";
+	case PET_EXPR_SLEEPY:         return "SLEEPY";
+	case PET_EXPR_NEEDY:          return "NEEDY";
+	case PET_EXPR_LONELY:         return "LONELY";
+	case PET_EXPR_ANNOYED:        return "ANNOYED";
+	case PET_EXPR_OVERSTIMULATED: return "OVERSTIMULATED";
+	case PET_EXPR_COZY:           return "COZY";
+	case PET_EXPR_DRAINED:        return "DRAINED";
+	case PET_EXPR_ASLEEP:         return "ASLEEP";
+	default:                      return "UNKNOWN";
 	}
 }
 
 const char *pet_display_state_str(enum pet_display_state state)
 {
 	switch (state) {
-	case DISPLAY_FOREGROUND:
-		return "FOREGROUND";
-	case DISPLAY_AMBIENT:
-		return "AMBIENT";
-	case DISPLAY_OFF:
-		return "OFF";
-	default:
-		return "UNKNOWN";
+	case DISPLAY_FOREGROUND: return "FOREGROUND";
+	case DISPLAY_AMBIENT:    return "AMBIENT";
+	case DISPLAY_OFF:        return "OFF";
+	default:                 return "UNKNOWN";
 	}
 }
 
@@ -1429,7 +2106,8 @@ void behavior_engine_status_dump(const struct pet_state *state, char *buffer, si
 		"mode=%s expr=%s force=%s disp=%s react=%s ind=%d ov=%d look_t=%d,%d "
 		"look_r=%d,%d look_c=%u carry=%d/%u/%u/%u walk_act=%d step_day=%u "
 		"total=%u hw=%u batt=%d known=%d E=%d Sl=%d Bo=%d St=%d Tr=%d Cu=%d "
-		"At=%d last_m=%lld last_w=%lld last_p=%lld last_h=%lld last_s=%lld "
+		"At=%d ctx=%d/%d/%d intent=%s(%d) "
+		"last_m=%lld last_w=%lld last_p=%lld last_h=%lld last_s=%lld "
 		"dyn=%d time=%s",
 		       pet_mode_str(state->current_mode),
 		       pet_expression_str(state->current_expression),
@@ -1456,6 +2134,9 @@ void behavior_engine_status_dump(const struct pet_state *state, char *buffer, si
 		       state->battery_percent_known ? 1 : 0,
 		       state->energy, state->sleepiness, state->boredom, state->stress,
 		       state->trust, state->curiosity, state->attachment,
+		       g_runtime.ctx.stimulation, g_runtime.ctx.comfort,
+		       g_runtime.ctx.social_warmth,
+		       pet_intent_str(g_runtime.intent), g_runtime.intent_strength,
 		       (long long)state->last_motion_timestamp_ms,
 		       (long long)state->last_walk_timestamp_ms,
 		       (long long)state->last_pickup_timestamp_ms,

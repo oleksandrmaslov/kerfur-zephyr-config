@@ -54,13 +54,13 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 
 /* Gaze. */
 #define GAZE_DEADBAND                3
-#define GAZE_MAX_DELTA_NORMAL        15
-#define GAZE_MAX_DELTA_LOW_BATT      8
-#define GAZE_RETURN_TO_CENTER_DELTA  2
-#define GAZE_IDLE_HOLD_MS            15000LL
+#define GAZE_MAX_DELTA_NORMAL        10
+#define GAZE_MAX_DELTA_LOW_BATT      6
+#define GAZE_HOLD_AFTER_RELEASE_MS   6000LL
+#define GAZE_HOLD_RESIDUAL_CONF      30U
+#define GAZE_DECAY_RESIDUAL_CONF     20U
 #define LOOK_SUPPRESS_AFTER_ROUGH_MS 800LL
 #define LOOK_SUPPRESS_AFTER_WALK_MS  500LL
-#define LOOK_REFERENCE_ADAPT_ALPHA   60
 
 /* Shake cooldowns. */
 #define SHAKE_COOLDOWN_LIGHT_MS    800
@@ -142,6 +142,8 @@ struct motion_classifier_state {
 	int16_t look_ref_z;
 	int16_t look_target_x;
 	int16_t look_target_y;
+	int16_t look_raw_prev_x;
+	int16_t look_raw_prev_y;
 
 	/* Confidences. */
 	uint8_t walking_confidence;
@@ -169,7 +171,7 @@ struct motion_classifier_state {
 	int64_t active_until_ms;
 	int64_t last_motion_wake_ms;
 	int64_t suppress_look_until_ms;
-	int64_t look_suppress_idle_since_ms;
+	int64_t look_idle_since_ms;
 	int64_t last_shake_event_ms;
 	int64_t last_active_motion_ms;
 	int64_t last_carry_publish_ms;
@@ -571,6 +573,8 @@ static void reset_look_reference(void)
 	g_mc.look_ref_x = 0;
 	g_mc.look_ref_y = 0;
 	g_mc.look_ref_z = 0;
+	g_mc.look_raw_prev_x = 0;
+	g_mc.look_raw_prev_y = 0;
 }
 
 static void capture_look_reference(void)
@@ -579,34 +583,32 @@ static void capture_look_reference(void)
 	g_mc.look_ref_y = g_mc.gravity_y;
 	g_mc.look_ref_z = g_mc.gravity_z;
 	g_mc.look_reference_valid = true;
+	/* Fresh pickup → start at center, fresh idle window. */
+	g_mc.look_target_x = 0;
+	g_mc.look_target_y = 0;
+	g_mc.look_raw_prev_x = 0;
+	g_mc.look_raw_prev_y = 0;
+	g_mc.look_idle_since_ms = k_uptime_get();
 }
 
 static void update_look_reference(const struct in_hand_detector_output *det,
 				  const struct motion_feature_summary *fs)
 {
+	ARG_UNUSED(fs);
+
 	/* Reset only on confirmed surface still (not just !in_hand). */
 	if (det->state == IN_HAND_DETECTOR_SURFACE_STILL && !det->in_hand) {
 		reset_look_reference();
 		return;
 	}
 
-	/* Capture reference on enter, or as soon as any hand-like motion is detected. */
+	/* Capture reference on enter, or as soon as any hand-like motion is detected.
+	 * Once captured, the reference stays fixed for the entire in-hand session —
+	 * no slow drift, so the eye holds whatever direction the user tilts toward
+	 * instead of creeping back to "neutral" on its own. */
 	if (det->in_hand_enter || det->picked_up ||
 	    (!g_mc.look_reference_valid && det->in_hand_confidence >= 15U)) {
 		capture_look_reference();
-		return;
-	}
-
-	if (!g_mc.look_reference_valid) {
-		return;
-	}
-
-	/* Very slowly adapt reference so the "neutral" drifts with the hand position. */
-	if (fs->stability_confidence >= 30U &&
-	    fs->chaos_confidence <= 50U) {
-		g_mc.look_ref_x += (g_mc.gravity_x - g_mc.look_ref_x) / LOOK_REFERENCE_ADAPT_ALPHA;
-		g_mc.look_ref_y += (g_mc.gravity_y - g_mc.look_ref_y) / LOOK_REFERENCE_ADAPT_ALPHA;
-		g_mc.look_ref_z += (g_mc.gravity_z - g_mc.look_ref_z) / LOOK_REFERENCE_ADAPT_ALPHA;
 	}
 }
 
@@ -625,6 +627,7 @@ static void update_look_target(const struct in_hand_detector_output *det,
 	int16_t raw_x, raw_y;
 	int max_delta;
 	bool suppressed;
+	bool decaying;
 
 	suppressed = (now_ms < g_mc.suppress_look_until_ms) ||
 		     g_mc.walking_active ||
@@ -632,43 +635,61 @@ static void update_look_target(const struct in_hand_detector_output *det,
 		     !g_mc.look_reference_valid;
 
 	if (suppressed) {
-		/* Freeze the gaze where it is for GAZE_IDLE_HOLD_MS, then smoothly
-		 * glide to center. The hold prevents a startled-looking snap back
-		 * the instant the user puts the device down for a moment. */
-		if (g_mc.look_suppress_idle_since_ms == 0LL) {
-			g_mc.look_suppress_idle_since_ms = now_ms;
-		}
-		if ((now_ms - g_mc.look_suppress_idle_since_ms) >= GAZE_IDLE_HOLD_MS) {
-			g_mc.look_target_x = move_towards(g_mc.look_target_x, 0,
-							  GAZE_RETURN_TO_CENTER_DELTA);
-			g_mc.look_target_y = move_towards(g_mc.look_target_y, 0,
-							  GAZE_RETURN_TO_CENTER_DELTA);
-		}
-		g_mc.look_confidence = 0U;
-		return;
+		/* Freeze raw input — gaze should HOLD where it is, not snap. */
+		raw_x = g_mc.look_target_x;
+		raw_y = g_mc.look_target_y;
+	} else {
+		raw_x = clamp_look((-(g_mc.gravity_x - g_mc.look_ref_x) * 100) /
+				   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
+		raw_y = clamp_look(((g_mc.gravity_y - g_mc.look_ref_y) * 100) /
+				   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
+		if (abs16(raw_x) <= GAZE_DEADBAND) { raw_x = 0; }
+		if (abs16(raw_y) <= GAZE_DEADBAND) { raw_y = 0; }
 	}
 
-	g_mc.look_suppress_idle_since_ms = 0LL;
+	/* Idle tracker: any meaningful change in raw INPUT resets the timer.
+	 * Compare against the previous raw (not look_target) so the decay
+	 * phase doesn't accidentally reset itself when target drifts away
+	 * from a still-held raw value. */
+	if (abs16(raw_x - g_mc.look_raw_prev_x) >= 4 ||
+	    abs16(raw_y - g_mc.look_raw_prev_y) >= 4) {
+		g_mc.look_idle_since_ms = now_ms;
+	}
+	g_mc.look_raw_prev_x = raw_x;
+	g_mc.look_raw_prev_y = raw_y;
 
-	raw_x = clamp_look((-(g_mc.gravity_x - g_mc.look_ref_x) * 100) /
-			   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
-	raw_y = clamp_look(((g_mc.gravity_y - g_mc.look_ref_y) * 100) /
-			   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
+	decaying = (g_mc.look_idle_since_ms != 0LL) &&
+		   ((now_ms - g_mc.look_idle_since_ms) >= GAZE_HOLD_AFTER_RELEASE_MS);
 
-	/* Deadband. */
-	if (abs16(raw_x) <= GAZE_DEADBAND) { raw_x = 0; }
-	if (abs16(raw_y) <= GAZE_DEADBAND) { raw_y = 0; }
+	if (decaying) {
+		/* Slow drift back to center after the hold expires. Delta=1 at
+		 * ~25 Hz means a full extreme→center glide takes ~4 s, which
+		 * reads as a deliberate "looking away" rather than a snap. */
+		g_mc.look_target_x = move_towards(g_mc.look_target_x, 0, 1);
+		g_mc.look_target_y = move_towards(g_mc.look_target_y, 0, 1);
+	} else {
+		max_delta = g_mc.battery_low ? GAZE_MAX_DELTA_LOW_BATT : GAZE_MAX_DELTA_NORMAL;
+		g_mc.look_target_x = move_towards(g_mc.look_target_x, raw_x,
+						  (int16_t)max_delta);
+		g_mc.look_target_y = move_towards(g_mc.look_target_y, raw_y,
+						  (int16_t)max_delta);
+	}
 
-	max_delta = g_mc.battery_low ? GAZE_MAX_DELTA_LOW_BATT : GAZE_MAX_DELTA_NORMAL;
-
-	g_mc.look_target_x = move_towards(g_mc.look_target_x, raw_x, (int16_t)max_delta);
-	g_mc.look_target_y = move_towards(g_mc.look_target_y, raw_y, (int16_t)max_delta);
-
-	/* Confidence from detector, discounted by noise. */
-	g_mc.look_confidence = clamp_u8(
-		(int)det->look_confidence -
-		(int)fs->chaos_confidence / 3 -
-		(int)fs->cadence_confidence / 4);
+	/* Confidence: full while actively tracking, residual while held or
+	 * decaying so the renderer keeps applying look_target instead of
+	 * snapping the pupils to base. Drop to 0 only once we've fully
+	 * returned to center. */
+	if (!suppressed) {
+		g_mc.look_confidence = clamp_u8(
+			(int)det->look_confidence -
+			(int)fs->chaos_confidence / 3 -
+			(int)fs->cadence_confidence / 4);
+	} else if (g_mc.look_target_x == 0 && g_mc.look_target_y == 0) {
+		g_mc.look_confidence = 0U;
+	} else {
+		g_mc.look_confidence = decaying ? GAZE_DECAY_RESIDUAL_CONF
+						: GAZE_HOLD_RESIDUAL_CONF;
+	}
 }
 
 /* ── Event publishing ─────────────────────────────────────────────────── */
@@ -700,8 +721,8 @@ static void publish_look(int64_t now_ms, bool force)
 {
 	int min_ms = MAX(50, 1000 / CONFIG_KERFUR_MOTION_GAZE_RATE_HZ);
 	bool changed = force ||
-		abs16(g_mc.look_target_x - g_mc.pub_look_x) >= 2 ||
-		abs16(g_mc.look_target_y - g_mc.pub_look_y) >= 2 ||
+		abs16(g_mc.look_target_x - g_mc.pub_look_x) >= 1 ||
+		abs16(g_mc.look_target_y - g_mc.pub_look_y) >= 1 ||
 		g_mc.look_confidence != g_mc.pub_look_conf;
 
 	if (!changed && (now_ms - g_mc.last_look_publish_ms) < min_ms) {
