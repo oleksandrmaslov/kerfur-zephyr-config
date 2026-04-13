@@ -80,9 +80,8 @@ int mock_inputs_init(void)
 
 #if CONFIG_KERFUR_ENABLE_MOCK_INPUTS
 	/*
-	 * Periodic synthetic events keep behavior visibly active before
-	 * full sensor stack (touch, IMU, notifications) is integrated.
-	 * TODO: Replace periodic synthetic events with real sensor/phone inputs.
+	 * Periodic synthetic events keep behavior visibly active in bring-up
+	 * builds that still enable CONFIG_KERFUR_ENABLE_MOCK_INPUTS.
 	 */
 	k_timer_start(&g_mock_timer, K_SECONDS(12), K_SECONDS(18));
 #endif

@@ -39,8 +39,8 @@ public class KerfurDeviceSupport /* extends AbstractBTLEDeviceSupport */ {
             return;
         }
 
-        // TODO: enable notifications on TX characteristic using your branch helper.
-        // After notifications are enabled, send ping.
+        // Enable notifications on the TX characteristic using the helper
+        // available in your Gadgetbridge branch, then send ping.
         sendPing();
     }
 

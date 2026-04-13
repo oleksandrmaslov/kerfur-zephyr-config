@@ -2,7 +2,7 @@
 
 / {
 	chosen {
-		/* TODO: Change chosen display node if your board uses another panel. */
+		/* Point this at your display node if your board uses another panel. */
 		zephyr,display = &ssd1306;
 	};
 

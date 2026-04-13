@@ -21,7 +21,7 @@
 
 	/*
 	 * Digital touch sensor input (default pin P0.31 / D21).
-	 * TODO: Change this pin/flags to match your touch module output.
+	 * Adjust this pin/flags to match your touch module output.
 	 */
 	touch_inputs {
 		compatible = "gpio-keys";

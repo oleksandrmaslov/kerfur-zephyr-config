@@ -25,7 +25,7 @@
 		segment-remap;
 		com-invdir;
 		prechargep = <0x22>;
-		/* TODO: add reset-gpios / supply-gpios if your module requires it */
+		/* Add reset-gpios / supply-gpios here if your module requires them. */
 		status = "okay";
 	};
 };

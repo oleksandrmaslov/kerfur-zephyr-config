@@ -181,9 +181,8 @@ static enum kerfur_face_asset_id choose_asset(enum kerfur_face_asset_id base_ass
 
 /*
  * Indicator render priority — first entries are drawn leftmost.
- * Mirrors assets/face/kerfur_faces.json `ui_rules.indicator_priority`.
- * TODO: have tools/face_codegen.py emit this from the JSON so it does
- * not have to be hand-maintained here.
+ * Keep this list aligned with assets/face/kerfur_faces.json
+ * `ui_rules.indicator_priority`.
  */
 static const enum kerfur_face_indicator_id g_indicator_priority[] = {
 	KERFUR_FACE_INDICATOR_ICON_QUESTION,
