@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kerfur Face Visualizer</title>
+  <link rel="stylesheet" href="./viewer.css?v=5">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Kerfur Face Visualizer</h1>
+      <p>Render `kerfur_faces.json` and compare it to the reference SVGs.</p>
+    </div>
+    <div class="topbar-actions">
+      <button id="reload-button" type="button">Reload JSON</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel controls">
+      <label class="field">
+        <span>Expression</span>
+        <select id="expression-select"></select>
+      </label>
+
+      <label class="field">
+        <span>Reaction</span>
+        <select id="reaction-select"></select>
+      </label>
+
+      <label class="field">
+        <span>Scale</span>
+        <input id="scale-range" type="range" min="2" max="8" step="1" value="4">
+      </label>
+
+      <label class="toggle">
+        <input id="aliases-toggle" type="checkbox" checked>
+        <span>Use legacy asset aliases</span>
+      </label>
+
+      <label class="toggle">
+        <input id="grid-toggle" type="checkbox">
+        <span>Show pixel grid</span>
+      </label>
+
+      <section class="info-block">
+        <h2>Status</h2>
+        <div id="status-output" class="status-output"></div>
+      </section>
+
+      <section class="info-block">
+        <h2>Warnings</h2>
+        <ul id="warning-list" class="info-list"></ul>
+      </section>
+
+      <section class="info-block">
+        <h2>Resolved Layers</h2>
+        <ul id="resolved-list" class="info-list resolved-list"></ul>
+      </section>
+    </aside>
+
+    <section class="preview-column">
+      <article class="panel preview-card">
+        <div class="card-head">
+          <h2>Generated</h2>
+          <p>Composed from JSON assets, aliases, and any future `slot_overrides`.</p>
+        </div>
+        <div id="generated-shell" class="preview-shell">
+          <div id="generated-stage" class="generated-stage"></div>
+        </div>
+      </article>
+
+      <article class="panel preview-card">
+        <div class="card-head">
+          <h2>Expression Reference</h2>
+          <p id="expression-reference-caption"></p>
+        </div>
+        <div id="expression-reference-shell" class="preview-shell">
+          <img id="expression-reference-image" class="reference-image" alt="">
+        </div>
+      </article>
+
+      <article id="reaction-reference-card" class="panel preview-card">
+        <div class="card-head">
+          <h2>Reaction Reference</h2>
+          <p id="reaction-reference-caption"></p>
+        </div>
+        <div id="reaction-reference-shell" class="preview-shell">
+          <img id="reaction-reference-image" class="reference-image" alt="">
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    window.addEventListener("error", (event) => {
+      const status = document.getElementById("status-output");
+      if (status) {
+        status.textContent = `Viewer error: ${event.message}`;
+      }
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      const status = document.getElementById("status-output");
+      if (status) {
+        status.textContent = `Viewer error: ${event.reason}`;
+      }
+    });
+  </script>
+  <script type="module" src="./viewer.js?v=5"></script>
+</body>
+</html>

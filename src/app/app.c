@@ -7,19 +7,52 @@
 #include "behavior/behavior_engine.h"
 #include "ble/ble_manager.h"
 #include "core/event_bus.h"
+#include "display/display_policy.h"
+#include "drivers/motion_classifier.h"
 #include "drivers/mock_inputs.h"
 #include "drivers/touch_input.h"
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+#include "nearby/kerfur_nearby.h"
+#endif
 #include "power/power_manager.h"
 #include "ui/ui_renderer.h"
 
 LOG_MODULE_REGISTER(kerfur_app, CONFIG_LOG_DEFAULT_LEVEL);
 
+#define APP_EVENT_DRAIN_BUDGET 32
+
 static void log_pet_snapshot(const struct pet_state *pet, const char *tag)
 {
-	LOG_INF("%s mode=%s expr=%s E=%d Sl=%d At=%d Bo=%d St=%d Ar=%d So=%d",
-		tag, pet_mode_str(pet->current_mode), pet_expression_str(pet->expression),
-		pet->energy, pet->sleepiness, pet->attachment, pet->boredom, pet->stress,
-		pet->arousal, pet->social_load);
+	char status[256];
+
+	behavior_engine_status_dump(pet, status, sizeof(status));
+	LOG_INF("%s %s", tag, status);
+}
+
+static void app_handle_event(struct pet_state *pet, const struct app_event *event)
+{
+	if (IS_ENABLED(CONFIG_KERFUR_TRACE_EVENTS) &&
+	    (event->type != APP_EVENT_TICK_100MS) &&
+	    (event->type != APP_EVENT_TICK_1S)) {
+		LOG_INF("Event rx: %s param=%d", app_event_type_str(event->type), event->param);
+	}
+
+	behavior_engine_handle_event(pet, event);
+	power_manager_on_event(event, pet);
+	display_policy_on_event(pet, event);
+	motion_classifier_on_event(event, pet);
+
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+	if (event->type == APP_EVENT_TICK_1S) {
+		kerfur_nearby_on_pet_tick(pet);
+		kerfur_nearby_tick(event->timestamp_ms);
+		pet->social_overload = (kerfur_nearby_active_peer_count() > 3U);
+	}
+#endif
+
+	if (event->type == APP_EVENT_FACE_DEBUG_DUMP) {
+		ui_renderer_request_debug_dump();
+	}
 }
 
 int app_run(void)
@@ -40,6 +73,8 @@ int app_run(void)
 	now_ms = k_uptime_get();
 	behavior_engine_init(&pet, now_ms);
 	power_manager_init(now_ms);
+	display_policy_init(&pet, now_ms);
+	(void)motion_classifier_init(now_ms);
 	log_pet_snapshot(&pet, "Boot");
 
 	err = ui_renderer_init();
@@ -58,12 +93,20 @@ int app_run(void)
 		LOG_WRN("Touch input init issue (%d), continuing", err);
 	}
 
+#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+	/* Must run before ble_manager_init() so that build_advertising_payloads()
+	 * captures a non-zero ephemeral_id into the scan-response beacon. */
+	err = kerfur_nearby_init();
+	if (err) {
+		LOG_WRN("Kerfur nearby init issue (%d), continuing", err);
+	}
+#endif
+
 	err = ble_manager_init();
 	if (err) {
 		LOG_WRN("BLE scaffold not running (%d), continuing", err);
 	}
 
-	(void)app_event_publish(APP_EVENT_WAKE, 0);
 	last_frame_ms = now_ms;
 	last_state_log_ms = now_ms;
 	last_display_blanked = false;
@@ -73,15 +116,19 @@ int app_run(void)
 		struct app_event event;
 		struct app_event synthetic_event;
 		bool got_event;
-		bool display_blanked;
+		bool display_blanked = false;
+		uint8_t drained = 0U;
 
 		got_event = app_event_wait(&event, K_MSEC(20));
 		if (got_event) {
-			if (IS_ENABLED(CONFIG_KERFUR_TRACE_EVENTS) && (event.type != APP_EVENT_TICK_1S)) {
-				LOG_INF("Event rx: %s param=%d", app_event_type_str(event.type), event.param);
-			}
-			behavior_engine_handle_event(&pet, &event);
-			power_manager_on_event(&event, &pet);
+			app_handle_event(&pet, &event);
+			drained++;
+		}
+
+		while ((drained < APP_EVENT_DRAIN_BUDGET) &&
+		       app_event_wait(&event, K_NO_WAIT)) {
+			app_handle_event(&pet, &event);
+			drained++;
 		}
 
 		now_ms = k_uptime_get();
@@ -94,7 +141,7 @@ int app_run(void)
 			continue;
 		}
 
-		display_blanked = power_manager_is_display_blanked();
+		display_blanked = (display_policy_get_state(&pet) == DISPLAY_OFF);
 		if (display_blanked != last_display_blanked) {
 			LOG_INF("Display blank state -> %s", display_blanked ? "BLANKED" : "ACTIVE");
 			last_display_blanked = display_blanked;

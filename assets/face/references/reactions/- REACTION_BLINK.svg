@@ -1,0 +1,42 @@
+<svg width="128" height="64" viewBox="0 0 128 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect width="128" height="64" fill="black"/>
+<rect y="52" width="8" height="2" fill="#D9D9D9"/>
+<rect x="2" y="51" width="4" height="1" fill="#D9D9D9"/>
+<rect y="48" width="7" height="1" fill="#D9D9D9"/>
+<rect x="1" y="46" width="6" height="1" fill="#D9D9D9"/>
+<rect y="47" width="8" height="1" fill="#D9D9D9"/>
+<rect width="8" height="2" transform="matrix(-1 0 0 1 127 52)" fill="#D9D9D9"/>
+<rect width="4" height="1" transform="matrix(-1 0 0 1 125 51)" fill="#D9D9D9"/>
+<rect width="7" height="1" transform="matrix(-1 0 0 1 127 48)" fill="#D9D9D9"/>
+<rect width="6" height="1" transform="matrix(-1 0 0 1 126 46)" fill="#D9D9D9"/>
+<rect width="8" height="1" transform="matrix(-1 0 0 1 127 47)" fill="#D9D9D9"/>
+<rect x="61" y="38" width="5" height="1" fill="#D9D9D9"/>
+<rect x="61" y="40" width="5" height="1" fill="#D9D9D9"/>
+<rect x="61" y="44" width="5" height="1" fill="#D9D9D9"/>
+<rect x="62" y="41" width="3" height="1" fill="#D9D9D9"/>
+<rect x="60" y="45" width="3" height="1" fill="#D9D9D9"/>
+<rect x="54" y="45" width="3" height="1" fill="#D9D9D9"/>
+<rect x="54" y="45" width="3" height="1" fill="#D9D9D9"/>
+<rect x="70" y="45" width="3" height="1" fill="#D9D9D9"/>
+<rect x="70" y="44" width="3" height="1" fill="#D9D9D9"/>
+<rect x="71" y="43" width="2" height="1" fill="#D9D9D9"/>
+<rect x="54" y="44" width="3" height="1" fill="#D9D9D9"/>
+<rect x="54" y="43" width="2" height="1" fill="#D9D9D9"/>
+<rect x="55" y="46" width="8" height="1" fill="#D9D9D9"/>
+<rect x="56" y="47" width="6" height="1" fill="#D9D9D9"/>
+<rect x="65" y="47" width="6" height="1" fill="#D9D9D9"/>
+<rect x="64" y="45" width="3" height="1" fill="#D9D9D9"/>
+<rect x="64" y="46" width="8" height="1" fill="#D9D9D9"/>
+<rect x="62" y="43" width="3" height="1" fill="#D9D9D9"/>
+<rect x="60" y="39" width="7" height="1" fill="#D9D9D9"/>
+<rect x="47" y="8" width="7" height="1" fill="#D9D9D9"/>
+<rect x="46" y="9" width="9" height="1" fill="#D9D9D9"/>
+<rect x="46" y="10" width="8" height="1" fill="#D9D9D9"/>
+<rect x="48" y="11" width="5" height="1" fill="#D9D9D9"/>
+<rect width="7" height="1" transform="matrix(-1 0 0 1 80 8)" fill="#D9D9D9"/>
+<rect width="9" height="1" transform="matrix(-1 0 0 1 81 9)" fill="#D9D9D9"/>
+<rect width="8" height="1" transform="matrix(-1 0 0 1 81 10)" fill="#D9D9D9"/>
+<rect width="5" height="1" transform="matrix(-1 0 0 1 79 11)" fill="#D9D9D9"/>
+<rect x="20" y="30" width="30" height="5" fill="#D9D9D9"/>
+<rect x="77" y="30" width="30" height="5" fill="#D9D9D9"/>
+</svg>

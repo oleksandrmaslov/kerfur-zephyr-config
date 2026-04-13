@@ -1,0 +1,146 @@
+#ifndef KERFUR_FACE_ASSETS_H_
+#define KERFUR_FACE_ASSETS_H_
+
+#include <stdint.h>
+
+#include "ui/face_bitmap.h"
+
+enum kerfur_face_asset_group {
+	KERFUR_FACE_GROUP_EYE_WHITES,
+	KERFUR_FACE_GROUP_PUPILS,
+	KERFUR_FACE_GROUP_EYEBROWS,
+	KERFUR_FACE_GROUP_MOUTHS,
+	KERFUR_FACE_GROUP_WHISKERS,
+	KERFUR_FACE_GROUP_EFFECTS,
+	KERFUR_FACE_GROUP_INDICATORS,
+	KERFUR_FACE_GROUP_OVERLAYS,
+};
+
+enum kerfur_face_overlay_render_mode {
+	KERFUR_FACE_OVERLAY_RENDER_NONE = 0,
+	KERFUR_FACE_OVERLAY_RENDER_BITMAP,
+	KERFUR_FACE_OVERLAY_RENDER_BATTERY_PERCENT_TEXT,
+};
+
+enum kerfur_face_pupil_zone_shape {
+	KERFUR_FACE_PUPIL_ZONE_NONE = 0,
+	KERFUR_FACE_PUPIL_ZONE_ELLIPSE,
+	KERFUR_FACE_PUPIL_ZONE_RECTANGLE,
+};
+
+enum kerfur_face_asset_flags {
+	KERFUR_FACE_ASSET_FLAG_MIRRORABLE = 1 << 0,
+	KERFUR_FACE_ASSET_FLAG_MIRROR_RIGHT = 1 << 1,
+	KERFUR_FACE_ASSET_FLAG_SPECIAL_MODE = 1 << 2,
+	KERFUR_FACE_ASSET_FLAG_DRAW_BLACK = 1 << 3,
+};
+
+enum kerfur_face_asset_id {
+	KERFUR_FACE_ASSET_NONE = 0,
+	KERFUR_FACE_ASSET_EYE_WHITE_OPEN_ROUND,
+	KERFUR_FACE_ASSET_EYE_WHITE_HALF_SOFT,
+	KERFUR_FACE_ASSET_EYE_WHITE_HALF_PLAYFUL,
+	KERFUR_FACE_ASSET_EYE_WHITE_BLINK,
+	KERFUR_FACE_ASSET_EYE_WHITE_BLINK_CRYING,
+	KERFUR_FACE_ASSET_EYE_WHITE_LONELY,
+	KERFUR_FACE_ASSET_EYE_WHITE_SQUEEZED_X,
+	KERFUR_FACE_ASSET_PUPIL_ROUND_RIGHT,
+	KERFUR_FACE_ASSET_PUPIL_ROUND_LEFT,
+	KERFUR_FACE_ASSET_PUPIL_STARTLE,
+	KERFUR_FACE_ASSET_PUPIL_ANNOYED,
+	KERFUR_FACE_ASSET_PUPIL_GLOSSY_RIGHT,
+	KERFUR_FACE_ASSET_PUPIL_GLOSSY_LEFT,
+	KERFUR_FACE_ASSET_PUPIL_PLAYFUL_RIGHT,
+	KERFUR_FACE_ASSET_PUPIL_PLAYFUL_LEFT,
+	KERFUR_FACE_ASSET_PUPIL_COZY_RIGHT,
+	KERFUR_FACE_ASSET_PUPIL_COZY_LEFT,
+	KERFUR_FACE_ASSET_PUPIL_SPIRAL,
+	KERFUR_FACE_ASSET_PUPIL_DISCONNECT_RIGHT,
+	KERFUR_FACE_ASSET_PUPIL_DISCONNECT_LEFT,
+	KERFUR_FACE_ASSET_PUPIL_CHARGE_RIGHT,
+	KERFUR_FACE_ASSET_PUPIL_CHARGE_LEFT,
+	KERFUR_FACE_ASSET_PUPIL_LOW_BATT_LEFT,
+	KERFUR_FACE_ASSET_PUPIL_LOW_BATT_RIGHT,
+	KERFUR_FACE_ASSET_PUPIL_NONE,
+	KERFUR_FACE_ASSET_BROW_NEUTRAL,
+	KERFUR_FACE_ASSET_BROW_SOFT,
+	KERFUR_FACE_ASSET_BROW_ANGRY,
+	KERFUR_FACE_ASSET_MOUTH_DEFAULT,
+	KERFUR_FACE_ASSET_MOUTH_HALF_OPEN,
+	KERFUR_FACE_ASSET_MOUTH_HAPPY_OPEN,
+	KERFUR_FACE_ASSET_MOUTH_ANNOYED,
+	KERFUR_FACE_ASSET_MOUTH_SAD,
+	KERFUR_FACE_ASSET_WHISKERS_DEFAULT,
+	KERFUR_FACE_ASSET_WHISKERS_HORNY,
+	KERFUR_FACE_ASSET_EFFECT_SPARK,
+	KERFUR_FACE_ASSET_EFFECT_ZZZ,
+	KERFUR_FACE_ASSET_EFFECT_TEAR,
+	KERFUR_FACE_ASSET_ICON_HEART_OUTLINE,
+	KERFUR_FACE_ASSET_ICON_HEART_FILLED,
+	KERFUR_FACE_ASSET_ICON_BT,
+	KERFUR_FACE_ASSET_ICON_QUESTION,
+	KERFUR_FACE_ASSET_ICON_X,
+	KERFUR_FACE_ASSET_OVERLAY_BATTERY_PERCENT,
+	KERFUR_FACE_ASSET_OVERLAY_CHARGE_BOLT,
+	KERFUR_FACE_ASSET_COUNT
+};
+
+enum kerfur_face_indicator_id {
+	KERFUR_FACE_INDICATOR_NONE = 0,
+	KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+	KERFUR_FACE_INDICATOR_ICON_HEART_FILLED,
+	KERFUR_FACE_INDICATOR_ICON_BT,
+	KERFUR_FACE_INDICATOR_ICON_QUESTION,
+	KERFUR_FACE_INDICATOR_ICON_X,
+	KERFUR_FACE_INDICATOR_COUNT
+};
+
+enum kerfur_face_overlay_id {
+	KERFUR_FACE_OVERLAY_NONE = 0,
+	KERFUR_FACE_OVERLAY_OVERLAY_BATTERY_PERCENT,
+	KERFUR_FACE_OVERLAY_OVERLAY_CHARGE_BOLT,
+	KERFUR_FACE_OVERLAY_COUNT
+};
+
+struct kerfur_face_eye_zone {
+	uint8_t shape;
+	int16_t center_x;
+	int16_t center_y;
+	int16_t rx;
+	int16_t ry;
+	int16_t margin;
+};
+
+struct kerfur_face_asset_metadata {
+	enum kerfur_face_asset_id id;
+	enum kerfur_face_asset_group group;
+	const char *name;
+	const struct kerfur_face_bitmap *bitmap;
+	int16_t anchor_x;
+	int16_t anchor_y;
+	uint8_t flags;
+	struct kerfur_face_eye_zone pupil_zone;
+	uint8_t overlay_render_mode;
+};
+
+struct kerfur_face_indicator_def {
+	enum kerfur_face_indicator_id id;
+	const char *name;
+	enum kerfur_face_asset_id asset_id;
+};
+
+struct kerfur_face_overlay_def {
+	enum kerfur_face_overlay_id id;
+	const char *name;
+	enum kerfur_face_asset_id asset_id;
+	enum kerfur_face_overlay_render_mode render_mode;
+};
+
+const struct kerfur_face_asset_metadata *kerfur_face_asset_get(enum kerfur_face_asset_id id);
+const struct kerfur_face_indicator_def *kerfur_face_indicator_get(enum kerfur_face_indicator_id id);
+const struct kerfur_face_overlay_def *kerfur_face_overlay_get(enum kerfur_face_overlay_id id);
+const char *kerfur_face_asset_name(enum kerfur_face_asset_id id);
+const char *kerfur_face_indicator_name(enum kerfur_face_indicator_id id);
+const char *kerfur_face_overlay_name(enum kerfur_face_overlay_id id);
+
+#endif /* KERFUR_FACE_ASSETS_H_ */

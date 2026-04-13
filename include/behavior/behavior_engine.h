@@ -1,6 +1,7 @@
 #ifndef KERFUR_BEHAVIOR_ENGINE_H_
 #define KERFUR_BEHAVIOR_ENGINE_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "behavior/pet_state.h"
@@ -11,5 +12,7 @@ void behavior_engine_handle_event(struct pet_state *state, const struct app_even
 
 const char *pet_mode_str(enum pet_mode mode);
 const char *pet_expression_str(enum pet_expression expression);
+const char *pet_display_state_str(enum pet_display_state state);
+void behavior_engine_status_dump(const struct pet_state *state, char *buffer, size_t buffer_len);
 
 #endif /* KERFUR_BEHAVIOR_ENGINE_H_ */

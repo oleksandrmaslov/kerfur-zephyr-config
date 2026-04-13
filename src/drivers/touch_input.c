@@ -41,10 +41,9 @@ static void touch0_isr(const struct device *dev, struct gpio_callback *cb, uint3
 	}
 
 	g_touch0_last_event_ms = now_ms;
-	publish_with_best_effort(APP_EVENT_USER_BUTTON_PRESS);
-	publish_with_best_effort(APP_EVENT_MOCK_PET);
+	publish_with_best_effort(APP_EVENT_USER_PET_SOFT);
 
-	LOG_INF("touch0 active -> USER_BUTTON_PRESS + MOCK_PET");
+	LOG_INF("touch0 active -> USER_PET_SOFT");
 }
 #endif
 

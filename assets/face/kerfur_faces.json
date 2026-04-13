@@ -1,0 +1,1117 @@
+{
+  "meta": {
+    "project": "kerfur-face-engine",
+    "version": 1,
+    "format": "lvgl-v8-alpha-1bit-recipes",
+    "author": "oleksandrmaslov",
+    "notes": "Master description for Kerfur modular face engine"
+  },
+
+  "defaults": {
+    "canvas": {
+      "width": 128,
+      "height": 64
+    },
+    "anchors": {
+      "face_origin_x": 0,
+      "face_origin_y": 0,
+      "left_eye_x": 17,
+      "left_eye_y": 16,
+      "right_eye_x": 74,
+      "right_eye_y": 16,
+      "mouth_x": 54,
+      "mouth_y": 38,
+      "brow_left_x": 46,
+      "brow_left_y": 8,
+      "brow_right_x": 72,
+      "brow_right_y": 8,
+      "indicator_x": 3,
+      "indicator_y": 3,
+      "overlay_x": 3,
+      "overlay_y": 3,
+      "effect_x": 104,
+      "effect_y": 6
+    },
+    "timing_ms": {
+      "blink_default": 220,
+      "reaction_default": 1200,
+      "indicator_default": 1800,
+      "overlay_default": 2200
+    }
+  },
+
+  "asset_groups": {
+    "eye_whites": {
+      "type": "bitmap_alpha",
+      "items": [
+        {
+          "id": "eye_white_open_round",
+          "file": "eye_whites/eye_white_open_round.svg",
+          "width": 36,
+          "height": 35,
+          "anchor_x": 17,
+          "anchor_y": 16,
+          "mirrorable": true,
+          "eye_solver": {
+            "shape": "ellipse",
+            "rx": 6,
+            "ry": 6,
+            "margin": 1
+          }
+        },
+        {
+          "id": "eye_white_half_soft",
+          "file": "eye_whites/eye_white_half_soft.svg",
+          "width": 36,
+          "height": 20,
+          "anchor_x": 17,
+          "anchor_y": 27,
+          "mirrorable": true,
+          "eye_solver": {
+            "shape": "rectangle",
+            "rx": 6,
+            "ry": 1,
+            "margin": 1
+          }
+        },
+        {
+          "id": "eye_white_half_playful",
+          "file": "eye_whites/eye_white_half_playful.svg",
+          "width": 36,
+          "height": 20,
+          "anchor_x": 17,
+          "anchor_y": 20,
+          "mirrorable": true,
+          "eye_solver": {
+            "shape": "rectangle",
+            "rx": 6,
+            "ry": 1,
+            "margin": 1
+          }
+        },
+        {
+          "id": "eye_white_blink",
+          "file": "eye_whites/eye_white_blink.svg",
+          "width": 30,
+          "height": 5,
+          "anchor_x": 21,
+          "anchor_y": 30,
+          "mirrorable": true,
+          "eye_solver": {
+            "shape": "ellipse",
+            "rx": 2,
+            "ry": 1,
+            "margin": 1
+          }
+        },
+        {
+          "id": "eye_white_blink_crying",
+          "file": "eye_whites/eye_white_blink_crying.svg",
+          "width": 30,
+          "height": 25,
+          "anchor_x": 21,
+          "anchor_y": 25,
+          "mirrorable": true,
+          "eye_solver": {
+            "shape": "ellipse",
+            "rx": 4,
+            "ry": 4,
+            "margin": 1
+          }
+        },
+        {
+          "id": "eye_white_lonely",
+          "file": "eye_whites/eye_white_lonely.svg",
+          "width": 34,
+          "height": 38,
+          "anchor_x": 17,
+          "anchor_y": 16,
+          "mirrorable": true,
+          "special_mode": true
+        },
+        {
+          "id": "eye_white_squeezed_x",
+          "file": "eye_whites/eye_white_squeezed_x.svg",
+          "width": 39,
+          "height": 29,
+          "anchor_x": 20,
+          "anchor_y": 18,
+          "mirrorable": true,
+          "special_mode": true
+        }
+      ]
+    },
+    "pupils": {
+      "type": "bitmap_alpha",
+      "items": [
+        {
+          "id": "pupil_round_right",
+          "file": "pupils/pupil_round_right.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_round_left",
+          "file": "pupils/pupil_round_left.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_startle",
+          "file": "pupils/pupil_startle.svg",
+          "width": 7,
+          "height": 7,
+          "anchor_x": 2,
+          "anchor_y": 2,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_annoyed",
+          "file": "pupils/pupil_annoyed.svg",
+          "width": 3,
+          "height": 3,
+          "anchor_x": 2,
+          "anchor_y": 2,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_glossy_right",
+          "file": "pupils/pupil_glossy_right.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_glossy_left",
+          "file": "pupils/pupil_glossy_left.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_playful_right",
+          "file": "pupils/pupil_playful_right.svg",
+          "width": 24,
+          "height": 13,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_playful_left",
+          "file": "pupils/pupil_playful_left.svg",
+          "width": 24,
+          "height": 13,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_cozy_right",
+          "file": "pupils/pupil_cozy_right.svg",
+          "width": 24,
+          "height": 13,
+          "anchor_x": 2,
+          "anchor_y": 2,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_cozy_left",
+          "file": "pupils/pupil_cozy_left.svg",
+          "width": 24,
+          "height": 13,
+          "anchor_x": 2,
+          "anchor_y": 2,
+          "color_role": "foreground_black",
+          "mode": "dynamic"
+        },
+        {
+          "id": "pupil_spiral",
+          "file": "pupils/pupil_spiral.svg",
+          "width": 25,
+          "height": 23,
+          "anchor_x": 13,
+          "anchor_y": 11,
+          "color_role": "foreground_black",
+          "mode": "special"
+        },
+        {
+          "id": "pupil_disconnect_right",
+          "file": "pupils/pupil_disconnect_right.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "special"
+        },
+        {
+          "id": "pupil_disconnect_left",
+          "file": "pupils/pupil_disconnect_left.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "special"
+        },
+        {
+          "id": "pupil_charge_right",
+          "file": "pupils/pupil_charge_right.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "special"
+        },
+        {
+          "id": "pupil_charge_left",
+          "file": "pupils/pupil_charge_left.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "special"
+        },
+        {
+          "id": "pupil_low_batt_left",
+          "file": "pupils/pupil_low_batt_left.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "special"
+        },
+        {
+          "id": "pupil_low_batt_right",
+          "file": "pupils/pupil_low_batt_right.svg",
+          "width": 24,
+          "height": 25,
+          "anchor_x": 6,
+          "anchor_y": 5,
+          "color_role": "foreground_black",
+          "mode": "special"
+        },
+        {
+          "id": "pupil_none",
+          "file": null,
+          "width": 0,
+          "height": 0,
+          "anchor_x": 0,
+          "anchor_y": 0,
+          "color_role": "none",
+          "mode": "none"
+        }
+      ]
+    },
+
+    "eyebrows": {
+      "type": "bitmap_alpha",
+      "items": [
+        {
+          "id": "brow_neutral",
+          "file": "eyebrows/brow_neutral.svg",
+          "width": 9,
+          "height": 4,
+          "anchor_x": 2,
+          "anchor_y": 1,
+          "mirrorable": true
+        },
+        {
+          "id": "brow_soft",
+          "file": "eyebrows/brow_soft.svg",
+          "width": 8,
+          "height": 6,
+          "anchor_x": 2,
+          "anchor_y": 1,
+          "mirrorable": true
+        },
+        {
+          "id": "brow_angry",
+          "file": "eyebrows/brow_angry.svg",
+          "width": 14,
+          "height": 10,
+          "anchor_x": 8,
+          "anchor_y": 1,
+          "mirrorable": true
+        }
+      ]
+    },
+
+    "mouths": {
+      "type": "bitmap_alpha",
+      "items": [
+        {
+          "id": "mouth_default",
+          "file": "mouths/mouth_default.svg",
+          "width": 19,
+          "height": 10,
+          "anchor_x": 3,
+          "anchor_y": 1
+        },
+        {
+          "id": "mouth_half_open",
+          "file": "mouths/mouth_half_open.svg",
+          "width": 19,
+          "height": 15,
+          "anchor_x": 3,
+          "anchor_y": 2
+        },
+        {
+          "id": "mouth_happy_open",
+          "file": "mouths/mouth_happy_open.svg",
+          "width": 19,
+          "height": 22,
+          "anchor_x": 3,
+          "anchor_y": 1
+        },
+        {
+          "id": "mouth_annoyed",
+          "file": "mouths/mouth_annoyed.svg",
+          "width": 39,
+          "height": 8,
+          "anchor_x": 3,
+          "anchor_y": 1
+        },
+        {
+          "id": "mouth_sad",
+          "file": "mouths/mouth_sad.svg",
+          "width": 13,
+          "height": 12,
+          "anchor_x": 3,
+          "anchor_y": 1
+        }
+      ]
+    },
+
+    "whiskers": {
+      "type": "bitmap_alpha",
+      "items": [
+        {
+          "id": "whiskers_default",
+          "file": "whiskers/whiskers_default.svg",
+          "width": 8,
+          "height": 8,
+          "anchor_x": 18,
+          "anchor_y": 3,
+          "mirror_right": true
+        },
+        {
+          "id": "whiskers_horny",
+          "file": "whiskers/whiskers_horny.svg",
+          "width": 16,
+          "height": 8,
+          "anchor_x": 18,
+          "anchor_y": 3
+        }
+      ]
+    },
+
+    "effects": {
+      "type": "bitmap_alpha",
+      "items": [
+        {
+          "id": "effect_spark",
+          "file": "effects/effect_spark.svg",
+          "width": 16,
+          "height": 18,
+          "anchor_x": 2,
+          "anchor_y": 2
+        },
+        {
+          "id": "effect_zzz",
+          "file": "effects/effect_zzz.svg",
+          "width": 20,
+          "height": 22,
+          "anchor_x": 3,
+          "anchor_y": 2
+        },
+        {
+          "id": "effect_tear",
+          "file": "effects/effect_tear.svg",
+          "width": 5,
+          "height": 7,
+          "anchor_x": 1,
+          "anchor_y": 2,
+          "description": "A tear drop effect, moves dowsnwards when spawned, repeats every few seconds until removed"
+        }
+      ]
+    },
+
+    "indicators": {
+      "type": "bitmap_alpha",
+      "items": [
+        {
+          "id": "icon_heart_outline",
+          "file": "indicators/icon_heart_outline.svg",
+          "width": 7,
+          "height": 7,
+          "anchor_x": 3,
+          "anchor_y": 3,
+          "meaning": "unknown_kerfur_found"
+        },
+        {
+          "id": "icon_heart_filled",
+          "file": "indicators/icon_heart_filled.svg",
+          "width": 7,
+          "height": 7,
+          "anchor_x": 3,
+          "anchor_y": 3,
+          "meaning": "known_kerfur_friend"
+        },
+        {
+          "id": "icon_bt",
+          "file": "indicators/icon_bt.svg",
+          "width": 5,
+          "height": 7,
+          "anchor_x": 3,
+          "anchor_y": 3,
+          "meaning": "ble_link_or_companion_status"
+        },
+        {
+          "id": "icon_question",
+          "file": "indicators/icon_question.svg",
+          "width": 4,
+          "height": 7,
+          "anchor_x": 3,
+          "anchor_y": 3,
+          "meaning": "identity_unknown_or_not_matched"
+        },
+        {
+          "id": "icon_x",
+          "file": "indicators/icon_x.svg",
+          "width": 5,
+          "height": 7,
+          "anchor_x": 3,
+          "anchor_y": 3,
+          "meaning": "error_or_unavailable"
+        }
+      ]
+    },
+
+
+    "overlays": {
+      "type": "runtime_or_bitmap",
+      "items": [
+        {
+          "id": "overlay_battery_percent",
+          "render_mode": "text_runtime",
+          "meaning": "charging_percent"
+        },
+        {
+          "id": "overlay_charge_bolt",
+          "file": "overlays/overlay_charge_bolt.bin",
+          "width": 5,
+          "height": 7,
+          "anchor_x": 2,
+          "anchor_y": 3
+        }
+      ]
+    }
+  }, 
+
+  "blink_profiles": [
+    {
+      "id": "blink_legacy_default",
+      "type": "legacy",
+      "notes": "Use original blink behavior from previous engine"
+    },
+    {
+      "id": "blink_legacy_sleepy",
+      "type": "legacy",
+      "notes": "Sleepier slower variant if needed"
+    },
+    {
+      "id": "blink_disabled",
+      "type": "none"
+    }
+  ],
+
+  "micro_animations": [
+    {
+      "id": "pupil_idle_drift",
+      "type": "pupil_motion",
+      "duration_ms": 1600,
+      "loop": true,
+      "params": {
+        "radius_x": 1,
+        "radius_y": 1,
+        "speed": "slow"
+      }
+    },
+    {
+      "id": "glance_left",
+      "type": "look_target",
+      "duration_ms": 900,
+      "loop": false,
+      "params": {
+        "target_x": -100,
+        "target_y": 0,
+        "return_to_base": true
+      }
+    },
+    {
+      "id": "glance_right",
+      "type": "look_target",
+      "duration_ms": 900,
+      "loop": false,
+      "params": {
+        "target_x": 100,
+        "target_y": 0,
+        "return_to_base": true
+      }
+    },
+    {
+      "id": "look_up",
+      "type": "look_target",
+      "duration_ms": 700,
+      "loop": false,
+      "params": {
+        "target_x": 0,
+        "target_y": -100,
+        "return_to_base": true
+      }
+    },
+    {
+      "id": "look_down",
+      "type": "look_target",
+      "duration_ms": 700,
+      "loop": false,
+      "params": {
+        "target_x": 0,
+        "target_y": 100,
+        "return_to_base": true
+      }
+    },
+    {
+      "id": "tear_well_up",
+      "type": "effect_spawn",
+      "duration_ms": 1200,
+      "loop": false,
+      "params": {
+        "effect_id": "effect_tear",
+        "offset_x": -2,
+        "offset_y": 2
+      }
+    }
+  ],
+
+  "expressions": [
+    {
+      "id": "PET_EXPR_CALM",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "left_eyeball": "pupil_round_left",
+      "right_eyeball": "pupil_round_right",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_default",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_default",
+      "base_look": { "x": 0, "y": 0 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 40,
+      "pupil_swap_style": "instant",
+      "ambient_motion": ["pupil_idle_drift"]
+    },
+    {
+      "id": "PET_EXPR_CURIOUS",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "left_eyeball": "pupil_glossy_left",
+      "right_eyeball": "pupil_glossy_right",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_default",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_default",
+      "base_look": { "x": 15, "y": 0 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 45,
+      "pupil_swap_style": "instant",
+      "ambient_motion": ["pupil_idle_drift"]
+    },
+    {
+      "id": "PET_EXPR_CONTENT",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "left_eyeball": "pupil_glossy_left",
+      "right_eyeball": "pupil_glossy_right",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_half_open",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_default",
+      "base_look": { "x": 0, "y": 5 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 40,
+      "pupil_swap_style": "instant",
+      "ambient_motion": ["pupil_idle_drift"]
+    },
+    {
+      "id": "PET_EXPR_HAPPY",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "left_eyeball": "pupil_glossy_left",
+      "right_eyeball": "pupil_glossy_right",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_happy_open",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_default",
+      "base_look": { "x": 0, "y": 0 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 45,
+      "pupil_swap_style": "instant",
+      "default_effects": ["effect_spark"]
+    },
+    {
+      "id": "PET_EXPR_PLAYFUL",
+      "left_eye_white": "eye_white_half_playful",
+      "right_eye_white": "eye_white_half_playful",
+      "left_eyeball": "pupil_playful_left",
+      "right_eyeball": "pupil_playful_right",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_happy_open",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_default",
+      "base_look": { "x": 0, "y": 0 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 80,
+      "transition_speed": 50,
+      "pupil_swap_style": "instant"
+    },
+    {
+      "id": "PET_EXPR_SLEEPY",
+      "left_eye_white": "eye_white_blink",
+      "right_eye_white": "eye_white_blink",
+      "left_eyeball": "pupil_none",
+      "right_eyeball": "pupil_none",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_default",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_sleepy",
+      "base_look": { "x": 0, "y": 10 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 25,
+      "transition_speed": 20,
+      "pupil_swap_style": "instant",
+      "slot_overrides": {
+        "left_brow": { "dx": -8,"dy": 7},
+        "right_brow": { "dx": 8, "dy": 7 }
+      }
+    },
+    {
+      "id": "PET_EXPR_NEEDY",
+      "left_eye_white": "eye_white_blink_crying",
+      "right_eye_white": "eye_white_blink_crying",
+      "left_eyeball": "pupil_none",
+      "right_eyeball": "pupil_none",
+      "left_brow": "brow_soft",
+      "right_brow": "brow_soft",
+      "mouth": "mouth_sad",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_default",
+      "base_look": { "x": 0, "y": 8 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 90,
+      "transition_speed": 35,
+      "pupil_swap_style": "instant",
+      "slot_overrides": {
+        "left_brow": { "dx": -5,"dy": 7},
+        "right_brow": { "dx": 7, "dy": 7 },
+        "mouth": { "dx": 3, "dy": 0 }
+      }
+    },
+    {
+      "id": "PET_EXPR_LONELY",
+      "left_eye_white": "eye_white_lonely",
+      "right_eye_white": "eye_white_lonely",
+      "left_eyeball": "pupil_none",
+      "right_eyeball": "pupil_none",
+      "left_brow": "brow_soft",
+      "right_brow": "brow_soft",
+      "mouth": "mouth_sad",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_default",
+      "base_look": { "x": 0, "y": 10 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 30,
+      "pupil_swap_style": "instant",
+      "description": "when this expression is active, the blink eye white replaced with blink crying variant",
+      "slot_overrides": {
+         "left_eye_white": { "dx": -1, "dy": 1},
+         "right_eye_white": { "dx": 3, "dy": 1},
+          "left_brow": { "dx": 3, "dy": 4 },
+          "right_brow": { "dx": -1, "dy": 4 },
+          "mouth": { "dx": 3, "dy": 0 }
+        }
+    },
+    {
+      "id": "PET_EXPR_ANNOYED",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "left_eyeball": "pupil_annoyed",
+      "right_eyeball": "pupil_annoyed",
+      "left_brow": "brow_angry",
+      "right_brow": "brow_angry",
+      "mouth": "mouth_annoyed",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_default",
+      "base_look": { "x": 0, "y": 0 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 100,
+      "transition_speed": 50,
+      "pupil_swap_style": "instant",
+      "description": "A generally annoyed or displeased expression, pupils moving a bit chaotically to reflect agitation, can be used for various negative reactions that aren't strong enough to warrant a full 'overstimulated' expression",
+      "slot_overrides" :{
+      "mouth" : { "dx": -10, "dy": 11 },
+      "left_brow" : { "dx": -4,"dy": -1},
+      "right_brow" : { "dx": 1, "dy": -1},
+      "left_eyeball" : { "dx" :14, "dy": 15},
+      "right_eyeball" : { "dx": 15, "dy": 14}
+      }
+    },
+    {
+      "id": "PET_EXPR_OVERSTIMULATED",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "left_eyeball": "pupil_spiral",
+      "right_eyeball": "pupil_spiral",
+      "left_brow": "brow_neutral",
+      "right_brow": "brow_neutral",
+      "mouth": "mouth_half_open",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_disabled",
+      "base_look": { "x": 0, "y": 0 },
+      "allow_dynamic_pupils": false,
+      "special_eye_mode": true,
+      "base_eye_openness": 100,
+      "transition_speed": 40,
+      "pupil_swap_style": "on_blink",
+      "slot_overrides" :{
+      "left_eyeball": {"dx" : -7, "dy": -5},
+      "right_eyeball": {"dx" : -7, "dy": -5}
+      }
+    },
+    {
+      "id": "PET_EXPR_COZY",
+      "left_eye_white": "eye_white_half_soft",
+      "right_eye_white": "eye_white_half_soft",
+      "left_eyeball": "pupil_cozy_left",
+      "right_eyeball": "pupil_cozy_right",
+      "left_brow": "brow_soft",
+      "right_brow": "brow_soft",
+      "mouth": "mouth_default",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_sleepy",
+      "base_look": { "x": 0, "y": 5 },
+      "allow_dynamic_pupils": true,
+      "special_eye_mode": false,
+      "base_eye_openness": 60,
+      "transition_speed": 25,
+      "pupil_swap_style": "instant",
+      "slot_overrides" :{
+        "left_eyeball": {"dx" : 4, "dy": 0},
+        "right_eyeball": {"dx" : 4, "dy": 0},
+        "left_brow": { "dx": -8,"dy": 6},
+        "right_brow": { "dx": 8, "dy": 6 }
+      }
+    },
+    {
+      "id": "PET_EXPR_DRAINED",
+      "left_eye_white": "eye_white_half_soft",
+      "right_eye_white": "eye_white_half_soft",
+      "left_eyeball": "pupil_low_batt_left",
+      "right_eyeball": "pupil_low_batt_right",
+      "left_brow": "brow_soft",
+      "right_brow": "brow_soft",
+      "mouth": "mouth_sad",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_legacy_sleepy",
+      "base_look": { "x": 0, "y": 6 },
+      "allow_dynamic_pupils": false,
+      "special_eye_mode": false,
+      "base_eye_openness": 50,
+      "transition_speed": 18,
+      "pupil_swap_style": "settle",
+      "dynamic_pupil_scale_x": 25,
+      "dynamic_pupil_scale_y": 20,
+      "dynamic_pupil_speed": 10,
+      "dead_zone_strength": 30,
+      "slot_overrides" :{
+        "left_eyeball": { "dx": 4, "dy": 0 },
+        "right_eyeball": { "dx": 4, "dy": 0 },
+        "left_brow": { "dx": -8,"dy": 6},
+        "right_brow": { "dx": 8, "dy": 6 },
+        "mouth": { "dx": 1, "dy": 4 }
+      }
+    },
+    {
+      "id": "PET_EXPR_ASLEEP",
+      "left_eye_white": "eye_white_blink",
+      "right_eye_white": "eye_white_blink",
+      "left_eyeball": "pupil_none",
+      "right_eyeball": "pupil_none",
+      "left_brow": "brow_soft",
+      "right_brow": "brow_soft",
+      "mouth": "mouth_sad",
+      "whiskers": "whiskers_default",
+      "blink_profile": "blink_disabled",
+      "base_look": { "x": 0, "y": 0 },
+      "allow_dynamic_pupils": false,
+      "special_eye_mode": false,
+      "base_eye_openness": 0,
+      "transition_speed": 15,
+      "pupil_swap_style": "instant",
+      "default_effects": ["effect_zzz"],
+      "slot_overrides" :{
+        "left_brow": { "dx": -8,"dy": 6},
+        "right_brow": { "dx": 8, "dy": 6 },
+        "mouth": { "dx": 3, "dy": 0 }
+
+      }
+    }
+  ],
+
+  "reactions": [
+    {
+      "id": "REACTION_NONE",
+      "duration_ms": 0,
+      "look_offset": { "x": 0, "y": 0 },
+      "blink_override": null,
+      "temporary_indicator": null,
+      "temporary_effect": null,
+      "temporary_left_eyeball": null,
+      "temporary_right_eyeball": null
+    },
+    {
+      "id": "REACTION_BLINK",
+      "duration_ms": 220,
+      "left_eye_white": "eye_white_blink",
+      "right_eye_white": "eye_white_blink",
+      "left_eyeball": "pupil_none",
+      "right_eyeball": "pupil_none"
+    },
+    {
+      "id": "REACTION_GLANCE_LEFT",
+      "duration_ms": 900,
+      "micro_animation": "glance_left"
+    },
+    {
+      "id": "REACTION_GLANCE_RIGHT",
+      "duration_ms": 900,
+      "micro_animation": "glance_right"
+    },
+    {
+      "id": "REACTION_WAKE_BLINK",
+      "duration_ms": 420,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "blink_override": "blink_legacy_default",
+      "look_offset": { "x": 0, "y": -6 }
+    },
+    {
+      "id": "REACTION_STARTLE",
+      "duration_ms": 1000,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "stagger_delay_ms": 120,
+      "description": "adds a micro startle eye animation, to mimic surprise or sudden reactions, can be used in combination with other reactions or expressions for more impact",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "left_eyeball": "pupil_startle",
+      "right_eyeball": "pupil_startle",
+      "slot_overrides" :{
+      "left_eyeball": {"dx" : 14, "dy": 12},
+      "right_eyeball": {"dx" : 10, "dy": 12}
+      },
+      "temporary_effects": [
+        { "effect_id": "effect_tear", "x": 8, "y": 14 },
+        { "effect_id": "effect_tear", "x": 15, "y": 52 },
+        { "effect_id": "effect_tear", "x": 115, "y": 8 },
+        { "effect_id": "effect_tear", "x": 109, "y": 49 }
+      ],
+      "look_offset": { "x": 0, "y": -10 }
+    },
+    {
+      "id": "REACTION_PET_BOW",
+      "duration_ms": 1200,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CONTENT",
+      "right_eye_white": "eye_white_squeezed_x",
+      "left_eye_white": "eye_white_squeezed_x",
+      "right_eyeball": "pupil_none",
+      "left_eyeball": "pupil_none",
+      "mouth": "mouth_happy_open",
+      "slot_overrides":{
+        "right_eye_white": {"dx": -9, "dy": 0},
+        "left_brow": { "dx": 0,"dy": 9},
+        "right_brow": { "dx": 0, "dy": 9 }
+      },
+      "description": "Whiskers wiggle once per activation",
+      "whisker_wiggle": true,
+      "look_offset": { "x": 0, "y": 12 }
+    },
+    {
+      "id": "REACTION_HAPPY_BOUNCE",
+      "duration_ms": 1200,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_HAPPY"
+    },
+    {
+      "id": "REACTION_NOTIF_PING",
+      "duration_ms": 10000,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "mouth": "mouth_half_open",
+      "left_eye_white" : "eye_white_squeezed_x",
+      "left_eyeball": "pupil_none",
+      "indicator": "icon_bt",
+      "description": "Indicates a new notification, changes between calm left eye and a squeezed X eye once per half second for 10 seconds overall"
+    },
+    {
+      "id": "REACTION_NOTIF_BURST",
+      "duration_ms": 1600,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "left_eyeball": "pupil_annoyed",
+      "right_eyeball": "pupil_annoyed",
+      "slot_overrides" :{
+      "mouth" : { "dx": 0, "dy": 8 },
+      "left_brow" : { "dx": -9,"dy": 0},
+      "right_brow" : { "dx": 9, "dy": 0},
+      "left_eyeball" : { "dx" :14, "dy": 15},
+      "right_eyeball" : { "dx": 15, "dy": 14}
+      },
+      "look_offset": { "x": 0, "y": -5 }
+  
+    },
+    {
+      "id": "REACTION_CONNECT_SPARK",
+      "duration_ms": 1400,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CONTENT",
+      "whiskers": "whiskers_horny",
+      "mouth": "mouth_happy_open",
+      "indicator": "icon_bt",
+      "stagger_delay_ms": 120,
+      "whisker_wiggle": true,
+      "temporary_effect": "effect_spark"
+    },
+    {
+      "id": "REACTION_DISCONNECT_SCAN",
+      "duration_ms": 1600,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "allow_dynamic_pupils": true,
+      "left_eyeball": "pupil_disconnect_left",
+      "right_eyeball": "pupil_disconnect_right",
+      "pupil_swap_override": "on_blink"
+    },
+    {
+      "id": "REACTION_CHARGE_PULSE",
+      "duration_ms": 2200,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "allow_dynamic_pupils": true,
+      "left_eyeball": "pupil_charge_left",
+      "right_eyeball": "pupil_charge_right",
+      "overlay": "overlay_battery_percent",
+      "pupil_swap_override": "on_blink"
+    },
+    {
+      "id": "REACTION_LOW_BATT_SAG",
+      "duration_ms": 1800,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_CALM",
+      "mouth": "mouth_sad",
+      "allow_dynamic_pupils": false,
+      "pupil_swap_override": "settle",
+      "left_eyeball": "pupil_low_batt_left",
+      "right_eyeball": "pupil_low_batt_right",
+      "left_eye_white": "eye_white_open_round",
+      "right_eye_white": "eye_white_open_round",
+      "slot_overrides" :{
+      "mouth" : { "dx": 0, "dy": 3 }
+    },
+      "temporary_effects": [
+        { "effect_id": "effect_tear", "x": 100, "y": 50 }
+      ]
+    },
+    {
+      "id": "REACTION_SLEEP_FADE",
+      "duration_ms": 1200,
+      "compose_mode": "rebase",
+      "base_expression": "PET_EXPR_ASLEEP"
+    },
+    {
+      "id": "REACTION_LOOK_UP",
+      "duration_ms": 700,
+      "micro_animation": "look_up"
+    },
+    {
+      "id": "REACTION_LOOK_DOWN",
+      "duration_ms": 700,
+      "micro_animation": "look_down"
+    }
+  ],
+
+  "ui_rules": {
+    "indicator_priority": [
+      "icon_question",
+      "icon_heart_filled",
+      "icon_heart_outline",
+      "icon_bt",
+      "icon_x"
+    ],
+    "charging": {
+      "base_expression": "PET_EXPR_COZY",
+      "show_percent_overlay": true,
+      "percent_cycle_ms": 2500
+    },
+    "social": {
+      "unknown_kerfur_icon": "icon_heart_outline",
+      "known_kerfur_icon": "icon_heart_filled",
+      "unknown_identity_icon": "icon_question"
+    }
+  }
+}
