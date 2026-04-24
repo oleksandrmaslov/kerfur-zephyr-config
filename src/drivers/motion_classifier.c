@@ -1,21 +1,10 @@
 /*
- * Motion classifier — LSM6DSO-focused rewrite.
+ * Kerfur IMU classifier.
  *
- * Architecture:
- *   IDLE  ──(wake/tilt interrupt)──▷  ACTIVE_WINDOW  ──▷  decision
- *                                         │
- *                              ┌──────────┼──────────┐
- *                              ▼          ▼          ▼
- *                         WALK_MAINTAIN  IN_HAND   IDLE
- *
- * Key principles:
- * - Gravity is validated before use (boot-safe).
- * - Step detection uses HW pedometer when available, SW peak fallback otherwise.
- * - Walking confidence has hysteresis (start 70, stop 45).
- * - In-hand detection is delegated to in_hand_detector module.
- * - Gaze tracking uses gravity-relative tilt with a captured neutral reference.
- * - Shake detection is suppressed when device is confidently in-hand.
- * - Mode transitions have a soft lingering window to avoid detection gaps.
+ * The public surface stays event-based. Internally the classifier is a small
+ * pipeline:
+ * raw sample -> dt-aware gravity -> linear acceleration -> feature frame ->
+ * short/long windows -> walking, carry, shake and gaze decisions.
  */
 
 #include <stdbool.h>
@@ -33,66 +22,110 @@
 
 LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 
-/* ── Tuning constants ─────────────────────────────────────────────────── */
+#define DT_MIN_MS                       10
+#define DT_MAX_MS                       180
+#define DT_RESET_GAP_MS                 500LL
 
-#define IDLE_POLL_MS               800
-#define IDLE_WAKE_THRESHOLD_MG     250U
-#define IDLE_WAKE_SMOOTH_MG        180U
+#define IDLE_POLL_MS                    800
+#define IDLE_WAKE_LINEAR_MG             230U
+#define IDLE_WAKE_DELTA_MG              170U
 
-#define FEATURE_WINDOW_FRAMES      12U
+#define FEATURE_HISTORY_FRAMES          64U
+#define FEATURE_SHORT_WINDOW_MS         650LL
+#define FEATURE_LONG_WINDOW_MS          2200LL
 
-/* Step detection (software fallback). */
-#define STEP_PEAK_MG               300U
-#define STEP_MIN_INTERVAL_MS       300LL
-#define STEP_MAX_INTERVAL_MS       850LL
+#define GRAVITY_MIN_MAG_MG              820U
+#define GRAVITY_MAX_MAG_MG              1180U
+#define GRAVITY_CALM_TAU_MS             220U
+#define GRAVITY_MOVING_TAU_MS           900U
+#define GRAVITY_ROUGH_TAU_MS            1800U
 
-/* Gravity estimation. */
-#define GRAVITY_MIN_MAG_SQ         722500U   /* 850 mg squared */
-#define GRAVITY_MAX_MAG_SQ         1322500U  /* 1150 mg squared */
-#define GRAVITY_FAST_ALPHA         6
-#define GRAVITY_SLOW_ALPHA         14
+#define STEP_PEAK_MG                    260U
+#define STEP_MIN_INTERVAL_MS            300LL
+#define STEP_MAX_INTERVAL_MS            900LL
+#define STEP_RECENT_WINDOW_MS           2400LL
 
-/* Gaze. */
-#define GAZE_DEADBAND                3
-#define GAZE_IDLE_RAW_THRESHOLD      8       /* raw change needed to reset idle timer (was 4, too sensitive to gravity noise) */
-#define GAZE_MAX_DELTA_NORMAL        18      /* per-sample max step toward raw target (was 10, felt sluggish) */
-#define GAZE_MAX_DELTA_LOW_BATT      8
-#define GAZE_HOLD_AFTER_RELEASE_MS   4000LL  /* hold gaze position after hand goes still before decaying */
-#define GAZE_DECAY_SPEED             2       /* per-sample step toward center during decay */
-#define GAZE_HOLD_RESIDUAL_CONF      40U     /* confidence while gaze is held (keeps renderer using look_target) */
-#define GAZE_DECAY_RESIDUAL_CONF     25U     /* confidence during slow decay to center */
-#define LOOK_SUPPRESS_AFTER_ROUGH_MS 800LL
-#define LOOK_SUPPRESS_AFTER_WALK_MS  500LL
+#define SURFACE_STILL_SCORE             78U
+#define ACTIVE_MOTION_MG                55U
 
-/* Shake cooldowns. */
-#define SHAKE_COOLDOWN_LIGHT_MS    800
-#define SHAKE_COOLDOWN_PLAY_MS     900
-#define SHAKE_COOLDOWN_ROUGH_MS    900
-#define SHAKE_COOLDOWN_IMPACT_MS   1200
+#define GAZE_DEADBAND                   4
+#define GAZE_IDLE_RAW_THRESHOLD         7
+#define GAZE_SLEW_UNITS_PER_S           280
+#define GAZE_LOW_BATT_SLEW_UNITS_PER_S  150
+#define GAZE_DECAY_UNITS_PER_S          55
+#define GAZE_HOLD_AFTER_STOP_MS         2600LL
+#define GAZE_HOLD_AFTER_LOST_MS         1200LL
+#define GAZE_HOLD_CONFIDENCE            38U
+#define GAZE_DECAY_CONFIDENCE           24U
+#define LOOK_SUPPRESS_AFTER_ROUGH_MS    700LL
+#define LOOK_SUPPRESS_AFTER_WALK_MS     500LL
 
-/* ── Feature frame for windowed classification ────────────────────────── */
+#define SHAKE_COOLDOWN_LIGHT_MS         800LL
+#define SHAKE_COOLDOWN_PLAY_MS          900LL
+#define SHAKE_COOLDOWN_ROUGH_MS         1000LL
+#define SHAKE_COOLDOWN_IMPACT_MS        1200LL
 
-struct motion_feature_frame {
-	uint16_t motion_mg;
-	uint16_t smooth_motion_mg;
-	uint16_t jerk_mg;
+#define WALK_CONF_Q8_MAX                (100 * 256)
+
+struct imu_processed_frame {
+	int64_t now_ms;
+	int32_t dt_ms;
+
+	int16_t accel_x_mg;
+	int16_t accel_y_mg;
+	int16_t accel_z_mg;
+
+	int16_t gravity_x_mg;
+	int16_t gravity_y_mg;
+	int16_t gravity_z_mg;
+
+	int16_t linear_x_mg;
+	int16_t linear_y_mg;
+	int16_t linear_z_mg;
+
+	uint16_t accel_magnitude_mg;
+	uint16_t linear_motion_mg;
+	uint16_t smooth_linear_motion_mg;
+	uint16_t jerk_mg_per_s;
 	uint16_t orientation_delta_mg;
-	uint16_t orientation_rate_mg;
+	uint16_t orientation_rate_mg_per_s;
 	uint32_t gyro_sum_mdps;
-	int64_t  timestamp_ms;
+	uint32_t smooth_gyro_sum_mdps;
+
+	uint8_t stability_score;
+	uint8_t chaos_score;
+	uint8_t cadence_score;
+	uint8_t surface_still_score;
+	uint8_t hand_motion_score;
+	uint8_t rotation_score;
+
+	bool gravity_valid;
+	bool gyro_valid;
 };
 
-struct motion_feature_summary {
-	uint16_t avg_motion_mg;
-	uint16_t avg_jerk_mg;
+struct imu_window_summary {
+	uint8_t count;
+	uint16_t span_ms;
+
+	uint16_t avg_accel_magnitude_mg;
+	uint16_t avg_linear_motion_mg;
+	uint16_t peak_linear_motion_mg;
+	uint16_t avg_smooth_linear_motion_mg;
+	uint16_t avg_jerk_mg_per_s;
+	uint16_t peak_jerk_mg_per_s;
 	uint16_t avg_orientation_delta_mg;
+	uint16_t avg_orientation_rate_mg_per_s;
+	uint16_t peak_orientation_rate_mg_per_s;
 	uint32_t avg_gyro_sum_mdps;
-	uint8_t  stability_confidence;
-	uint8_t  chaos_confidence;
-	uint8_t  cadence_confidence;
-};
+	uint32_t peak_gyro_sum_mdps;
 
-/* ── Classifier modes ─────────────────────────────────────────────────── */
+	uint8_t stability_score;
+	uint8_t chaos_score;
+	uint8_t cadence_score;
+	uint8_t surface_still_score;
+	uint8_t hand_motion_score;
+	uint8_t rotation_score;
+};
 
 enum motion_classifier_mode {
 	MODE_OFF = 0,
@@ -102,43 +135,41 @@ enum motion_classifier_mode {
 	MODE_IN_HAND_TRACK,
 };
 
-/* ── Global state ─────────────────────────────────────────────────────── */
-
 struct motion_classifier_state {
 	struct k_work_delayable sample_work;
 	struct in_hand_detector in_hand_det;
 	enum motion_classifier_mode mode;
 	struct motion_sensor_sample last_sample;
 
-	/* Flags. */
 	bool enabled;
 	bool initialized;
 	bool debug_logging;
 	bool battery_low;
 	bool battery_critical;
-	bool battery_percent_known;
 	bool charging;
+	bool battery_percent_known;
 	bool gravity_valid;
+	bool have_last_sample;
+	bool have_prev_linear;
 	bool hw_counter_valid;
 	bool pending_steps_from_hw;
+	bool over_step_threshold;
 	bool walking_active;
 	bool in_hand;
-	bool over_step_threshold;
 	bool look_reference_valid;
 
-	int8_t  battery_percent;
+	int8_t battery_percent;
 
-	/* Gravity (low-pass). */
 	int16_t gravity_x;
 	int16_t gravity_y;
 	int16_t gravity_z;
-
-	/* Previous linear accel (for jerk). */
 	int16_t prev_linear_x;
 	int16_t prev_linear_y;
 	int16_t prev_linear_z;
 
-	/* Gaze reference. */
+	uint16_t smooth_linear_motion_mg;
+	uint32_t smooth_gyro_sum_mdps;
+
 	int16_t look_ref_x;
 	int16_t look_ref_y;
 	int16_t look_ref_z;
@@ -147,7 +178,6 @@ struct motion_classifier_state {
 	int16_t look_raw_prev_x;
 	int16_t look_raw_prev_y;
 
-	/* Confidences. */
 	uint8_t walking_confidence;
 	uint8_t pickup_confidence;
 	uint8_t in_hand_confidence;
@@ -155,21 +185,22 @@ struct motion_classifier_state {
 	uint8_t stability_confidence;
 	uint8_t chaos_confidence;
 	uint8_t cadence_confidence;
+	uint8_t surface_still_confidence;
+	uint8_t hand_motion_confidence;
+	uint8_t rotation_confidence;
 
-	/* Step tracking. */
+	int32_t walking_confidence_q8;
 	uint16_t last_hw_step_counter;
 	uint32_t pending_steps;
-	uint8_t  recent_step_count;
-	uint8_t  recent_step_index;
-	int64_t  recent_step_ms[6];
-	int64_t  last_peak_ms;
+	uint8_t recent_step_count;
+	uint8_t recent_step_index;
+	int64_t recent_step_ms[8];
+	int64_t last_peak_ms;
 
-	/* Feature window. */
-	struct motion_feature_frame frames[FEATURE_WINDOW_FRAMES];
+	struct imu_processed_frame frames[FEATURE_HISTORY_FRAMES];
 	uint8_t frame_count;
 	uint8_t frame_index;
 
-	/* Timestamps. */
 	int64_t active_until_ms;
 	int64_t last_motion_wake_ms;
 	int64_t suppress_look_until_ms;
@@ -183,9 +214,9 @@ struct motion_classifier_state {
 	int64_t last_in_hand_ms;
 	int64_t last_motion_sample_ms;
 	int64_t last_still_ms;
+	int64_t last_mode_change_ms;
 
-	/* Last-published (for change detection). */
-	bool    pub_in_hand;
+	bool pub_in_hand;
 	uint8_t pub_pickup_conf;
 	uint8_t pub_in_hand_conf;
 	uint8_t pub_walk_conf;
@@ -196,209 +227,587 @@ struct motion_classifier_state {
 
 static struct motion_classifier_state g_mc;
 
-/* ── Utilities ────────────────────────────────────────────────────────── */
+static uint8_t clamp_u8(int value)
+{
+	return (uint8_t)CLAMP(value, 0, 100);
+}
 
-static uint8_t clamp_u8(int v) { return (uint8_t)CLAMP(v, 0, 100); }
-static int16_t clamp_look(int v) { return (int16_t)CLAMP(v, -100, 100); }
-static int     abs16(int16_t v) { return (v < 0) ? -v : v; }
-static int64_t max64(int64_t a, int64_t b) { return (a > b) ? a : b; }
+static uint16_t clamp_u16_i32(int32_t value)
+{
+	return (uint16_t)CLAMP(value, 0, UINT16_MAX);
+}
+
+static int16_t clamp_look(int value)
+{
+	return (int16_t)CLAMP(value, -100, 100);
+}
+
+static int abs_i32(int value)
+{
+	return (value < 0) ? -value : value;
+}
+
+static int64_t max64(int64_t a, int64_t b)
+{
+	return (a > b) ? a : b;
+}
+
+static uint32_t isqrt_u32(uint32_t value)
+{
+	uint32_t bit = 1UL << 30;
+	uint32_t result = 0;
+
+	while (bit > value) {
+		bit >>= 2;
+	}
+	while (bit != 0U) {
+		if (value >= result + bit) {
+			value -= result + bit;
+			result = (result >> 1) + bit;
+		} else {
+			result >>= 1;
+		}
+		bit >>= 2;
+	}
+
+	return result;
+}
+
+static uint16_t vec_mag_mg(int16_t x, int16_t y, int16_t z)
+{
+	uint32_t xx = (uint32_t)((int32_t)x * (int32_t)x);
+	uint32_t yy = (uint32_t)((int32_t)y * (int32_t)y);
+	uint32_t zz = (uint32_t)((int32_t)z * (int32_t)z);
+
+	return clamp_u16_i32((int32_t)isqrt_u32(xx + yy + zz));
+}
+
+static uint16_t vec_distance_mg(int16_t ax, int16_t ay, int16_t az,
+				int16_t bx, int16_t by, int16_t bz)
+{
+	return vec_mag_mg((int16_t)(ax - bx), (int16_t)(ay - by),
+			  (int16_t)(az - bz));
+}
 
 static int sample_period_ms(void)
 {
 	int hz = CONFIG_KERFUR_MOTION_ACTIVE_ODR_HZ;
-	return (hz > 0) ? MAX(20, 1000 / hz) : 100;
+
+	return (hz > 0) ? MAX(DT_MIN_MS, 1000 / hz) : 40;
 }
 
-/* ── Axis normalisation ───────────────────────────────────────────────── */
-
-static void normalise_sample(struct motion_sensor_sample *s)
+static int32_t sample_dt_ms(const struct motion_sensor_sample *sample,
+			    bool *reset_history)
 {
-	int16_t ax, ay, az, gx, gy, gz;
+	int64_t dt;
 
-	if (s == NULL) {
-		return;
+	*reset_history = false;
+	if (!g_mc.have_last_sample || g_mc.last_sample.timestamp_ms <= 0LL ||
+	    sample->timestamp_ms <= g_mc.last_sample.timestamp_ms) {
+		return sample_period_ms();
 	}
-	ax = s->accel_mg_x;  ay = s->accel_mg_y;  az = s->accel_mg_z;
-	gx = s->gyro_mdps_x; gy = s->gyro_mdps_y; gz = s->gyro_mdps_z;
 
-	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_SWAP_XY)) {
-		int16_t t;
-		t = ax; ax = ay; ay = t;
-		t = gx; gx = gy; gy = t;
+	dt = sample->timestamp_ms - g_mc.last_sample.timestamp_ms;
+	if (dt > DT_RESET_GAP_MS) {
+		*reset_history = true;
 	}
-	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_INVERT_X)) { ax = -ax; gx = -gx; }
-	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_INVERT_Y)) { ay = -ay; gy = -gy; }
-	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_INVERT_Z)) { az = -az; gz = -gz; }
 
-	s->accel_mg_x = ax; s->accel_mg_y = ay; s->accel_mg_z = az;
-	s->gyro_mdps_x = gx; s->gyro_mdps_y = gy; s->gyro_mdps_z = gz;
+	return (int32_t)CLAMP(dt, DT_MIN_MS, DT_MAX_MS);
 }
 
-/* ── Gravity estimation ───────────────────────────────────────────────── */
-
-static bool gravity_sample_plausible(const struct motion_sensor_sample *s)
+static uint16_t lp_denominator(uint16_t tau_ms, int32_t dt_ms)
 {
-	int32_t x = s->accel_mg_x, y = s->accel_mg_y, z = s->accel_mg_z;
-	uint32_t mag_sq = (uint32_t)(x * x + y * y + z * z);
-	return (mag_sq >= GRAVITY_MIN_MAG_SQ) && (mag_sq <= GRAVITY_MAX_MAG_SQ);
+	if (dt_ms <= 0) {
+		return tau_ms;
+	}
+	if ((uint16_t)dt_ms >= tau_ms) {
+		return 1U;
+	}
+
+	return (uint16_t)MAX(1, (tau_ms + (uint16_t)dt_ms / 2U) / (uint16_t)dt_ms);
 }
 
-static void update_gravity(const struct motion_sensor_sample *s)
+static int16_t lp_i16_dt(int16_t current, int16_t target,
+			 uint16_t tau_ms, int32_t dt_ms)
 {
-	bool plausible = gravity_sample_plausible(s);
-	int alpha;
+	int32_t delta = (int32_t)target - (int32_t)current;
+	uint16_t denom = lp_denominator(tau_ms, dt_ms);
+
+	return (int16_t)(current + (int16_t)(delta / denom));
+}
+
+static uint16_t lp_u16_dt(uint16_t current, uint16_t target,
+			  uint16_t tau_ms, int32_t dt_ms)
+{
+	int32_t delta = (int32_t)target - (int32_t)current;
+	uint16_t denom = lp_denominator(tau_ms, dt_ms);
+
+	return (uint16_t)((int32_t)current + (delta / denom));
+}
+
+static uint32_t lp_u32_dt(uint32_t current, uint32_t target,
+			  uint16_t tau_ms, int32_t dt_ms)
+{
+	int64_t delta = (int64_t)target - (int64_t)current;
+	uint16_t denom = lp_denominator(tau_ms, dt_ms);
+
+	return (uint32_t)((int64_t)current + (delta / denom));
+}
+
+static uint16_t rate_u16(uint16_t delta, int32_t dt_ms)
+{
+	if (dt_ms <= 0) {
+		return 0U;
+	}
+
+	return clamp_u16_i32((int32_t)(((uint32_t)delta * 1000U) / (uint32_t)dt_ms));
+}
+
+static uint8_t score_more_equal_u16(uint16_t value, uint16_t full_at)
+{
+	if (value >= full_at) {
+		return 100U;
+	}
+
+	return (uint8_t)(((uint32_t)value * 100U) / full_at);
+}
+
+static uint8_t score_band_u16(uint16_t value, uint16_t low, uint16_t ideal,
+			      uint16_t high)
+{
+	if (value < low || value > high) {
+		return 0U;
+	}
+	if (value == ideal) {
+		return 100U;
+	}
+	if (value < ideal) {
+		return (uint8_t)(((uint32_t)(value - low) * 100U) /
+				 MAX(1U, (uint32_t)(ideal - low)));
+	}
+
+	return (uint8_t)(100U - (((uint32_t)(value - ideal) * 100U) /
+				 MAX(1U, (uint32_t)(high - ideal))));
+}
+
+static void set_walking_confidence(uint8_t confidence)
+{
+	g_mc.walking_confidence = clamp_u8(confidence);
+	g_mc.walking_confidence_q8 = (int32_t)g_mc.walking_confidence * 256;
+}
+
+static void adjust_walking_confidence(int rate_per_s, int32_t dt_ms)
+{
+	int64_t delta;
+
+	dt_ms = CLAMP(dt_ms, DT_MIN_MS, DT_MAX_MS);
+	delta = (int64_t)rate_per_s * 256LL * (int64_t)dt_ms;
+	g_mc.walking_confidence_q8 = (int32_t)CLAMP(
+		(int64_t)g_mc.walking_confidence_q8 + (delta / 1000LL),
+		0LL, (int64_t)WALK_CONF_Q8_MAX);
+	g_mc.walking_confidence = (uint8_t)((g_mc.walking_confidence_q8 + 128) / 256);
+}
+
+static bool accel_magnitude_plausible(uint16_t magnitude_mg)
+{
+	return magnitude_mg >= GRAVITY_MIN_MAG_MG &&
+	       magnitude_mg <= GRAVITY_MAX_MAG_MG;
+}
+
+static void update_gravity(const struct motion_sensor_sample *sample,
+			   uint16_t accel_mag_mg,
+			   uint16_t accel_delta_mg,
+			   uint32_t gyro_sum_mdps,
+			   int32_t dt_ms)
+{
+	bool plausible = accel_magnitude_plausible(accel_mag_mg);
+	bool calm;
+	uint16_t tau_ms;
 
 	if (!g_mc.gravity_valid) {
 		if (plausible) {
-			g_mc.gravity_x = s->accel_mg_x;
-			g_mc.gravity_y = s->accel_mg_y;
-			g_mc.gravity_z = s->accel_mg_z;
+			g_mc.gravity_x = sample->accel_mg_x;
+			g_mc.gravity_y = sample->accel_mg_y;
+			g_mc.gravity_z = sample->accel_mg_z;
 			g_mc.gravity_valid = true;
 		}
 		return;
 	}
 
-	alpha = plausible ? GRAVITY_FAST_ALPHA : GRAVITY_SLOW_ALPHA;
-	g_mc.gravity_x += (s->accel_mg_x - g_mc.gravity_x) / alpha;
-	g_mc.gravity_y += (s->accel_mg_y - g_mc.gravity_y) / alpha;
-	g_mc.gravity_z += (s->accel_mg_z - g_mc.gravity_z) / alpha;
+	if (!plausible) {
+		return;
+	}
+
+	calm = accel_delta_mg <= 45U && gyro_sum_mdps <= 6000U;
+	if (calm) {
+		tau_ms = GRAVITY_CALM_TAU_MS;
+	} else if (accel_delta_mg >= 220U || gyro_sum_mdps >= 35000U) {
+		tau_ms = GRAVITY_ROUGH_TAU_MS;
+	} else {
+		tau_ms = GRAVITY_MOVING_TAU_MS;
+	}
+
+	g_mc.gravity_x = lp_i16_dt(g_mc.gravity_x, sample->accel_mg_x, tau_ms, dt_ms);
+	g_mc.gravity_y = lp_i16_dt(g_mc.gravity_y, sample->accel_mg_y, tau_ms, dt_ms);
+	g_mc.gravity_z = lp_i16_dt(g_mc.gravity_z, sample->accel_mg_z, tau_ms, dt_ms);
+
+	if (!accel_magnitude_plausible(vec_mag_mg(g_mc.gravity_x, g_mc.gravity_y,
+						  g_mc.gravity_z))) {
+		g_mc.gravity_valid = false;
+	}
 }
 
-/* ── Feature window ───────────────────────────────────────────────────── */
-
-static void append_frame(const struct motion_feature_frame *f)
+static uint8_t compute_stability_score(const struct imu_processed_frame *f)
 {
-	g_mc.frames[g_mc.frame_index] = *f;
-	g_mc.frame_index = (g_mc.frame_index + 1U) % FEATURE_WINDOW_FRAMES;
-	if (g_mc.frame_count < FEATURE_WINDOW_FRAMES) {
+	int score = 100;
+	int accel_error = abs_i32((int)f->accel_magnitude_mg - 1000);
+
+	score -= MIN(45, ((int)f->smooth_linear_motion_mg * 45) / 180);
+	score -= MIN(35, ((int)f->jerk_mg_per_s * 35) / 3200);
+	score -= MIN(30, ((int)f->smooth_gyro_sum_mdps * 30) / 18000);
+	score -= MIN(25, ((int)f->orientation_rate_mg_per_s * 25) / 650);
+	if (accel_error > 120) {
+		score -= MIN(25, (accel_error - 120) / 8);
+	}
+
+	return clamp_u8(score);
+}
+
+static uint8_t compute_surface_still_score(const struct imu_processed_frame *f)
+{
+	int score = 100;
+	int accel_error = abs_i32((int)f->accel_magnitude_mg - 1000);
+
+	score -= MIN(55, ((int)f->smooth_linear_motion_mg * 55) / 75);
+	score -= MIN(35, ((int)f->jerk_mg_per_s * 35) / 1300);
+	score -= MIN(35, ((int)f->smooth_gyro_sum_mdps * 35) / 6500);
+	score -= MIN(30, ((int)f->orientation_rate_mg_per_s * 30) / 180);
+	if (accel_error > 75) {
+		score -= MIN(35, (accel_error - 75) / 4);
+	}
+
+	return clamp_u8(score);
+}
+
+static uint8_t compute_chaos_score(const struct imu_processed_frame *f)
+{
+	int score = 0;
+	int accel_error = abs_i32((int)f->accel_magnitude_mg - 1000);
+
+	if (f->linear_motion_mg > 360U) {
+		score += ((int)f->linear_motion_mg - 360) / 7;
+	}
+	if (f->jerk_mg_per_s > 2800U) {
+		score += ((int)f->jerk_mg_per_s - 2800) / 80;
+	}
+	if (f->gyro_sum_mdps > 26000U) {
+		score += ((int)f->gyro_sum_mdps - 26000) / 900;
+	}
+	if (accel_error > 180) {
+		score += (accel_error - 180) / 6;
+	}
+
+	return clamp_u8(score);
+}
+
+static uint8_t compute_rotation_score(const struct imu_processed_frame *f)
+{
+	int score = 0;
+
+	score += MIN(55, ((int)f->orientation_rate_mg_per_s * 55) / 520);
+	score += MIN(55, ((int)f->gyro_sum_mdps * 55) / 36000);
+	if (f->linear_motion_mg > 420U) {
+		score -= MIN(35, ((int)f->linear_motion_mg - 420) / 10);
+	}
+
+	return clamp_u8(score);
+}
+
+static uint8_t compute_hand_motion_score(const struct imu_processed_frame *f)
+{
+	int score = 0;
+
+	score += (int)score_band_u16(f->linear_motion_mg, 8U, 70U, 360U) / 2;
+	score += (int)score_band_u16(f->smooth_linear_motion_mg, 6U, 45U, 220U) / 3;
+	score += (int)score_band_u16(f->orientation_rate_mg_per_s, 25U, 220U, 900U) / 3;
+	score += (int)score_band_u16((uint16_t)MIN(f->gyro_sum_mdps, 60000U),
+				     1500U, 14000U, 52000U) / 4;
+	score += (int)f->stability_score / 6;
+	score -= (int)f->chaos_score / 2;
+
+	return clamp_u8(score);
+}
+
+static bool build_frame(const struct motion_sensor_sample *sample,
+			struct imu_processed_frame *frame)
+{
+	bool reset_history;
+	int32_t dt_ms;
+	uint16_t accel_mag;
+	uint16_t accel_delta = 0U;
+	uint32_t gyro_sum = 0U;
+	int16_t prev_gravity_x;
+	int16_t prev_gravity_y;
+	int16_t prev_gravity_z;
+	bool had_gravity;
+	int16_t linear_x;
+	int16_t linear_y;
+	int16_t linear_z;
+	uint16_t linear_delta = 0U;
+	uint16_t orientation_delta;
+
+	memset(frame, 0, sizeof(*frame));
+
+	dt_ms = sample_dt_ms(sample, &reset_history);
+	accel_mag = vec_mag_mg(sample->accel_mg_x, sample->accel_mg_y,
+			       sample->accel_mg_z);
+	if (g_mc.have_last_sample && !reset_history) {
+		accel_delta = vec_distance_mg(sample->accel_mg_x, sample->accel_mg_y,
+					      sample->accel_mg_z,
+					      g_mc.last_sample.accel_mg_x,
+					      g_mc.last_sample.accel_mg_y,
+					      g_mc.last_sample.accel_mg_z);
+	}
+	if (sample->gyro_valid) {
+		gyro_sum = (uint32_t)abs_i32(sample->gyro_mdps_x) +
+			   (uint32_t)abs_i32(sample->gyro_mdps_y) +
+			   (uint32_t)abs_i32(sample->gyro_mdps_z);
+	}
+
+	prev_gravity_x = g_mc.gravity_x;
+	prev_gravity_y = g_mc.gravity_y;
+	prev_gravity_z = g_mc.gravity_z;
+	had_gravity = g_mc.gravity_valid;
+	update_gravity(sample, accel_mag, accel_delta, gyro_sum, dt_ms);
+	if (!g_mc.gravity_valid) {
+		return false;
+	}
+
+	linear_x = sample->accel_mg_x - g_mc.gravity_x;
+	linear_y = sample->accel_mg_y - g_mc.gravity_y;
+	linear_z = sample->accel_mg_z - g_mc.gravity_z;
+	if (g_mc.have_prev_linear && !reset_history) {
+		linear_delta = vec_distance_mg(linear_x, linear_y, linear_z,
+					       g_mc.prev_linear_x,
+					       g_mc.prev_linear_y,
+					       g_mc.prev_linear_z);
+	}
+
+	if (had_gravity && !reset_history) {
+		orientation_delta = vec_distance_mg(g_mc.gravity_x, g_mc.gravity_y,
+						    g_mc.gravity_z, prev_gravity_x,
+						    prev_gravity_y, prev_gravity_z);
+	} else {
+		orientation_delta = 0U;
+	}
+
+	g_mc.smooth_linear_motion_mg = lp_u16_dt(g_mc.smooth_linear_motion_mg,
+						 vec_mag_mg(linear_x, linear_y,
+							    linear_z),
+						 180U, dt_ms);
+	g_mc.smooth_gyro_sum_mdps = lp_u32_dt(g_mc.smooth_gyro_sum_mdps, gyro_sum,
+					      180U, dt_ms);
+
+	frame->now_ms = sample->timestamp_ms;
+	frame->dt_ms = dt_ms;
+	frame->accel_x_mg = sample->accel_mg_x;
+	frame->accel_y_mg = sample->accel_mg_y;
+	frame->accel_z_mg = sample->accel_mg_z;
+	frame->gravity_x_mg = g_mc.gravity_x;
+	frame->gravity_y_mg = g_mc.gravity_y;
+	frame->gravity_z_mg = g_mc.gravity_z;
+	frame->linear_x_mg = linear_x;
+	frame->linear_y_mg = linear_y;
+	frame->linear_z_mg = linear_z;
+	frame->accel_magnitude_mg = accel_mag;
+	frame->linear_motion_mg = vec_mag_mg(linear_x, linear_y, linear_z);
+	frame->smooth_linear_motion_mg = g_mc.smooth_linear_motion_mg;
+	frame->jerk_mg_per_s = rate_u16(linear_delta, dt_ms);
+	frame->orientation_delta_mg = orientation_delta;
+	frame->orientation_rate_mg_per_s = rate_u16(orientation_delta, dt_ms);
+	frame->gyro_sum_mdps = gyro_sum;
+	frame->smooth_gyro_sum_mdps = g_mc.smooth_gyro_sum_mdps;
+	frame->gravity_valid = g_mc.gravity_valid;
+	frame->gyro_valid = sample->gyro_valid;
+
+	frame->stability_score = compute_stability_score(frame);
+	frame->surface_still_score = compute_surface_still_score(frame);
+	frame->chaos_score = compute_chaos_score(frame);
+	frame->rotation_score = compute_rotation_score(frame);
+	frame->hand_motion_score = compute_hand_motion_score(frame);
+	frame->cadence_score = g_mc.cadence_confidence;
+
+	if (reset_history) {
+		g_mc.frame_count = 0U;
+		g_mc.frame_index = 0U;
+	}
+
+	return true;
+}
+
+static void append_frame(const struct imu_processed_frame *frame)
+{
+	g_mc.frames[g_mc.frame_index] = *frame;
+	g_mc.frame_index = (g_mc.frame_index + 1U) % FEATURE_HISTORY_FRAMES;
+	if (g_mc.frame_count < FEATURE_HISTORY_FRAMES) {
 		g_mc.frame_count++;
 	}
 }
 
-static void summarise_features(struct motion_feature_summary *out, int64_t now_ms)
+static void summarise_window(struct imu_window_summary *out, int64_t now_ms,
+			     int64_t window_ms)
 {
-	uint32_t sum_motion = 0, sum_jerk = 0, sum_orient = 0;
-	uint64_t sum_gyro = 0;
-	uint8_t  stable = 0, chaotic = 0, smooth = 0;
-	uint8_t  count = 0, i;
+	uint32_t sum_accel = 0U;
+	uint32_t sum_linear = 0U;
+	uint32_t sum_smooth = 0U;
+	uint32_t sum_jerk = 0U;
+	uint32_t sum_orient_delta = 0U;
+	uint32_t sum_orient_rate = 0U;
+	uint64_t sum_gyro = 0U;
+	uint32_t sum_stability = 0U;
+	uint32_t sum_chaos = 0U;
+	uint32_t sum_cadence = 0U;
+	uint32_t sum_surface = 0U;
+	uint32_t sum_hand = 0U;
+	uint32_t sum_rotation = 0U;
+	uint8_t count = 0U;
+	int64_t oldest_ms = now_ms;
 
 	memset(out, 0, sizeof(*out));
 
-	for (i = 0; i < g_mc.frame_count; i++) {
-		const struct motion_feature_frame *f = &g_mc.frames[i];
-		if ((now_ms - f->timestamp_ms) > 2000LL) {
+	for (uint8_t i = 0U; i < g_mc.frame_count; i++) {
+		const struct imu_processed_frame *f = &g_mc.frames[i];
+
+		if (f->now_ms <= 0LL || (now_ms - f->now_ms) > window_ms) {
 			continue;
 		}
-		sum_motion += f->motion_mg;
-		sum_jerk   += f->jerk_mg;
-		sum_orient += f->orientation_delta_mg;
-		sum_gyro   += f->gyro_sum_mdps;
-
-		/* Classify each frame. */
-		if (f->motion_mg >= 15U && f->motion_mg <= 280U &&
-		    f->jerk_mg <= 250U && f->gyro_sum_mdps <= 28000U) {
-			stable++;
-		}
-		if (f->orientation_delta_mg >= 10U && f->orientation_delta_mg <= 260U &&
-		    f->jerk_mg <= 260U && f->gyro_sum_mdps <= 32000U) {
-			smooth++;
-		}
-		if (f->motion_mg >= 600U || f->jerk_mg >= 350U || f->gyro_sum_mdps >= 45000U) {
-			chaotic++;
-		}
 		count++;
+		oldest_ms = MIN(oldest_ms, f->now_ms);
+
+		sum_accel += f->accel_magnitude_mg;
+		sum_linear += f->linear_motion_mg;
+		sum_smooth += f->smooth_linear_motion_mg;
+		sum_jerk += f->jerk_mg_per_s;
+		sum_orient_delta += f->orientation_delta_mg;
+		sum_orient_rate += f->orientation_rate_mg_per_s;
+		sum_gyro += f->gyro_sum_mdps;
+		sum_stability += f->stability_score;
+		sum_chaos += f->chaos_score;
+		sum_cadence += f->cadence_score;
+		sum_surface += f->surface_still_score;
+		sum_hand += f->hand_motion_score;
+		sum_rotation += f->rotation_score;
+
+		out->peak_linear_motion_mg = MAX(out->peak_linear_motion_mg,
+						 f->linear_motion_mg);
+		out->peak_jerk_mg_per_s = MAX(out->peak_jerk_mg_per_s,
+					      f->jerk_mg_per_s);
+		out->peak_orientation_rate_mg_per_s =
+			MAX(out->peak_orientation_rate_mg_per_s,
+			    f->orientation_rate_mg_per_s);
+		out->peak_gyro_sum_mdps = MAX(out->peak_gyro_sum_mdps,
+					      f->gyro_sum_mdps);
 	}
 
 	if (count == 0U) {
 		return;
 	}
 
-	out->avg_motion_mg = (uint16_t)(sum_motion / count);
-	out->avg_jerk_mg   = (uint16_t)(sum_jerk / count);
-	out->avg_orientation_delta_mg = (uint16_t)(sum_orient / count);
+	out->count = count;
+	out->span_ms = clamp_u16_i32((int32_t)(now_ms - oldest_ms));
+	out->avg_accel_magnitude_mg = (uint16_t)(sum_accel / count);
+	out->avg_linear_motion_mg = (uint16_t)(sum_linear / count);
+	out->avg_smooth_linear_motion_mg = (uint16_t)(sum_smooth / count);
+	out->avg_jerk_mg_per_s = (uint16_t)(sum_jerk / count);
+	out->avg_orientation_delta_mg = (uint16_t)(sum_orient_delta / count);
+	out->avg_orientation_rate_mg_per_s = (uint16_t)(sum_orient_rate / count);
 	out->avg_gyro_sum_mdps = (uint32_t)(sum_gyro / count);
-
-	out->stability_confidence = clamp_u8(
-		20 + stable * 7 + smooth * 4
-		- chaotic * 9
-		- (int)MAX(0, (int)out->avg_jerk_mg - 200) / 6
-		- (int)MAX(0, (int)out->avg_gyro_sum_mdps - 24000) / 2000);
-
-	out->chaos_confidence = clamp_u8(
-		chaotic * 15
-		+ (int)MAX(0, (int)out->avg_jerk_mg - 160) / 4
-		+ (int)MAX(0, (int)out->avg_gyro_sum_mdps - 18000) / 1600
-		+ (int)MAX(0, (int)out->avg_motion_mg - 260) / 6
-		- smooth * 3);
-
-	/* Cadence confidence is computed separately after step tracking init. */
-	out->cadence_confidence = 0U;
+	out->stability_score = (uint8_t)(sum_stability / count);
+	out->chaos_score = (uint8_t)MAX(sum_chaos / count,
+				       score_more_equal_u16(out->peak_jerk_mg_per_s,
+							    9000U) / 2U);
+	out->cadence_score = (uint8_t)(sum_cadence / count);
+	out->surface_still_score = (uint8_t)(sum_surface / count);
+	out->hand_motion_score = (uint8_t)(sum_hand / count);
+	out->rotation_score = (uint8_t)(sum_rotation / count);
 }
 
-/* ── Step tracking ────────────────────────────────────────────────────── */
-
-static void note_step(int64_t ms)
+static void collect_recent_steps(int64_t now_ms, int64_t *steps, uint8_t *count)
 {
-	g_mc.recent_step_ms[g_mc.recent_step_index] = ms;
-	g_mc.recent_step_index = (g_mc.recent_step_index + 1U) % ARRAY_SIZE(g_mc.recent_step_ms);
+	*count = 0U;
+	for (uint8_t i = 0U; i < ARRAY_SIZE(g_mc.recent_step_ms); i++) {
+		int64_t t = g_mc.recent_step_ms[i];
+
+		if (t <= 0LL || (now_ms - t) > STEP_RECENT_WINDOW_MS) {
+			continue;
+		}
+		steps[*count] = t;
+		(*count)++;
+	}
+
+	for (uint8_t i = 1U; i < *count; i++) {
+		int64_t key = steps[i];
+		int j = (int)i - 1;
+
+		while (j >= 0 && steps[j] > key) {
+			steps[j + 1] = steps[j];
+			j--;
+		}
+		steps[j + 1] = key;
+	}
+}
+
+static void note_step(int64_t now_ms)
+{
+	g_mc.recent_step_ms[g_mc.recent_step_index] = now_ms;
+	g_mc.recent_step_index =
+		(g_mc.recent_step_index + 1U) % ARRAY_SIZE(g_mc.recent_step_ms);
 	if (g_mc.recent_step_count < ARRAY_SIZE(g_mc.recent_step_ms)) {
 		g_mc.recent_step_count++;
 	}
-	g_mc.last_peak_ms = MAX(g_mc.last_peak_ms, ms);
-}
-
-static uint8_t count_recent_steps(int64_t now_ms)
-{
-	uint8_t n = 0, i;
-	for (i = 0; i < ARRAY_SIZE(g_mc.recent_step_ms); i++) {
-		if (g_mc.recent_step_ms[i] > 0LL &&
-		    (now_ms - g_mc.recent_step_ms[i]) <= 2200LL) {
-			n++;
-		}
-	}
-	return n;
+	g_mc.last_peak_ms = now_ms;
 }
 
 static uint8_t compute_cadence_confidence(int64_t now_ms)
 {
-	int64_t intervals[5];
-	uint8_t valid = 0, recent = count_recent_steps(now_ms);
-	int64_t sum = 0, avg, err_sum = 0;
-	uint8_t i, prev_idx;
+	int64_t steps[ARRAY_SIZE(g_mc.recent_step_ms)];
+	int64_t intervals[ARRAY_SIZE(g_mc.recent_step_ms) - 1U];
+	uint8_t step_count;
+	uint8_t interval_count = 0U;
+	int64_t sum = 0LL;
+	int64_t avg;
+	int64_t err_sum = 0LL;
 
-	if (recent < 3U) {
+	collect_recent_steps(now_ms, steps, &step_count);
+	if (step_count < 3U) {
 		return 0U;
 	}
 
-	/* Build interval list from newest steps backwards. */
-	for (i = 0; i < ARRAY_SIZE(g_mc.recent_step_ms) && valid < 5U; i++) {
-		prev_idx = (g_mc.recent_step_index + ARRAY_SIZE(g_mc.recent_step_ms) - 1U - i) %
-			   ARRAY_SIZE(g_mc.recent_step_ms);
-		if (i > 0 && g_mc.recent_step_ms[prev_idx] > 0LL) {
-			uint8_t curr_idx = (prev_idx + 1U) % ARRAY_SIZE(g_mc.recent_step_ms);
-			int64_t dt = g_mc.recent_step_ms[curr_idx] - g_mc.recent_step_ms[prev_idx];
-			if (dt >= 250LL && dt <= 1100LL) {
-				intervals[valid++] = dt;
-				sum += dt;
-			}
+	for (uint8_t i = 1U; i < step_count; i++) {
+		int64_t dt = steps[i] - steps[i - 1U];
+
+		if (dt >= 250LL && dt <= 1100LL) {
+			intervals[interval_count++] = dt;
+			sum += dt;
 		}
 	}
-
-	if (valid < 2U) {
+	if (interval_count < 2U) {
 		return 0U;
 	}
 
-	avg = sum / valid;
-	if (avg < 280LL || avg > 900LL) {
+	avg = sum / interval_count;
+	if (avg < 300LL || avg > 950LL) {
 		return 0U;
 	}
 
-	for (i = 0; i < valid; i++) {
-		int64_t d = intervals[i] - avg;
-		err_sum += (d < 0) ? -d : d;
+	for (uint8_t i = 0U; i < interval_count; i++) {
+		int64_t err = intervals[i] - avg;
+
+		err_sum += (err < 0LL) ? -err : err;
 	}
 
-	return clamp_u8((int)(recent * 14U + 26U) - (int)(err_sum / 4));
+	return clamp_u8(28 + (int)step_count * 12 -
+			(int)(err_sum / MAX(1U, interval_count)) / 5);
 }
 
 static void flush_steps(int64_t now_ms)
@@ -406,19 +815,19 @@ static void flush_steps(int64_t now_ms)
 	if (g_mc.pending_steps == 0U) {
 		return;
 	}
+
 	(void)app_event_publish_step_batch_with_timestamp(
-		(int32_t)g_mc.pending_steps,
-		g_mc.last_hw_step_counter,
-		g_mc.walking_confidence,
-		g_mc.pending_steps_from_hw,
-		now_ms);
+		(int32_t)g_mc.pending_steps, g_mc.last_hw_step_counter,
+		g_mc.walking_confidence, g_mc.pending_steps_from_hw, now_ms);
 	g_mc.pending_steps = 0U;
 	g_mc.pending_steps_from_hw = false;
 }
 
 static uint16_t read_hw_steps(int64_t now_ms)
 {
-	uint16_t hw = 0U, delta;
+	uint16_t hw = 0U;
+	uint16_t delta;
+
 	if (motion_sensor_read_hw_step_counter(&hw) != 0) {
 		return 0U;
 	}
@@ -435,114 +844,157 @@ static uint16_t read_hw_steps(int64_t now_ms)
 	} else {
 		delta = (uint16_t)(UINT16_MAX - g_mc.last_hw_step_counter + hw + 1U);
 	}
-	if (delta > 128U) {
-		g_mc.last_hw_step_counter = hw;
-		return 0U;  /* Spurious. */
-	}
+
 	g_mc.last_hw_step_counter = hw;
+	if (delta > 128U) {
+		return 0U;
+	}
+
 	g_mc.pending_steps += delta;
 	g_mc.pending_steps_from_hw = true;
-	for (uint16_t s = 0; s < delta; s++) {
-		note_step(now_ms);
+	for (uint16_t i = 0U; i < delta; i++) {
+		int64_t step_ms = now_ms - ((int64_t)(delta - 1U - i) * 500LL);
+
+		note_step(MAX(1LL, step_ms));
 	}
 	if (g_mc.pending_steps >= CONFIG_KERFUR_MOTION_STEP_BATCH_SIZE) {
 		flush_steps(now_ms);
 	}
+
 	return delta;
 }
 
-static bool detect_sw_step(int16_t lx, int16_t ly, int16_t lz,
-			   bool rough, int64_t now_ms)
+static bool detect_sw_step(const struct imu_processed_frame *frame,
+			   const struct imu_window_summary *short_win,
+			   bool rough)
 {
-	uint16_t intensity = (uint16_t)(abs16(lx) + abs16(ly) + abs16(lz));
-	bool over = intensity >= STEP_PEAK_MG;
-	int64_t dt = now_ms - g_mc.last_peak_ms;
-	bool detected = false;
+	bool over;
+	int64_t dt;
 
-	if (!g_mc.over_step_threshold && over && !rough &&
+	if (rough || short_win->chaos_score >= 72U ||
+	    frame->rotation_score >= 82U ||
+	    frame->linear_motion_mg < STEP_PEAK_MG) {
+		g_mc.over_step_threshold = false;
+		return false;
+	}
+
+	over = frame->linear_motion_mg >= STEP_PEAK_MG &&
+	       frame->jerk_mg_per_s >= 1000U &&
+	       frame->jerk_mg_per_s <= 9000U;
+	dt = frame->now_ms - g_mc.last_peak_ms;
+
+	if (!g_mc.over_step_threshold && over &&
 	    (g_mc.last_peak_ms == 0LL ||
 	     (dt >= STEP_MIN_INTERVAL_MS && dt <= STEP_MAX_INTERVAL_MS))) {
-		detected = true;
-		g_mc.last_peak_ms = now_ms;
-		note_step(now_ms);
+		note_step(frame->now_ms);
 		g_mc.pending_steps++;
 		if (g_mc.pending_steps >= CONFIG_KERFUR_MOTION_STEP_BATCH_SIZE) {
-			flush_steps(now_ms);
+			flush_steps(frame->now_ms);
 		}
+		g_mc.over_step_threshold = true;
+		return true;
 	}
+
 	g_mc.over_step_threshold = over;
-	return detected;
+	return false;
 }
 
-/* ── Walking confidence ───────────────────────────────────────────────── */
-
-static void update_walking(bool step, const struct motion_feature_summary *fs, int64_t now_ms)
+static void update_walking(bool step, const struct imu_processed_frame *frame,
+			   const struct imu_window_summary *short_win)
 {
-	uint8_t recent = count_recent_steps(now_ms);
-	int delta = 0;
+	int rate;
+	bool cadence = g_mc.cadence_confidence >= 45U;
+	bool walking_motion =
+		short_win->avg_linear_motion_mg >= 65U &&
+		short_win->avg_linear_motion_mg <= 620U &&
+		short_win->chaos_score <= 58U &&
+		short_win->rotation_score <= 78U;
 
 	if (step) {
-		delta += 3;
-		delta += (int)fs->cadence_confidence / 12;
-		delta += MIN((int)recent * 2, 8);
-		delta -= (int)fs->chaos_confidence / 10;
-		delta += (recent >= 4U) ? 4 : (recent >= 2U) ? 2 : 0;
-	} else if (fs->chaos_confidence >= 70U) {
-		delta -= 15;
-	} else if (fs->cadence_confidence >= 55U && recent >= 3U) {
-		delta -= 1;
-	} else if (g_mc.last_peak_ms > 0LL && (now_ms - g_mc.last_peak_ms) > 1400LL) {
-		delta -= 6;
+		adjust_walking_confidence(0, frame->dt_ms);
+		g_mc.walking_confidence_q8 =
+			MIN(g_mc.walking_confidence_q8 + (9 * 256),
+			    WALK_CONF_Q8_MAX);
+		g_mc.walking_confidence =
+			(uint8_t)((g_mc.walking_confidence_q8 + 128) / 256);
+	}
+
+	if (cadence && walking_motion) {
+		rate = step ? 42 : 22;
+	} else if (cadence && g_mc.walking_active) {
+		rate = 6;
+	} else if (short_win->chaos_score >= 72U || frame->rotation_score >= 88U) {
+		rate = -45;
+	} else if (g_mc.last_peak_ms > 0LL &&
+		   (frame->now_ms - g_mc.last_peak_ms) > 1400LL) {
+		rate = -34;
 	} else {
-		delta -= 3;
+		rate = -22;
 	}
 
-	/* Steady walking bonus. */
-	if (fs->avg_motion_mg >= 220U && fs->avg_motion_mg <= 550U &&
-	    fs->chaos_confidence <= 50U && fs->cadence_confidence >= 35U) {
-		delta += 2;
-	}
-
-	g_mc.walking_confidence = clamp_u8((int)g_mc.walking_confidence + delta);
+	adjust_walking_confidence(rate, frame->dt_ms);
 
 	if (!g_mc.walking_active &&
 	    g_mc.walking_confidence >= CONFIG_KERFUR_MOTION_WALK_START_THRESHOLD) {
 		g_mc.walking_active = true;
+		g_mc.suppress_look_until_ms =
+			max64(g_mc.suppress_look_until_ms,
+			      frame->now_ms + LOOK_SUPPRESS_AFTER_WALK_MS);
 		(void)app_event_publish_with_timestamp(APP_EVENT_WALKING_START,
-						       g_mc.walking_confidence, now_ms);
+						       g_mc.walking_confidence,
+						       frame->now_ms);
 	} else if (g_mc.walking_active &&
 		   g_mc.walking_confidence <= CONFIG_KERFUR_MOTION_WALK_STOP_THRESHOLD) {
 		g_mc.walking_active = false;
-		flush_steps(now_ms);
+		flush_steps(frame->now_ms);
 		(void)app_event_publish_with_timestamp(APP_EVENT_WALKING_STOP,
-						       g_mc.walking_confidence, now_ms);
+						       g_mc.walking_confidence,
+						       frame->now_ms);
 	}
 }
 
-/* ── Shake detection ──────────────────────────────────────────────────── */
+static bool is_rough_motion(const struct imu_processed_frame *frame,
+			    const struct imu_window_summary *short_win)
+{
+	return frame->linear_motion_mg >= 1200U ||
+	       frame->jerk_mg_per_s >= 12000U ||
+	       frame->gyro_sum_mdps >= 90000U ||
+	       short_win->chaos_score >= 82U;
+}
 
-static void check_shake(uint16_t motion_mg, uint32_t gyro,
-			uint8_t stability, uint8_t chaos,
-			bool in_hand, uint8_t in_hand_conf, int64_t now_ms)
+static void check_shake(const struct imu_processed_frame *frame,
+			const struct imu_window_summary *short_win,
+			bool in_hand, uint8_t in_hand_conf)
 {
 	enum app_event_type type = APP_EVENT_COUNT;
-	int cooldown = 0;
-	int64_t suppress = 0LL;
+	int64_t cooldown = 0LL;
+	uint16_t linear_peak = MAX(frame->linear_motion_mg,
+				   short_win->peak_linear_motion_mg);
+	uint16_t jerk_peak = MAX(frame->jerk_mg_per_s,
+				 short_win->peak_jerk_mg_per_s);
+	uint32_t gyro_peak = MAX(frame->gyro_sum_mdps,
+				 short_win->peak_gyro_sum_mdps);
 
-	/* Thresholds tuned so normal hand-twisting does NOT trigger shakes.
-	 * Gyro thresholds are high because rotation in hand easily hits 40-60k mdps. */
-	if (motion_mg >= 2200U || gyro >= 120000U) {
+	if (linear_peak >= 1900U || jerk_peak >= 18000U || gyro_peak >= 125000U) {
 		type = APP_EVENT_IMPACT;
 		cooldown = SHAKE_COOLDOWN_IMPACT_MS;
-		suppress = now_ms + 1400LL;
-	} else if (motion_mg >= 1500U || gyro >= 95000U) {
+		g_mc.suppress_look_until_ms =
+			max64(g_mc.suppress_look_until_ms,
+			      frame->now_ms + LOOK_SUPPRESS_AFTER_ROUGH_MS);
+	} else if ((linear_peak >= 1300U && jerk_peak >= 9000U) ||
+		   gyro_peak >= 95000U) {
 		type = APP_EVENT_SHAKE_ROUGH;
 		cooldown = SHAKE_COOLDOWN_ROUGH_MS;
-		suppress = now_ms + 1200LL;
-	} else if (motion_mg >= 1000U || gyro >= 75000U) {
+		g_mc.suppress_look_until_ms =
+			max64(g_mc.suppress_look_until_ms,
+			      frame->now_ms + LOOK_SUPPRESS_AFTER_ROUGH_MS);
+	} else if ((linear_peak >= 900U && jerk_peak >= 6500U &&
+		    short_win->chaos_score >= 48U) ||
+		   gyro_peak >= 76000U) {
 		type = APP_EVENT_SHAKE_PLAY;
 		cooldown = SHAKE_COOLDOWN_PLAY_MS;
-	} else if (motion_mg >= 750U || gyro >= 55000U) {
+	} else if (linear_peak >= 680U && jerk_peak >= 5200U &&
+		   short_win->chaos_score >= 40U) {
 		type = APP_EVENT_SHAKE_LIGHT;
 		cooldown = SHAKE_COOLDOWN_LIGHT_MS;
 	}
@@ -550,24 +1002,17 @@ static void check_shake(uint16_t motion_mg, uint32_t gyro,
 	if (type == APP_EVENT_COUNT) {
 		return;
 	}
-
-	/* Suppress light/play when in hand or hand-like context. */
-	if (type == APP_EVENT_SHAKE_LIGHT || type == APP_EVENT_SHAKE_PLAY) {
-		if (in_hand || in_hand_conf >= 30U) {
-			return;
-		}
+	if ((type == APP_EVENT_SHAKE_LIGHT || type == APP_EVENT_SHAKE_PLAY) &&
+	    (in_hand || in_hand_conf >= 30U || g_mc.walking_active)) {
+		return;
 	}
-
-	if ((now_ms - g_mc.last_shake_event_ms) < cooldown) {
+	if ((frame->now_ms - g_mc.last_shake_event_ms) < cooldown) {
 		return;
 	}
 
-	g_mc.last_shake_event_ms = now_ms;
-	g_mc.suppress_look_until_ms = max64(g_mc.suppress_look_until_ms, suppress);
-	(void)app_event_publish_with_timestamp(type, 0, now_ms);
+	g_mc.last_shake_event_ms = frame->now_ms;
+	(void)app_event_publish_with_timestamp(type, 0, frame->now_ms);
 }
-
-/* ── Gaze tracking ────────────────────────────────────────────────────── */
 
 static void reset_look_reference(void)
 {
@@ -579,161 +1024,172 @@ static void reset_look_reference(void)
 	g_mc.look_raw_prev_y = 0;
 }
 
-static void capture_look_reference(void)
+static void capture_look_reference(int64_t now_ms)
 {
+	if (!g_mc.gravity_valid) {
+		return;
+	}
+
 	g_mc.look_ref_x = g_mc.gravity_x;
 	g_mc.look_ref_y = g_mc.gravity_y;
 	g_mc.look_ref_z = g_mc.gravity_z;
 	g_mc.look_reference_valid = true;
-	/* Fresh pickup → start at center, fresh idle window. */
 	g_mc.look_target_x = 0;
 	g_mc.look_target_y = 0;
 	g_mc.look_raw_prev_x = 0;
 	g_mc.look_raw_prev_y = 0;
-	g_mc.look_idle_since_ms = k_uptime_get();
+	g_mc.look_idle_since_ms = now_ms;
+}
+
+static int16_t move_towards_dt(int16_t current, int16_t target,
+			       int units_per_s, int32_t dt_ms)
+{
+	int delta = target - current;
+	int max_delta;
+
+	if (delta == 0) {
+		return current;
+	}
+
+	max_delta = MAX(1, (units_per_s * dt_ms) / 1000);
+	if (delta > max_delta) {
+		delta = max_delta;
+	} else if (delta < -max_delta) {
+		delta = -max_delta;
+	}
+
+	return (int16_t)(current + delta);
+}
+
+static int16_t apply_look_deadband(int16_t value)
+{
+	if (abs_i32(value) <= GAZE_DEADBAND) {
+		return 0;
+	}
+
+	return (value > 0) ? (int16_t)(value - GAZE_DEADBAND) :
+			     (int16_t)(value + GAZE_DEADBAND);
 }
 
 static void update_look_reference(const struct in_hand_detector_output *det,
-				  const struct motion_feature_summary *fs)
+				  int64_t now_ms)
 {
-	ARG_UNUSED(fs);
-
-	/* When confirmed on surface: don't nuke reference immediately.
-	 * Instead, start the idle timer so the gaze decays gracefully.
-	 * Only reset the reference once gaze has fully returned to center. */
-	if (det->state == IN_HAND_DETECTOR_SURFACE_STILL && !det->in_hand) {
-		if (g_mc.look_idle_since_ms == 0LL) {
-			g_mc.look_idle_since_ms = k_uptime_get();
-		}
-		/* Once gaze has decayed to center, clean up the reference. */
-		if (g_mc.look_target_x == 0 && g_mc.look_target_y == 0) {
-			reset_look_reference();
-		}
+	if (det->in_hand_enter || det->picked_up ||
+	    (!g_mc.look_reference_valid && det->in_hand_confidence >= 28U)) {
+		capture_look_reference(now_ms);
 		return;
 	}
 
-	/* Capture reference on enter, or as soon as any hand-like motion is detected.
-	 * Once captured, the reference stays fixed for the entire in-hand session —
-	 * no slow drift, so the eye holds whatever direction the user tilts toward
-	 * instead of creeping back to "neutral" on its own. */
-	if (det->in_hand_enter || det->picked_up ||
-	    (!g_mc.look_reference_valid && det->in_hand_confidence >= 15U)) {
-		capture_look_reference();
+	if (det->state == IN_HAND_DETECTOR_SURFACE_STILL && !det->in_hand) {
+		if (g_mc.look_idle_since_ms == 0LL) {
+			g_mc.look_idle_since_ms = now_ms;
+		}
+		if (g_mc.look_target_x == 0 && g_mc.look_target_y == 0) {
+			reset_look_reference();
+		}
 	}
 }
 
-static int16_t move_towards(int16_t cur, int16_t tgt, int16_t max_delta)
-{
-	int d = tgt - cur;
-	if (d > max_delta)  d = max_delta;
-	if (d < -max_delta) d = -max_delta;
-	return cur + (int16_t)d;
-}
-
 static void update_look_target(const struct in_hand_detector_output *det,
-			       const struct motion_feature_summary *fs,
-			       int64_t now_ms)
+			       const struct imu_processed_frame *frame,
+			       const struct imu_window_summary *short_win)
 {
-	int16_t raw_x, raw_y;
-	int max_delta;
+	int16_t raw_x;
+	int16_t raw_y;
+	int slew;
 	bool tracking;
-	bool decaying;
+	bool decaying = false;
 
-	/* "tracking" means we can compute new raw tilt values. When suppressed
-	 * we can still decay the gaze to center — we just can't track new input. */
-	tracking = (now_ms >= g_mc.suppress_look_until_ms) &&
+	if (frame->chaos_score >= 80U || frame->gyro_sum_mdps >= 80000U) {
+		g_mc.suppress_look_until_ms =
+			max64(g_mc.suppress_look_until_ms,
+			      frame->now_ms + LOOK_SUPPRESS_AFTER_ROUGH_MS);
+	}
+
+	tracking = frame->now_ms >= g_mc.suppress_look_until_ms &&
 		   !g_mc.walking_active &&
 		   g_mc.look_reference_valid &&
-		   (det->look_confidence >= 10U || det->in_hand);
+		   frame->gravity_valid &&
+		   (det->in_hand || det->look_confidence >= 18U);
 
 	if (tracking) {
 		raw_x = clamp_look((-(g_mc.gravity_x - g_mc.look_ref_x) * 100) /
 				   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
 		raw_y = clamp_look(((g_mc.gravity_y - g_mc.look_ref_y) * 100) /
 				   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
-		if (abs16(raw_x) <= GAZE_DEADBAND) { raw_x = 0; }
-		if (abs16(raw_y) <= GAZE_DEADBAND) { raw_y = 0; }
+		raw_x = apply_look_deadband(raw_x);
+		raw_y = apply_look_deadband(raw_y);
 	} else {
-		/* Not tracking — use current target as raw so idle timer
-		 * doesn't get confused by stale values. */
 		raw_x = g_mc.look_target_x;
 		raw_y = g_mc.look_target_y;
 	}
 
-	/* Idle tracker: meaningful change in raw INPUT resets the timer.
-	 * Threshold must be above gravity low-pass noise (~2-3 units)
-	 * to prevent constant resetting. */
 	if (tracking &&
-	    (abs16(raw_x - g_mc.look_raw_prev_x) >= GAZE_IDLE_RAW_THRESHOLD ||
-	     abs16(raw_y - g_mc.look_raw_prev_y) >= GAZE_IDLE_RAW_THRESHOLD)) {
-		g_mc.look_idle_since_ms = now_ms;
+	    (abs_i32(raw_x - g_mc.look_raw_prev_x) >= GAZE_IDLE_RAW_THRESHOLD ||
+	     abs_i32(raw_y - g_mc.look_raw_prev_y) >= GAZE_IDLE_RAW_THRESHOLD ||
+	     short_win->rotation_score >= 35U)) {
+		g_mc.look_idle_since_ms = frame->now_ms;
 	}
 	g_mc.look_raw_prev_x = raw_x;
 	g_mc.look_raw_prev_y = raw_y;
 
-	/* Decay starts when:
-	 *  - idle timer expired (hand stopped moving), OR
-	 *  - not tracking at all (put down, walking, etc.) and gaze is non-zero */
-	decaying = false;
-	if (g_mc.look_idle_since_ms != 0LL &&
-	    (now_ms - g_mc.look_idle_since_ms) >= GAZE_HOLD_AFTER_RELEASE_MS) {
-		decaying = true;
-	}
-	if (!tracking && (g_mc.look_target_x != 0 || g_mc.look_target_y != 0)) {
-		/* Not tracking — always decay back to center. Start the
-		 * timer if it wasn't running so we get a clean hold→decay. */
+	if (tracking) {
+		if (g_mc.look_idle_since_ms > 0LL &&
+		    (frame->now_ms - g_mc.look_idle_since_ms) >=
+		    GAZE_HOLD_AFTER_STOP_MS) {
+			decaying = true;
+		}
+	} else if (g_mc.look_target_x != 0 || g_mc.look_target_y != 0) {
 		if (g_mc.look_idle_since_ms == 0LL) {
-			g_mc.look_idle_since_ms = now_ms;
-		} else if ((now_ms - g_mc.look_idle_since_ms) >= GAZE_HOLD_AFTER_RELEASE_MS) {
+			g_mc.look_idle_since_ms = frame->now_ms;
+		}
+		if ((frame->now_ms - g_mc.look_idle_since_ms) >=
+		    GAZE_HOLD_AFTER_LOST_MS) {
 			decaying = true;
 		}
 	}
 
 	if (decaying) {
-		/* Gradual drift back to center. GAZE_DECAY_SPEED=2 at 26 Hz
-		 * means full extreme→center glide takes ~2 s — deliberate
-		 * "looking away" rather than a snap. */
-		g_mc.look_target_x = move_towards(g_mc.look_target_x, 0,
-						  GAZE_DECAY_SPEED);
-		g_mc.look_target_y = move_towards(g_mc.look_target_y, 0,
-						  GAZE_DECAY_SPEED);
+		g_mc.look_target_x = move_towards_dt(g_mc.look_target_x, 0,
+						     GAZE_DECAY_UNITS_PER_S,
+						     frame->dt_ms);
+		g_mc.look_target_y = move_towards_dt(g_mc.look_target_y, 0,
+						     GAZE_DECAY_UNITS_PER_S,
+						     frame->dt_ms);
 	} else if (tracking) {
-		max_delta = g_mc.battery_low ? GAZE_MAX_DELTA_LOW_BATT
-					     : GAZE_MAX_DELTA_NORMAL;
-		g_mc.look_target_x = move_towards(g_mc.look_target_x, raw_x,
-						  (int16_t)max_delta);
-		g_mc.look_target_y = move_towards(g_mc.look_target_y, raw_y,
-						  (int16_t)max_delta);
+		slew = g_mc.battery_low ? GAZE_LOW_BATT_SLEW_UNITS_PER_S :
+					  GAZE_SLEW_UNITS_PER_S;
+		g_mc.look_target_x = move_towards_dt(g_mc.look_target_x, raw_x,
+						     slew, frame->dt_ms);
+		g_mc.look_target_y = move_towards_dt(g_mc.look_target_y, raw_y,
+						     slew, frame->dt_ms);
 	}
-	/* else: not tracking and not yet decaying (in hold period) — freeze */
 
-	/* Confidence: full while tracking, residual while held or decaying
-	 * so the renderer keeps applying look_target instead of snapping
-	 * pupils to base. Drop to 0 only once fully returned to center. */
-	if (tracking) {
+	if (tracking && !decaying) {
 		g_mc.look_confidence = clamp_u8(
 			(int)det->look_confidence -
-			(int)fs->chaos_confidence / 3 -
-			(int)fs->cadence_confidence / 4);
+			(int)short_win->chaos_score / 3 -
+			(int)g_mc.cadence_confidence / 4);
 	} else if (g_mc.look_target_x == 0 && g_mc.look_target_y == 0) {
 		g_mc.look_confidence = 0U;
 	} else {
-		g_mc.look_confidence = decaying ? GAZE_DECAY_RESIDUAL_CONF
-						: GAZE_HOLD_RESIDUAL_CONF;
+		g_mc.look_confidence = decaying ? GAZE_DECAY_CONFIDENCE :
+						  GAZE_HOLD_CONFIDENCE;
 	}
 }
 
-/* ── Event publishing ─────────────────────────────────────────────────── */
-
 static void publish_carry(int64_t now_ms, bool force)
 {
-	bool changed = force ||
-		g_mc.pub_in_hand     != g_mc.in_hand ||
-		g_mc.pub_pickup_conf != g_mc.pickup_confidence ||
-		g_mc.pub_in_hand_conf!= g_mc.in_hand_confidence ||
-		g_mc.pub_walk_conf   != g_mc.walking_confidence;
+	bool state_changed = g_mc.pub_in_hand != g_mc.in_hand;
+	bool confidence_changed =
+		abs_i32((int)g_mc.pub_pickup_conf - (int)g_mc.pickup_confidence) >= 4 ||
+		abs_i32((int)g_mc.pub_in_hand_conf - (int)g_mc.in_hand_confidence) >= 4 ||
+		abs_i32((int)g_mc.pub_walk_conf - (int)g_mc.walking_confidence) >= 5;
 
-	if (!changed && (now_ms - g_mc.last_carry_publish_ms) < 250LL) {
+	if (!force && !state_changed && !confidence_changed) {
+		return;
+	}
+	if (!force && (now_ms - g_mc.last_carry_publish_ms) < 250LL) {
 		return;
 	}
 
@@ -742,60 +1198,89 @@ static void publish_carry(int64_t now_ms, bool force)
 		g_mc.in_hand_confidence, g_mc.walking_confidence, now_ms);
 
 	g_mc.last_carry_publish_ms = now_ms;
-	g_mc.pub_in_hand      = g_mc.in_hand;
-	g_mc.pub_pickup_conf  = g_mc.pickup_confidence;
+	g_mc.pub_in_hand = g_mc.in_hand;
+	g_mc.pub_pickup_conf = g_mc.pickup_confidence;
 	g_mc.pub_in_hand_conf = g_mc.in_hand_confidence;
-	g_mc.pub_walk_conf    = g_mc.walking_confidence;
+	g_mc.pub_walk_conf = g_mc.walking_confidence;
 }
 
 static void publish_look(int64_t now_ms, bool force)
 {
 	int min_ms = MAX(50, 1000 / CONFIG_KERFUR_MOTION_GAZE_RATE_HZ);
-	bool changed = force ||
-		abs16(g_mc.look_target_x - g_mc.pub_look_x) >= 1 ||
-		abs16(g_mc.look_target_y - g_mc.pub_look_y) >= 1 ||
-		g_mc.look_confidence != g_mc.pub_look_conf;
+	bool changed =
+		abs_i32(g_mc.look_target_x - g_mc.pub_look_x) >= 2 ||
+		abs_i32(g_mc.look_target_y - g_mc.pub_look_y) >= 2 ||
+		abs_i32((int)g_mc.look_confidence - (int)g_mc.pub_look_conf) >= 3 ||
+		(g_mc.look_confidence == 0U && g_mc.pub_look_conf != 0U) ||
+		(g_mc.look_target_x == 0 && g_mc.look_target_y == 0 &&
+		 (g_mc.pub_look_x != 0 || g_mc.pub_look_y != 0));
 
-	if (!changed && (now_ms - g_mc.last_look_publish_ms) < min_ms) {
+	if (!force && !changed) {
+		return;
+	}
+	if (!force && (now_ms - g_mc.last_look_publish_ms) < min_ms) {
 		return;
 	}
 
 	(void)app_event_publish_look_target_with_timestamp(
-		g_mc.look_target_x, g_mc.look_target_y, g_mc.look_confidence, now_ms);
+		g_mc.look_target_x, g_mc.look_target_y,
+		g_mc.look_confidence, now_ms);
 
 	g_mc.last_look_publish_ms = now_ms;
-	g_mc.pub_look_x    = g_mc.look_target_x;
-	g_mc.pub_look_y    = g_mc.look_target_y;
+	g_mc.pub_look_x = g_mc.look_target_x;
+	g_mc.pub_look_y = g_mc.look_target_y;
 	g_mc.pub_look_conf = g_mc.look_confidence;
 }
 
-static void emit_detector_events(const struct in_hand_detector_output *det, int64_t now_ms)
+static void sync_detector_from_public_state(int64_t now_ms)
+{
+	g_mc.in_hand_det.pickup_confidence = g_mc.pickup_confidence;
+	g_mc.in_hand_det.in_hand_confidence = g_mc.in_hand_confidence;
+	g_mc.in_hand_det.pickup_confidence_q8 =
+		(int32_t)g_mc.pickup_confidence * 256;
+	g_mc.in_hand_det.in_hand_confidence_q8 =
+		(int32_t)g_mc.in_hand_confidence * 256;
+	g_mc.in_hand_det.in_hand = g_mc.in_hand;
+	if (g_mc.in_hand) {
+		g_mc.in_hand_det.state = IN_HAND_DETECTOR_IN_HAND;
+		g_mc.in_hand_det.last_in_hand_ms = now_ms;
+	} else if (g_mc.in_hand_det.state == IN_HAND_DETECTOR_IN_HAND ||
+		   g_mc.in_hand_det.state == IN_HAND_DETECTOR_WALKING) {
+		g_mc.in_hand_det.exit_candidate_since_ms = now_ms;
+	}
+}
+
+static void emit_detector_events(const struct in_hand_detector_output *det,
+				 int64_t now_ms)
 {
 	if (det->pickup_candidate) {
 		(void)app_event_publish_with_timestamp(APP_EVENT_PICKUP_CANDIDATE,
-						       det->pickup_confidence, now_ms);
+						       det->pickup_confidence,
+						       now_ms);
 	}
 	if (det->picked_up) {
 		g_mc.last_pickup_ms = now_ms;
 		(void)app_event_publish_with_timestamp(APP_EVENT_PICKED_UP,
-						       det->pickup_confidence, now_ms);
+						       det->pickup_confidence,
+						       now_ms);
 	}
 	if (det->in_hand_enter) {
 		g_mc.last_in_hand_ms = now_ms;
 		(void)app_event_publish_with_timestamp(APP_EVENT_IN_HAND_ENTER,
-						       det->in_hand_confidence, now_ms);
+						       det->in_hand_confidence,
+						       now_ms);
 	}
 	if (det->in_hand_exit) {
 		(void)app_event_publish_with_timestamp(APP_EVENT_IN_HAND_EXIT,
-						       det->in_hand_confidence, now_ms);
+						       det->in_hand_confidence,
+						       now_ms);
 	}
 }
-
-/* ── Mode management ──────────────────────────────────────────────────── */
 
 static bool uses_idle_polling(void)
 {
 	const struct motion_sensor_capabilities *caps = motion_sensor_get_capabilities();
+
 	return caps->backend_ready && !caps->backend_has_tilt;
 }
 
@@ -804,11 +1289,19 @@ static void schedule_now(void)
 	(void)k_work_reschedule(&g_mc.sample_work, K_NO_WAIT);
 }
 
-static void set_mode(enum motion_classifier_mode mode, int64_t now_ms)
+static void switch_mode(enum motion_classifier_mode mode, int64_t now_ms)
 {
 	enum motion_sensor_mode sensor_mode;
 
+	if (mode == g_mc.mode) {
+		if (mode == MODE_IDLE && uses_idle_polling()) {
+			(void)k_work_reschedule(&g_mc.sample_work, K_MSEC(IDLE_POLL_MS));
+		}
+		return;
+	}
+
 	g_mc.mode = mode;
+	g_mc.last_mode_change_ms = now_ms;
 
 	switch (mode) {
 	case MODE_OFF:
@@ -823,249 +1316,281 @@ static void set_mode(enum motion_classifier_mode mode, int64_t now_ms)
 			(void)k_work_cancel_delayable(&g_mc.sample_work);
 		}
 		return;
-	case MODE_ACTIVE_WINDOW: sensor_mode = MOTION_SENSOR_MODE_ACTIVE;         break;
-	case MODE_WALK_MAINTAIN: sensor_mode = MOTION_SENSOR_MODE_WALK_MAINTAIN;  break;
-	case MODE_IN_HAND_TRACK: sensor_mode = MOTION_SENSOR_MODE_IN_HAND_TRACK; break;
-	default: return;
+	case MODE_ACTIVE_WINDOW:
+		sensor_mode = MOTION_SENSOR_MODE_ACTIVE;
+		break;
+	case MODE_WALK_MAINTAIN:
+		sensor_mode = MOTION_SENSOR_MODE_WALK_MAINTAIN;
+		break;
+	case MODE_IN_HAND_TRACK:
+		sensor_mode = MOTION_SENSOR_MODE_IN_HAND_TRACK;
+		break;
+	default:
+		return;
 	}
 
 	(void)motion_sensor_set_mode(sensor_mode);
-	g_mc.active_until_ms = max64(g_mc.active_until_ms, now_ms);
 	schedule_now();
 }
 
-/* ── Debug ────────────────────────────────────────────────────────────── */
-
-static void debug_log(int64_t now_ms)
+static void debug_log(const struct imu_processed_frame *frame,
+		      const struct in_hand_detector_output *det,
+		      const struct imu_window_summary *long_win)
 {
-	if (!g_mc.debug_logging || (now_ms - g_mc.last_debug_log_ms) < 1000LL) {
+	if (!g_mc.debug_logging ||
+	    (frame->now_ms - g_mc.last_debug_log_ms) < 1000LL) {
 		return;
 	}
-	LOG_INF("MC walk=%u/%d pickup=%u in_hand=%u/%d look=%u tgt=%d,%d "
-		"stab=%u cad=%u chaos=%u ref=%d mode=%d batt=%d",
+
+	LOG_INF("MC mode=%d a=%d,%d,%d g=%d/%d,%d,%d lin=%u sm=%u "
+		"jerk=%u gyro=%u/%u surf=%u/%u walk=%u/%d cad=%u "
+		"pickup=%u hand=%u/%d rot=%u look=%u/%d,%d chaos=%u det=%d",
+		g_mc.mode,
+		frame->accel_x_mg, frame->accel_y_mg, frame->accel_z_mg,
+		frame->gravity_valid ? 1 : 0,
+		frame->gravity_x_mg, frame->gravity_y_mg, frame->gravity_z_mg,
+		frame->linear_motion_mg, frame->smooth_linear_motion_mg,
+		frame->jerk_mg_per_s, frame->gyro_sum_mdps,
+		frame->smooth_gyro_sum_mdps,
+		frame->surface_still_score, long_win->surface_still_score,
 		g_mc.walking_confidence, g_mc.walking_active ? 1 : 0,
-		g_mc.pickup_confidence, g_mc.in_hand_confidence,
-		g_mc.in_hand ? 1 : 0, g_mc.look_confidence,
-		g_mc.look_target_x, g_mc.look_target_y,
-		g_mc.stability_confidence, g_mc.cadence_confidence,
-		g_mc.chaos_confidence,
-		g_mc.look_reference_valid ? 1 : 0,
-		g_mc.mode, g_mc.battery_percent);
-	g_mc.last_debug_log_ms = now_ms;
+		g_mc.cadence_confidence, g_mc.pickup_confidence,
+		g_mc.in_hand_confidence, g_mc.in_hand ? 1 : 0,
+		g_mc.rotation_confidence,
+		g_mc.look_confidence, g_mc.look_target_x, g_mc.look_target_y,
+		g_mc.chaos_confidence, det->state);
+
+	g_mc.last_debug_log_ms = frame->now_ms;
 }
 
-/* ── Main sample work handler ─────────────────────────────────────────── */
+static void publish_motion_wake(uint16_t motion_mg, int64_t now_ms)
+{
+	if ((now_ms - g_mc.last_motion_wake_ms) >= 750LL) {
+		(void)app_event_publish_with_timestamp(APP_EVENT_MOTION_WAKE,
+						       motion_mg, now_ms);
+	}
+	g_mc.last_motion_wake_ms = now_ms;
+}
+
+static void process_idle_sample(const struct motion_sensor_sample *sample)
+{
+	struct imu_processed_frame frame;
+	uint16_t accel_delta = 0U;
+
+	if (!build_frame(sample, &frame)) {
+		g_mc.last_sample = *sample;
+		g_mc.have_last_sample = true;
+		(void)k_work_reschedule(&g_mc.sample_work, K_MSEC(IDLE_POLL_MS));
+		return;
+	}
+
+	if (g_mc.have_last_sample) {
+		accel_delta = vec_distance_mg(sample->accel_mg_x, sample->accel_mg_y,
+					      sample->accel_mg_z,
+					      g_mc.last_sample.accel_mg_x,
+					      g_mc.last_sample.accel_mg_y,
+					      g_mc.last_sample.accel_mg_z);
+	}
+
+	g_mc.prev_linear_x = frame.linear_x_mg;
+	g_mc.prev_linear_y = frame.linear_y_mg;
+	g_mc.prev_linear_z = frame.linear_z_mg;
+	g_mc.have_prev_linear = true;
+	g_mc.last_sample = *sample;
+	g_mc.have_last_sample = true;
+
+	if ((frame.linear_motion_mg >= IDLE_WAKE_LINEAR_MG &&
+	     accel_delta >= 70U) ||
+	    accel_delta >= IDLE_WAKE_DELTA_MG) {
+		publish_motion_wake(frame.linear_motion_mg, frame.now_ms);
+		g_mc.active_until_ms =
+			frame.now_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS;
+		switch_mode(MODE_ACTIVE_WINDOW, frame.now_ms);
+		return;
+	}
+
+	(void)k_work_reschedule(&g_mc.sample_work, K_MSEC(IDLE_POLL_MS));
+}
+
+static void handle_battery_critical(int64_t now_ms)
+{
+	g_mc.walking_active = false;
+	set_walking_confidence(0U);
+	g_mc.pickup_confidence = 0U;
+	g_mc.in_hand_confidence = 0U;
+	g_mc.in_hand = false;
+	g_mc.look_confidence = 0U;
+	g_mc.look_target_x = move_towards_dt(g_mc.look_target_x, 0, 360, DT_MAX_MS);
+	g_mc.look_target_y = move_towards_dt(g_mc.look_target_y, 0, 360, DT_MAX_MS);
+	reset_look_reference();
+	publish_carry(now_ms, true);
+	publish_look(now_ms, true);
+	switch_mode(MODE_IDLE, now_ms);
+}
 
 static void sample_work_handler(struct k_work *work)
 {
 	struct motion_sensor_sample sample;
+	struct imu_processed_frame frame;
+	struct imu_window_summary short_win;
+	struct imu_window_summary long_win;
 	struct in_hand_detector_input det_in;
 	struct in_hand_detector_output det_out;
-	struct motion_feature_frame frame;
-	struct motion_feature_summary summary;
-	int16_t lx, ly, lz;
-	int16_t prev_gx, prev_gy, prev_gz;
-	uint16_t orient_delta, orient_rate, jerk_mg, motion_mg, smooth_mg;
-	uint32_t gyro_sum;
-	uint16_t hw_steps = 0U;
-	bool rough, step = false;
-	bool idle_poll = (g_mc.mode == MODE_IDLE);
-	int64_t now_ms;
+	uint16_t hw_steps;
+	bool sw_step = false;
+	bool rough;
+	bool active_motion;
 	int err;
 
 	ARG_UNUSED(work);
 
 	if (!g_mc.enabled) {
-		set_mode(MODE_OFF, k_uptime_get());
+		switch_mode(MODE_OFF, k_uptime_get());
 		return;
 	}
-
 	if (g_mc.battery_critical) {
-		/* Shut down motion processing to save power. */
-		g_mc.walking_confidence = 0U;
-		g_mc.walking_active = false;
-		g_mc.pickup_confidence = 0U;
-		g_mc.in_hand_confidence = 0U;
-		g_mc.look_confidence = 0U;
-		g_mc.look_target_x = move_towards(g_mc.look_target_x, 0, 12);
-		g_mc.look_target_y = move_towards(g_mc.look_target_y, 0, 12);
-		reset_look_reference();
-		publish_carry(k_uptime_get(), true);
-		publish_look(k_uptime_get(), true);
-		set_mode(MODE_IDLE, k_uptime_get());
+		handle_battery_critical(k_uptime_get());
 		return;
 	}
 
 	err = motion_sensor_fetch_sample(&sample);
 	if (err != 0) {
-		LOG_WRN("Sample fetch failed (%d)", err);
-		set_mode(MODE_IDLE, k_uptime_get());
+		LOG_WRN("Motion sample fetch failed (%d)", err);
+		switch_mode(MODE_IDLE, k_uptime_get());
 		return;
 	}
 
-	normalise_sample(&sample);
-	now_ms = sample.timestamp_ms;
-	g_mc.last_motion_sample_ms = now_ms;
+	g_mc.last_motion_sample_ms = sample.timestamp_ms;
 
-	prev_gx = g_mc.gravity_x;
-	prev_gy = g_mc.gravity_y;
-	prev_gz = g_mc.gravity_z;
-	update_gravity(&sample);
+	if (g_mc.mode == MODE_IDLE) {
+		process_idle_sample(&sample);
+		return;
+	}
 
-	/* ── Idle polling: check for motion wake ───────────────────────── */
-
-	if (idle_poll) {
-		uint16_t idle_motion = (uint16_t)(
-			abs16(sample.accel_mg_x - g_mc.gravity_x) +
-			abs16(sample.accel_mg_y - g_mc.gravity_y) +
-			abs16(sample.accel_mg_z - g_mc.gravity_z));
-		uint16_t idle_smooth = (uint16_t)(
-			abs16(sample.accel_mg_x - g_mc.last_sample.accel_mg_x) +
-			abs16(sample.accel_mg_y - g_mc.last_sample.accel_mg_y) +
-			abs16(sample.accel_mg_z - g_mc.last_sample.accel_mg_z));
-
+	if (!build_frame(&sample, &frame)) {
 		g_mc.last_sample = sample;
-
-		if (idle_motion >= IDLE_WAKE_THRESHOLD_MG ||
-		    idle_smooth >= IDLE_WAKE_SMOOTH_MG) {
-			g_mc.last_motion_wake_ms = now_ms;
-			g_mc.active_until_ms = now_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS;
-			(void)app_event_publish_with_timestamp(
-				APP_EVENT_MOTION_WAKE, idle_motion, now_ms);
-			set_mode(MODE_ACTIVE_WINDOW, g_mc.active_until_ms);
-			return;
-		}
-
-		(void)k_work_reschedule(&g_mc.sample_work, K_MSEC(IDLE_POLL_MS));
+		g_mc.have_last_sample = true;
+		(void)k_work_reschedule(&g_mc.sample_work, K_MSEC(sample_period_ms()));
 		return;
 	}
 
-	/* ── Active processing ─────────────────────────────────────────── */
-
-	hw_steps = read_hw_steps(now_ms);
-
-	lx = sample.accel_mg_x - g_mc.gravity_x;
-	ly = sample.accel_mg_y - g_mc.gravity_y;
-	lz = sample.accel_mg_z - g_mc.gravity_z;
-
-	orient_delta = (uint16_t)(abs16(g_mc.gravity_x - prev_gx) +
-				  abs16(g_mc.gravity_y - prev_gy) +
-				  abs16(g_mc.gravity_z - prev_gz));
-	orient_rate  = orient_delta;
-	jerk_mg  = (uint16_t)(abs16(lx - g_mc.prev_linear_x) +
-			      abs16(ly - g_mc.prev_linear_y) +
-			      abs16(lz - g_mc.prev_linear_z));
-	motion_mg = (uint16_t)(abs16(lx) + abs16(ly) + abs16(lz));
-	smooth_mg = (uint16_t)(abs16(sample.accel_mg_x - g_mc.last_sample.accel_mg_x) +
-			       abs16(sample.accel_mg_y - g_mc.last_sample.accel_mg_y) +
-			       abs16(sample.accel_mg_z - g_mc.last_sample.accel_mg_z));
-	gyro_sum = sample.gyro_valid ?
-		(uint32_t)(abs16(sample.gyro_mdps_x) + abs16(sample.gyro_mdps_y) +
-			   abs16(sample.gyro_mdps_z)) : 0U;
-
-	/* Track last meaningful motion for soft mode transitions. */
-	if (motion_mg >= 60U) {
-		g_mc.last_active_motion_ms = now_ms;
-	}
-
-	/* Feature window. */
-	memset(&frame, 0, sizeof(frame));
-	frame.motion_mg = motion_mg;
-	frame.smooth_motion_mg = smooth_mg;
-	frame.jerk_mg = jerk_mg;
-	frame.orientation_delta_mg = orient_delta;
-	frame.orientation_rate_mg = orient_rate;
-	frame.gyro_sum_mdps = gyro_sum;
-	frame.timestamp_ms = now_ms;
 	append_frame(&frame);
-	summarise_features(&summary, now_ms);
-	summary.cadence_confidence = compute_cadence_confidence(now_ms);
+	summarise_window(&short_win, frame.now_ms, FEATURE_SHORT_WINDOW_MS);
+	summarise_window(&long_win, frame.now_ms, FEATURE_LONG_WINDOW_MS);
 
-	g_mc.stability_confidence = summary.stability_confidence;
-	g_mc.cadence_confidence   = summary.cadence_confidence;
-	g_mc.chaos_confidence     = summary.chaos_confidence;
-
-	rough = motion_mg >= 1200U || gyro_sum >= 80000U || summary.chaos_confidence >= 80U;
-
-	/* Step detection. */
+	rough = is_rough_motion(&frame, &short_win);
+	hw_steps = read_hw_steps(frame.now_ms);
 	if (!motion_sensor_get_capabilities()->backend_has_hw_step_counter) {
-		step = detect_sw_step(lx, ly, lz, rough, now_ms);
+		sw_step = detect_sw_step(&frame, &short_win, rough);
 	}
-	update_walking(step || (hw_steps > 0U), &summary, now_ms);
 
-	/* In-hand detection. */
+	g_mc.cadence_confidence = compute_cadence_confidence(frame.now_ms);
+	frame.cadence_score = g_mc.cadence_confidence;
+	short_win.cadence_score = g_mc.cadence_confidence;
+	long_win.cadence_score = g_mc.cadence_confidence;
+	update_walking(sw_step || (hw_steps > 0U), &frame, &short_win);
+
+	g_mc.stability_confidence =
+		(uint8_t)(((uint16_t)short_win.stability_score +
+			   (uint16_t)long_win.stability_score) / 2U);
+	g_mc.chaos_confidence =
+		MAX(frame.chaos_score, short_win.chaos_score);
+	g_mc.surface_still_confidence =
+		(uint8_t)(((uint16_t)long_win.surface_still_score * 3U +
+			   (uint16_t)frame.surface_still_score) / 4U);
+	g_mc.hand_motion_confidence =
+		MAX(frame.hand_motion_score, short_win.hand_motion_score);
+	g_mc.rotation_confidence =
+		MAX(frame.rotation_score, short_win.rotation_score);
+
 	memset(&det_in, 0, sizeof(det_in));
-	det_in.gravity_x           = g_mc.gravity_x;
-	det_in.gravity_y           = g_mc.gravity_y;
-	det_in.gravity_z           = g_mc.gravity_z;
-	det_in.motion_mg           = motion_mg;
-	det_in.smooth_motion_mg    = smooth_mg;
-	det_in.jerk_mg             = jerk_mg;
-	det_in.orientation_delta_mg = orient_delta;
-	det_in.orientation_rate_mg  = orient_rate;
-	det_in.gyro_sum_mdps       = gyro_sum;
-	det_in.walking_confidence  = g_mc.walking_confidence;
-	det_in.cadence_confidence  = summary.cadence_confidence;
-	det_in.stability_confidence = summary.stability_confidence;
-	det_in.chaos_confidence    = summary.chaos_confidence;
-	det_in.walking_active      = g_mc.walking_active;
-	det_in.rough_motion        = rough;
-	det_in.motion_wake         = (now_ms - g_mc.last_motion_wake_ms) <= 1200LL;
-	det_in.now_ms              = now_ms;
+	det_in.dt_ms = frame.dt_ms;
+	det_in.gravity_x = frame.gravity_x_mg;
+	det_in.gravity_y = frame.gravity_y_mg;
+	det_in.gravity_z = frame.gravity_z_mg;
+	det_in.motion_mg = MAX(frame.linear_motion_mg,
+			       short_win.avg_linear_motion_mg);
+	det_in.smooth_motion_mg = short_win.avg_smooth_linear_motion_mg;
+	det_in.jerk_mg = MAX(frame.jerk_mg_per_s,
+			     short_win.avg_jerk_mg_per_s);
+	det_in.orientation_delta_mg = short_win.avg_orientation_delta_mg;
+	det_in.orientation_rate_mg = MAX(frame.orientation_rate_mg_per_s,
+					 short_win.avg_orientation_rate_mg_per_s);
+	det_in.gyro_sum_mdps = MAX(frame.gyro_sum_mdps,
+				   short_win.avg_gyro_sum_mdps);
+	det_in.walking_confidence = g_mc.walking_confidence;
+	det_in.cadence_confidence = g_mc.cadence_confidence;
+	det_in.stability_confidence = g_mc.stability_confidence;
+	det_in.chaos_confidence = g_mc.chaos_confidence;
+	det_in.surface_still_confidence = g_mc.surface_still_confidence;
+	det_in.hand_motion_confidence = g_mc.hand_motion_confidence;
+	det_in.rotation_confidence = g_mc.rotation_confidence;
+	det_in.walking_active = g_mc.walking_active;
+	det_in.rough_motion = rough;
+	det_in.motion_wake =
+		(frame.now_ms - g_mc.last_motion_wake_ms) <= 1500LL;
+	det_in.now_ms = frame.now_ms;
 
 	in_hand_detector_process(&g_mc.in_hand_det, &det_in, &det_out);
-
-	g_mc.pickup_confidence  = det_out.pickup_confidence;
+	g_mc.pickup_confidence = det_out.pickup_confidence;
 	g_mc.in_hand_confidence = det_out.in_hand_confidence;
-	g_mc.in_hand            = det_out.in_hand;
+	g_mc.in_hand = det_out.in_hand;
 	if (det_out.state == IN_HAND_DETECTOR_SURFACE_STILL) {
-		g_mc.last_still_ms = now_ms;
+		g_mc.last_still_ms = frame.now_ms;
 	}
 
-	/* Shake detection. */
-	check_shake(motion_mg, gyro_sum,
-		    summary.stability_confidence, summary.chaos_confidence,
-		    det_out.in_hand, det_out.in_hand_confidence, now_ms);
+	check_shake(&frame, &short_win, det_out.in_hand,
+		    det_out.in_hand_confidence);
+	emit_detector_events(&det_out, frame.now_ms);
+	update_look_reference(&det_out, frame.now_ms);
+	update_look_target(&det_out, &frame, &short_win);
 
-	/* Gaze. */
-	emit_detector_events(&det_out, now_ms);
-	update_look_reference(&det_out, &summary);
-	update_look_target(&det_out, &summary, now_ms);
+	publish_carry(frame.now_ms,
+		      det_out.pickup_candidate || det_out.picked_up ||
+		      det_out.in_hand_enter || det_out.in_hand_exit);
+	publish_look(frame.now_ms, false);
 
-	/* Publish. */
-	publish_carry(now_ms, det_out.pickup_candidate || det_out.picked_up ||
-				det_out.in_hand_enter || det_out.in_hand_exit);
-	publish_look(now_ms, false);
+	active_motion = frame.linear_motion_mg >= ACTIVE_MOTION_MG ||
+			frame.rotation_score >= 28U ||
+			frame.hand_motion_score >= 35U;
+	if (active_motion) {
+		g_mc.last_active_motion_ms = frame.now_ms;
+	}
 
-	g_mc.prev_linear_x = lx;
-	g_mc.prev_linear_y = ly;
-	g_mc.prev_linear_z = lz;
+	g_mc.prev_linear_x = frame.linear_x_mg;
+	g_mc.prev_linear_y = frame.linear_y_mg;
+	g_mc.prev_linear_z = frame.linear_z_mg;
+	g_mc.have_prev_linear = true;
 	g_mc.last_sample = sample;
-	debug_log(now_ms);
+	g_mc.have_last_sample = true;
 
-	/* ── Mode decision ─────────────────────────────────────────────── */
+	debug_log(&frame, &det_out, &long_win);
 
 	if (g_mc.walking_active) {
-		set_mode(MODE_WALK_MAINTAIN, now_ms + 1000LL);
-	} else if (g_mc.in_hand || g_mc.in_hand_confidence >= 40U) {
-		set_mode(MODE_IN_HAND_TRACK,
-			 now_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS);
-	} else if (now_ms < g_mc.active_until_ms) {
-		set_mode(MODE_ACTIVE_WINDOW, g_mc.active_until_ms);
-	} else if (motion_mg >= 60U &&
-		   (now_ms - g_mc.last_active_motion_ms) < 2000LL) {
-		/* Soft linger: subtle motion still present. */
-		g_mc.active_until_ms = now_ms + 1500LL;
-		set_mode(MODE_ACTIVE_WINDOW, g_mc.active_until_ms);
+		switch_mode(MODE_WALK_MAINTAIN, frame.now_ms);
+	} else if (g_mc.in_hand || g_mc.in_hand_confidence >= 35U ||
+		   g_mc.pickup_confidence >= 30U) {
+		g_mc.active_until_ms =
+			MAX(g_mc.active_until_ms,
+			    frame.now_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS);
+		switch_mode(MODE_IN_HAND_TRACK, frame.now_ms);
+	} else if (frame.now_ms < g_mc.active_until_ms) {
+		switch_mode(MODE_ACTIVE_WINDOW, frame.now_ms);
+	} else if (g_mc.surface_still_confidence >= SURFACE_STILL_SCORE &&
+		   long_win.count >= 6U) {
+		switch_mode(MODE_IDLE, frame.now_ms);
+		return;
+	} else if (active_motion &&
+		   (frame.now_ms - g_mc.last_active_motion_ms) < 1500LL) {
+		g_mc.active_until_ms = frame.now_ms + 1000LL;
+		switch_mode(MODE_ACTIVE_WINDOW, frame.now_ms);
 	} else {
-		set_mode(MODE_IDLE, now_ms);
+		switch_mode(MODE_IDLE, frame.now_ms);
 		return;
 	}
 
 	(void)k_work_reschedule(&g_mc.sample_work, K_MSEC(sample_period_ms()));
 }
-
-/* ── ISR handler ──────────────────────────────────────────────────────── */
 
 static void sensor_event_handler(uint32_t events, void *user_data)
 {
@@ -1077,16 +1602,11 @@ static void sensor_event_handler(uint32_t events, void *user_data)
 		return;
 	}
 
-	if ((now_ms - g_mc.last_motion_wake_ms) >= 750LL) {
-		(void)app_event_publish_with_timestamp(
-			APP_EVENT_MOTION_WAKE, (int32_t)events, now_ms);
-	}
-	g_mc.last_motion_wake_ms = now_ms;
+	publish_motion_wake((uint16_t)events, now_ms);
 	g_mc.active_until_ms = now_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS;
-	set_mode(MODE_ACTIVE_WINDOW, g_mc.active_until_ms);
+	switch_mode(MODE_ACTIVE_WINDOW, now_ms);
+	schedule_now();
 }
-
-/* ── Public API ───────────────────────────────────────────────────────── */
 
 int motion_classifier_init(int64_t now_ms)
 {
@@ -1117,14 +1637,15 @@ int motion_classifier_init(int64_t now_ms)
 	g_mc.enabled = true;
 
 	if (uses_idle_polling()) {
-		LOG_INF("Motion: polling fallback (no interrupt)");
+		LOG_INF("Motion: polling fallback (no tilt interrupt)");
 	}
 
-	set_mode(MODE_IDLE, now_ms);
+	switch_mode(MODE_IDLE, now_ms);
 	return 0;
 }
 
-void motion_classifier_on_event(const struct app_event *event, const struct pet_state *state)
+void motion_classifier_on_event(const struct app_event *event,
+				const struct pet_state *state)
 {
 	if (event == NULL || !g_mc.initialized) {
 		return;
@@ -1143,6 +1664,9 @@ void motion_classifier_on_event(const struct app_event *event, const struct pet_
 			g_mc.active_until_ms = MIN(g_mc.active_until_ms,
 						   event->timestamp_ms + 1500LL);
 		}
+		if (g_mc.battery_critical) {
+			schedule_now();
+		}
 		break;
 	case APP_EVENT_BATTERY_LOW:
 		g_mc.battery_low = true;
@@ -1150,6 +1674,7 @@ void motion_classifier_on_event(const struct app_event *event, const struct pet_
 	case APP_EVENT_BATTERY_CRITICAL:
 		g_mc.battery_critical = true;
 		reset_look_reference();
+		schedule_now();
 		break;
 	case APP_EVENT_CHARGER_CONNECTED:
 		g_mc.charging = true;
@@ -1159,40 +1684,49 @@ void motion_classifier_on_event(const struct app_event *event, const struct pet_
 		break;
 	case APP_EVENT_WALKING_START:
 		g_mc.walking_active = true;
-		g_mc.walking_confidence = (event->param > 0) ?
-			clamp_u8(event->param) : CONFIG_KERFUR_MOTION_WALK_START_THRESHOLD;
+		set_walking_confidence((event->param > 0) ?
+				       clamp_u8(event->param) :
+				       CONFIG_KERFUR_MOTION_WALK_START_THRESHOLD);
 		g_mc.active_until_ms = event->timestamp_ms + 1500LL;
-		g_mc.suppress_look_until_ms = max64(
-			g_mc.suppress_look_until_ms,
-			event->timestamp_ms + LOOK_SUPPRESS_AFTER_WALK_MS);
+		g_mc.suppress_look_until_ms =
+			max64(g_mc.suppress_look_until_ms,
+			      event->timestamp_ms + LOOK_SUPPRESS_AFTER_WALK_MS);
 		break;
 	case APP_EVENT_WALKING_STOP:
 		g_mc.walking_active = false;
-		g_mc.walking_confidence = clamp_u8(event->param);
+		set_walking_confidence(clamp_u8(event->param));
 		break;
 	case APP_EVENT_CARRY_STATE_UPDATE:
 		g_mc.in_hand = event->payload.carry_state.in_hand;
 		g_mc.pickup_confidence = event->payload.carry_state.pickup_confidence;
-		g_mc.in_hand_confidence = event->payload.carry_state.in_hand_confidence;
-		g_mc.walking_confidence = event->payload.carry_state.walking_confidence;
-		/* Don't nuke reference on exit — let update_look_target decay
-		 * the gaze gracefully via the idle timer. */
+		g_mc.in_hand_confidence =
+			event->payload.carry_state.in_hand_confidence;
+		set_walking_confidence(event->payload.carry_state.walking_confidence);
+		sync_detector_from_public_state(event->timestamp_ms);
 		if (!g_mc.in_hand && g_mc.look_idle_since_ms == 0LL) {
 			g_mc.look_idle_since_ms = event->timestamp_ms;
 		}
 		break;
 	case APP_EVENT_PICKED_UP:
 		g_mc.last_pickup_ms = event->timestamp_ms;
-		g_mc.active_until_ms = event->timestamp_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS;
+		g_mc.pickup_confidence =
+			MAX(g_mc.pickup_confidence, clamp_u8(event->param));
+		sync_detector_from_public_state(event->timestamp_ms);
+		g_mc.active_until_ms =
+			event->timestamp_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS;
 		break;
 	case APP_EVENT_IN_HAND_ENTER:
 		g_mc.last_in_hand_ms = event->timestamp_ms;
 		g_mc.in_hand = true;
+		g_mc.in_hand_confidence =
+			MAX(g_mc.in_hand_confidence, clamp_u8(event->param));
+		sync_detector_from_public_state(event->timestamp_ms);
 		break;
 	case APP_EVENT_IN_HAND_EXIT:
 		g_mc.in_hand = false;
-		/* Start decay timer instead of nuking reference. The gaze
-		 * will hold briefly then drift back to center. */
+		g_mc.in_hand_confidence =
+			MIN(g_mc.in_hand_confidence, clamp_u8(event->param));
+		sync_detector_from_public_state(event->timestamp_ms);
 		if (g_mc.look_idle_since_ms == 0LL) {
 			g_mc.look_idle_since_ms = event->timestamp_ms;
 		}

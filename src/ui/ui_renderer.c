@@ -50,6 +50,31 @@ static struct ui_runtime g_ui;
 static uint8_t g_canvas_buf[LV_CANVAS_BUF_SIZE(UI_CANVAS_MAX_W, UI_CANVAS_MAX_H, 8,
 						LV_DRAW_BUF_STRIDE_ALIGN)];
 
+static void canvas_set_px_no_invalidate(lv_obj_t *canvas, int16_t x, int16_t y,
+					lv_color_t color, lv_opa_t opa)
+{
+	lv_draw_buf_t *draw_buf = lv_canvas_get_draw_buf(canvas);
+	uint8_t *data;
+
+	ARG_UNUSED(opa);
+
+	if (draw_buf == NULL) {
+		return;
+	}
+
+	if (draw_buf->header.cf != LV_COLOR_FORMAT_L8) {
+		lv_canvas_set_px(canvas, x, y, color, opa);
+		return;
+	}
+
+	data = lv_draw_buf_goto_xy(draw_buf, x, y);
+	if (data == NULL) {
+		return;
+	}
+
+	*data = lv_color_luminance(color);
+}
+
 static void draw_bitmap(const struct kerfur_face_bitmap *bitmap, int16_t x, int16_t y,
 			bool mirror_x, bool draw_black, lv_opa_t opa)
 {
@@ -70,7 +95,7 @@ static void draw_bitmap(const struct kerfur_face_bitmap *bitmap, int16_t x, int1
 
 			if (((byte & bit) != 0U) && (dst_x >= 0) && (dst_y >= 0) &&
 			    (dst_x < g_ui.width) && (dst_y < g_ui.height)) {
-				lv_canvas_set_px_skip_invalidate(
+				canvas_set_px_no_invalidate(
 					g_ui.canvas,
 					dst_x,
 					dst_y,

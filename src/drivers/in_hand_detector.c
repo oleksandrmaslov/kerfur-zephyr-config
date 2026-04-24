@@ -4,31 +4,56 @@
 
 #include "drivers/in_hand_detector.h"
 
-/* Confidence thresholds. */
-#define PICKUP_CANDIDATE_THRESHOLD 35U
-#define PICKED_UP_THRESHOLD        40U
-#define IN_HAND_ENTER_THRESHOLD    70U
-#define IN_HAND_EXIT_THRESHOLD     60U
+/*
+ * The detector is intentionally small: the classifier provides cleaned,
+ * windowed evidence and this module keeps hysteresis, surface memory and
+ * one-shot pickup/in-hand events.
+ */
 
-/* Timing. */
-#define IN_HAND_EXIT_CONFIRM_MS        600LL
-#define IN_HAND_EXIT_HOLD_AFTER_ENTER  800LL
-#define SURFACE_STILL_MIN_MS          1500LL
-#define SURFACE_STILL_RECENT_MS       2500LL
-#define PICKUP_RECENT_MS              6000LL
+#define PICKUP_CANDIDATE_THRESHOLD 35U
+#define PICKED_UP_THRESHOLD        52U
+#define IN_HAND_ENTER_THRESHOLD    70U
+#define IN_HAND_EXIT_THRESHOLD     24U
+
+#define SURFACE_STILL_CONFIRM_MS       1400LL
+#define SURFACE_STILL_RECENT_MS        3200LL
+#define PICKUP_RECENT_MS               6000LL
+#define IN_HAND_EXIT_CONFIRM_MS        900LL
+#define IN_HAND_EXIT_HOLD_AFTER_ENTER  1400LL
+
+#define CONF_Q8_MAX (100 * 256)
 
 static uint8_t clamp_u8(int value)
 {
-	if (value < 0) {
-		return 0U;
-	}
-	if (value > 100) {
-		return 100U;
-	}
-	return (uint8_t)value;
+	return (uint8_t)CLAMP(value, 0, 100);
 }
 
-static int abs_i16(int16_t value)
+static int32_t clamp_conf_q8(int32_t value)
+{
+	return CLAMP(value, 0, CONF_Q8_MAX);
+}
+
+static uint8_t conf_q8_to_u8(int32_t value)
+{
+	return clamp_u8((int)((value + 128) / 256));
+}
+
+static int32_t confidence_delta_q8(int rate_per_s, int32_t dt_ms)
+{
+	int64_t delta;
+
+	dt_ms = CLAMP(dt_ms, 10, 200);
+	delta = (int64_t)rate_per_s * 256LL * (int64_t)dt_ms;
+	return (int32_t)(delta / 1000LL);
+}
+
+static void adjust_confidence(int32_t *confidence_q8, int rate_per_s, int32_t dt_ms)
+{
+	*confidence_q8 = clamp_conf_q8(*confidence_q8 +
+				       confidence_delta_q8(rate_per_s, dt_ms));
+}
+
+static int abs_i32(int value)
 {
 	return (value < 0) ? -value : value;
 }
@@ -36,76 +61,146 @@ static int abs_i16(int16_t value)
 static uint16_t gravity_distance(const struct in_hand_detector *det,
 				 const struct in_hand_detector_input *in)
 {
-	return (uint16_t)(abs_i16(in->gravity_x - det->surface_gravity_x) +
-			  abs_i16(in->gravity_y - det->surface_gravity_y) +
-			  abs_i16(in->gravity_z - det->surface_gravity_z));
+	return (uint16_t)(abs_i32(in->gravity_x - det->surface_gravity_x) +
+			  abs_i32(in->gravity_y - det->surface_gravity_y) +
+			  abs_i32(in->gravity_z - det->surface_gravity_z));
 }
 
-/* ── Surface-still classifier ─────────────────────────────────────────── */
-
-static bool is_surface_still(const struct in_hand_detector_input *in)
+static bool surface_now(const struct in_hand_detector_input *in)
 {
-	return !in->walking_active &&
-	       !in->rough_motion &&
-	       in->walking_confidence < 30U &&
-	       in->chaos_confidence   < 20U &&
-	       in->motion_mg          <= 100U &&
-	       in->smooth_motion_mg   <= 80U &&
-	       in->orientation_rate_mg <= 50U;
+	return !in->rough_motion &&
+	       !in->walking_active &&
+	       in->walking_confidence < 35U &&
+	       in->cadence_confidence < 35U &&
+	       in->surface_still_confidence >= 78U &&
+	       in->smooth_motion_mg <= 55U &&
+	       in->orientation_rate_mg <= 120U &&
+	       in->gyro_sum_mdps <= 10000U;
 }
 
-/* ── Hand-like motion classifier ──────────────────────────────────────── */
-
-static bool is_smooth_reorientation(const struct in_hand_detector_input *in)
+static bool surface_confirmed(const struct in_hand_detector *det,
+			      const struct in_hand_detector_input *in)
 {
-	/* Slow, steady gravity vector change — characteristic of being held. */
-	return in->orientation_delta_mg >= 8U &&
-	       in->orientation_delta_mg <= 300U &&
-	       in->orientation_rate_mg  >= 6U &&
-	       in->orientation_rate_mg  <= 300U &&
-	       in->chaos_confidence     <= 60U;
+	return det->surface_still_armed &&
+	       ((in->now_ms - det->still_since_ms) >= SURFACE_STILL_CONFIRM_MS);
 }
 
-static bool is_micro_motion(const struct in_hand_detector_input *in)
+static bool had_surface_recently(const struct in_hand_detector *det,
+				 const struct in_hand_detector_input *in)
 {
-	/* Small, non-periodic body tremor. */
-	return in->motion_mg >= 12U &&
-	       in->motion_mg <= 300U &&
-	       in->jerk_mg   <= 280U &&
-	       in->gyro_sum_mdps <= 30000U;
+	return (det->last_surface_leave_ms > 0LL) &&
+	       ((in->now_ms - det->last_surface_leave_ms) <= SURFACE_STILL_RECENT_MS);
 }
 
-static bool is_hand_like(const struct in_hand_detector_input *in)
+static bool tiny_table_vibration(const struct in_hand_detector_input *in)
 {
-	if (in->rough_motion || in->walking_active) {
+	return in->surface_still_confidence >= 65U &&
+	       in->rotation_confidence <= 20U &&
+	       in->hand_motion_confidence <= 25U &&
+	       in->smooth_motion_mg <= 70U &&
+	       in->gyro_sum_mdps <= 9000U;
+}
+
+static bool hand_like_motion(const struct in_hand_detector_input *in)
+{
+	if (in->rough_motion || in->chaos_confidence >= 72U) {
 		return false;
 	}
-	if (in->walking_confidence >= 60U || in->cadence_confidence >= 60U) {
+	if (in->walking_confidence >= 65U || in->cadence_confidence >= 65U) {
 		return false;
 	}
-	if (in->chaos_confidence >= 65U) {
+	if (tiny_table_vibration(in)) {
 		return false;
 	}
-	/* Hand-held motion is small but persistent and almost always involves
-	 * gravity vector reorientation. Pure linear noise from a vibrating
-	 * surface (passing footsteps, fan, AC) routinely produces 30-60mg
-	 * spikes that must NOT count, otherwise the detector pins itself in
-	 * the in-hand state forever. Require either real reorientation, or
-	 * sustained inter-sample motion above the noise floor. */
-	const bool orientation_evidence =
-		in->orientation_delta_mg >= 25U || in->orientation_rate_mg >= 25U;
-	const bool sustained_motion =
-		in->smooth_motion_mg >= 40U && in->motion_mg >= 60U;
-	return orientation_evidence || sustained_motion;
+
+	return in->hand_motion_confidence >= 44U ||
+	       (in->rotation_confidence >= 38U && in->motion_mg >= 12U) ||
+	       (in->orientation_rate_mg >= 120U && in->gyro_sum_mdps >= 2500U &&
+		in->smooth_motion_mg >= 18U);
 }
 
-/* ── Public API ───────────────────────────────────────────────────────── */
+static bool smooth_pickup_motion(const struct in_hand_detector_input *in)
+{
+	return hand_like_motion(in) &&
+	       in->chaos_confidence <= 58U &&
+	       in->cadence_confidence < 50U &&
+	       in->motion_mg <= 420U &&
+	       in->jerk_mg <= 5500U &&
+	       in->gyro_sum_mdps <= 45000U;
+}
+
+static int pickup_evidence_rate(const struct in_hand_detector *det,
+				const struct in_hand_detector_input *in,
+				bool surface_recent)
+{
+	int rate = -18;
+
+	if (surface_now(in)) {
+		return -38;
+	}
+	if (in->rough_motion || in->chaos_confidence >= 78U) {
+		return -55;
+	}
+	if (in->walking_active || in->cadence_confidence >= 65U) {
+		return -34;
+	}
+	if (!smooth_pickup_motion(in)) {
+		return det->in_hand ? -6 : -20;
+	}
+
+	if (surface_recent || in->motion_wake || det->pickup_confidence >= 20U) {
+		rate = 58;
+		rate += (int)in->hand_motion_confidence / 3;
+		rate += (int)in->rotation_confidence / 4;
+		rate += (int)in->stability_confidence / 5;
+		rate -= (int)in->chaos_confidence / 4;
+	}
+
+	return CLAMP(rate, -70, 95);
+}
+
+static int in_hand_evidence_rate(const struct in_hand_detector *det,
+				 const struct in_hand_detector_input *in,
+				 bool surface_recent, bool surface_ok)
+{
+	int rate;
+	const bool hand_like = hand_like_motion(in);
+
+	if (surface_ok) {
+		return det->in_hand ? -46 : -60;
+	}
+	if (in->rough_motion) {
+		return det->in_hand ? -18 : -42;
+	}
+	if (in->walking_active || in->cadence_confidence >= 70U) {
+		return det->in_hand ? -8 : -30;
+	}
+	if (!hand_like) {
+		if (det->in_hand) {
+			return tiny_table_vibration(in) ? -24 : -7;
+		}
+		return -18;
+	}
+
+	rate = 42;
+	if (surface_recent || det->pickup_confidence >= 32U) {
+		rate += 18;
+	}
+	rate += (int)in->hand_motion_confidence / 3;
+	rate += (int)in->rotation_confidence / 5;
+	rate += (int)in->stability_confidence / 8;
+	rate -= (int)in->chaos_confidence / 5;
+	rate -= (int)in->cadence_confidence / 6;
+
+	return CLAMP(rate, -45, 95);
+}
 
 void in_hand_detector_init(struct in_hand_detector *det, int64_t now_ms)
 {
 	if (det == NULL) {
 		return;
 	}
+
 	memset(det, 0, sizeof(*det));
 	det->state = IN_HAND_DETECTOR_SURFACE_STILL;
 	det->still_since_ms = now_ms;
@@ -116,12 +211,14 @@ void in_hand_detector_process(struct in_hand_detector *det,
 			      struct in_hand_detector_output *out)
 {
 	bool surface_still;
-	bool surface_confirmed;
-	bool had_surface_recently;
+	bool surface_ok;
+	bool surface_recent;
 	bool hand_like;
-	bool orientation_moved;
-	int pickup_delta = 0;
-	int in_hand_delta = 0;
+	bool pickup_like;
+	bool gravity_moved;
+	bool exit_ready;
+	int pickup_rate;
+	int hand_rate;
 
 	if (det == NULL || in == NULL || out == NULL) {
 		return;
@@ -129,10 +226,7 @@ void in_hand_detector_process(struct in_hand_detector *det,
 
 	memset(out, 0, sizeof(*out));
 
-	/* ── Surface-still tracking ────────────────────────────────────── */
-
-	surface_still = is_surface_still(in);
-
+	surface_still = surface_now(in);
 	if (surface_still) {
 		if (!det->surface_still_armed) {
 			det->still_since_ms = in->now_ms;
@@ -148,93 +242,41 @@ void in_hand_detector_process(struct in_hand_detector *det,
 		det->surface_still_armed = false;
 	}
 
-	surface_confirmed = det->surface_still_armed &&
-			    ((in->now_ms - det->still_since_ms) >= SURFACE_STILL_MIN_MS);
+	surface_ok = surface_confirmed(det, in);
+	surface_recent = had_surface_recently(det, in);
+	hand_like = hand_like_motion(in);
+	pickup_like = smooth_pickup_motion(in);
+	gravity_moved = gravity_distance(det, in) >= 115U;
 
-	had_surface_recently = (det->last_surface_leave_ms > 0LL) &&
-			       ((in->now_ms - det->last_surface_leave_ms) <= SURFACE_STILL_RECENT_MS);
-
-	/* ── Motion classifiers ────────────────────────────────────────── */
-
-	hand_like = is_hand_like(in);
-	orientation_moved = gravity_distance(det, in) >= 120U;
-
-	/* ── Pickup confidence ─────────────────────────────────────────── */
-
-	if (in->rough_motion) {
-		pickup_delta = -15;
-	} else if (in->walking_active || in->cadence_confidence >= 60U) {
-		pickup_delta = -8;
-	} else if (surface_still) {
-		pickup_delta = -5;
-	} else if (hand_like && (had_surface_recently || in->motion_wake)) {
-		pickup_delta = 6;
-		if (is_smooth_reorientation(in)) {
-			pickup_delta += 4;
-		}
-		if (orientation_moved) {
-			pickup_delta += 5;
-		}
-		if (is_micro_motion(in)) {
-			pickup_delta += 3;
-		}
-		pickup_delta += (int)in->stability_confidence / 15;
-		pickup_delta -= (int)in->chaos_confidence / 15;
-	} else if (!det->in_hand) {
-		pickup_delta = -2;
+	pickup_rate = pickup_evidence_rate(det, in, surface_recent);
+	if (pickup_like && gravity_moved) {
+		pickup_rate += 14;
 	}
-
-	/* ── In-hand confidence ────────────────────────────────────────── */
-
-	if (in->rough_motion) {
-		in_hand_delta = -8;
-	} else if (hand_like) {
-		in_hand_delta = 8;
-		if (det->pickup_confidence >= 30U) {
-			in_hand_delta += 4;
-		}
-		if (orientation_moved) {
-			in_hand_delta += 3;
-		}
-		if (had_surface_recently) {
-			in_hand_delta += 3;
-		}
-		in_hand_delta += (int)in->stability_confidence / 15;
-		in_hand_delta -= (int)in->chaos_confidence / 20;
-	} else if (det->in_hand) {
-		/* No hand-like signal this tick but still flagged in_hand.
-		 * Gravity drift from the saved surface reference is the cleanest
-		 * way to tell a gentle hold (drift > 0) from a confirmed surface
-		 * (drift == 0). Check drift FIRST so a held device with subtle
-		 * reorientation never gets fast-decayed by the surface_still gate. */
-		if (orientation_moved) {
-			in_hand_delta = 0;
-		} else if (surface_still) {
-			in_hand_delta = -8;
-		} else {
-			in_hand_delta = -1;
-		}
-	} else if (surface_still) {
-		in_hand_delta = -3;
-	} else {
-		in_hand_delta = -1;
+	if (pickup_like && (surface_recent || in->motion_wake)) {
+		pickup_rate += 10;
 	}
+	adjust_confidence(&det->pickup_confidence_q8, pickup_rate, in->dt_ms);
 
-	det->pickup_confidence   = clamp_u8((int)det->pickup_confidence + pickup_delta);
-	det->in_hand_confidence  = clamp_u8((int)det->in_hand_confidence + in_hand_delta);
+	hand_rate = in_hand_evidence_rate(det, in, surface_recent, surface_ok);
+	if (hand_like && gravity_moved) {
+		hand_rate += 10;
+	}
+	if (det->picked_up_reported && hand_like) {
+		hand_rate += 8;
+	}
+	adjust_confidence(&det->in_hand_confidence_q8, hand_rate, in->dt_ms);
 
-	/* ── One-shot events ───────────────────────────────────────────── */
+	det->pickup_confidence = conf_q8_to_u8(det->pickup_confidence_q8);
+	det->in_hand_confidence = conf_q8_to_u8(det->in_hand_confidence_q8);
 
-	/* Reset one-shot flags when confidence has clearly dropped.
-	 * Use generous thresholds so quick re-pickup is detected. */
 	if (!det->in_hand) {
 		if (det->pickup_candidate_reported &&
 		    det->pickup_confidence < (PICKUP_CANDIDATE_THRESHOLD - 8U)) {
 			det->pickup_candidate_reported = false;
 		}
 		if (det->picked_up_reported &&
-		    (det->pickup_confidence <= 25U ||
-		     (surface_confirmed && det->in_hand_confidence <= 20U))) {
+		    (det->pickup_confidence <= 24U ||
+		     (surface_ok && det->in_hand_confidence <= 22U))) {
 			det->picked_up_reported = false;
 		}
 	}
@@ -247,14 +289,12 @@ void in_hand_detector_process(struct in_hand_detector *det,
 
 	if (!det->picked_up_reported &&
 	    det->pickup_confidence >= PICKED_UP_THRESHOLD &&
-	    det->in_hand_confidence >= 35U &&
-	    hand_like) {
+	    det->in_hand_confidence >= 38U &&
+	    pickup_like) {
 		out->picked_up = true;
 		det->picked_up_reported = true;
 		det->last_pickup_ms = in->now_ms;
 	}
-
-	/* ── In-hand state machine ─────────────────────────────────────── */
 
 	if (!det->in_hand && det->in_hand_confidence >= IN_HAND_ENTER_THRESHOLD) {
 		det->in_hand = true;
@@ -263,26 +303,20 @@ void in_hand_detector_process(struct in_hand_detector *det,
 		det->exit_candidate_since_ms = 0LL;
 		out->in_hand_enter = true;
 	} else if (det->in_hand) {
-		bool immediate_exit = in->rough_motion;
-		bool soft_exit = det->in_hand_confidence <= IN_HAND_EXIT_THRESHOLD ||
-				 in->walking_active || surface_confirmed;
-		bool exit_allowed =
-			(in->now_ms - det->last_in_hand_ms) >= IN_HAND_EXIT_HOLD_AFTER_ENTER;
-
-		if (immediate_exit) {
-			det->in_hand = false;
-			det->exit_candidate_since_ms = 0LL;
-			out->in_hand_exit = true;
-		} else if (soft_exit) {
+		exit_ready = surface_ok ||
+			     det->in_hand_confidence <= IN_HAND_EXIT_THRESHOLD;
+		if (exit_ready) {
 			if (det->exit_candidate_since_ms == 0LL) {
 				det->exit_candidate_since_ms = in->now_ms;
 			}
-			if (exit_allowed &&
-			    (in->now_ms - det->exit_candidate_since_ms) >= IN_HAND_EXIT_CONFIRM_MS) {
+			if (((in->now_ms - det->last_in_hand_ms) >=
+			     IN_HAND_EXIT_HOLD_AFTER_ENTER) &&
+			    ((in->now_ms - det->exit_candidate_since_ms) >=
+			     IN_HAND_EXIT_CONFIRM_MS)) {
 				det->in_hand = false;
 				det->exit_candidate_since_ms = 0LL;
 				out->in_hand_exit = true;
-				if (surface_confirmed) {
+				if (surface_ok) {
 					det->state = IN_HAND_DETECTOR_SURFACE_STILL;
 				}
 			}
@@ -291,7 +325,6 @@ void in_hand_detector_process(struct in_hand_detector *det,
 		}
 	}
 
-	/* Update state machine label. */
 	if (det->in_hand) {
 		det->state = in->walking_active ? IN_HAND_DETECTOR_WALKING :
 						  IN_HAND_DETECTOR_IN_HAND;
@@ -299,39 +332,28 @@ void in_hand_detector_process(struct in_hand_detector *det,
 		det->state = IN_HAND_DETECTOR_SHAKE_EVENT;
 	} else if (det->pickup_confidence >= PICKUP_CANDIDATE_THRESHOLD) {
 		det->state = IN_HAND_DETECTOR_MAYBE_PICKED_UP;
-	} else if (surface_confirmed) {
+	} else if (surface_ok) {
 		det->state = IN_HAND_DETECTOR_SURFACE_STILL;
 	}
 
-	/* ── Look confidence ───────────────────────────────────────────── */
-
 	out->look_confidence = 0U;
-
-	if (det->in_hand && !in->walking_active && !in->rough_motion) {
+	if (det->in_hand && !in->rough_motion) {
 		int look = (int)det->in_hand_confidence;
 
 		look += (int)in->stability_confidence / 3;
-		look -= (int)in->chaos_confidence / 3;
-		look -= (int)in->cadence_confidence / 4;
-		if (in->orientation_delta_mg >= 8U && in->orientation_delta_mg <= 200U) {
-			look += 8;
-		}
-		if (in->motion_mg > 350U) {
-			look -= (int)(in->motion_mg - 350U) / 6;
-		}
-		if (in->gyro_sum_mdps > 25000U) {
-			look -= (int)(in->gyro_sum_mdps - 25000U) / 2000;
+		look += (int)in->rotation_confidence / 8;
+		look -= (int)in->chaos_confidence / 2;
+		look -= (int)in->cadence_confidence / 3;
+		if (in->walking_active) {
+			look /= 2;
 		}
 		out->look_confidence = clamp_u8(look);
-	} else if (det->state == IN_HAND_DETECTOR_MAYBE_PICKED_UP &&
-		   det->pickup_confidence >= PICKUP_CANDIDATE_THRESHOLD) {
+	} else if (det->state == IN_HAND_DETECTOR_MAYBE_PICKED_UP) {
 		out->look_confidence = clamp_u8(
 			(int)det->pickup_confidence / 2 +
-			(int)in->stability_confidence / 4 -
+			(int)in->rotation_confidence / 4 -
 			(int)in->chaos_confidence / 5);
 	}
-
-	/* ── Output ────────────────────────────────────────────────────── */
 
 	out->state = det->state;
 	out->pickup_confidence = det->pickup_confidence;

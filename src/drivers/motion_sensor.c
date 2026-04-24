@@ -147,6 +147,57 @@ static int16_t sensor_value_to_mdps(const struct sensor_value *value)
 	return (int16_t)CLAMP(mdps, INT16_MIN, INT16_MAX);
 }
 
+static void motion_sensor_remap_sample(struct motion_sensor_sample *sample)
+{
+	int16_t ax;
+	int16_t ay;
+	int16_t az;
+	int16_t gx;
+	int16_t gy;
+	int16_t gz;
+
+	if (sample == NULL) {
+		return;
+	}
+
+	ax = sample->accel_mg_x;
+	ay = sample->accel_mg_y;
+	az = sample->accel_mg_z;
+	gx = sample->gyro_mdps_x;
+	gy = sample->gyro_mdps_y;
+	gz = sample->gyro_mdps_z;
+
+	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_SWAP_XY)) {
+		int16_t tmp;
+
+		tmp = ax;
+		ax = ay;
+		ay = tmp;
+		tmp = gx;
+		gx = gy;
+		gy = tmp;
+	}
+	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_INVERT_X)) {
+		ax = -ax;
+		gx = -gx;
+	}
+	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_INVERT_Y)) {
+		ay = -ay;
+		gy = -gy;
+	}
+	if (IS_ENABLED(CONFIG_KERFUR_MOTION_AXIS_INVERT_Z)) {
+		az = -az;
+		gz = -gz;
+	}
+
+	sample->accel_mg_x = ax;
+	sample->accel_mg_y = ay;
+	sample->accel_mg_z = az;
+	sample->gyro_mdps_x = gx;
+	sample->gyro_mdps_y = gy;
+	sample->gyro_mdps_z = gz;
+}
+
 static int sensor_set_odr(enum sensor_channel channel, int frequency_hz)
 {
 #if DT_HAS_ALIAS(motion0)
@@ -348,7 +399,8 @@ int motion_sensor_init(void)
 		LOG_WRN("Motion hw step backend unavailable (%d)", hw_step_err);
 	}
 
-	LOG_INF("Motion sensor ready backend_tilt=%d backend_hw_steps=%d silicon_tilt=%d silicon_hw_steps=%d",
+	LOG_INF("Motion sensor ready backend_tilt=%d backend_hw_steps=%d "
+		"silicon_tilt=%d silicon_hw_steps=%d",
 		g_caps.backend_has_tilt ? 1 : 0,
 		g_caps.backend_has_hw_step_counter ? 1 : 0,
 		g_caps.has_tilt ? 1 : 0,
@@ -429,14 +481,25 @@ int motion_sensor_fetch_sample(struct motion_sensor_sample *out_sample)
 	out_sample->accel_mg_z = sensor_value_to_mg(&accel[2]);
 	out_sample->timestamp_ms = k_uptime_get();
 
-	err = sensor_channel_get(g_sensor_dev, SENSOR_CHAN_GYRO_XYZ, gyro);
+	if (g_runtime.gyro_enabled) {
+		err = sensor_channel_get(g_sensor_dev, SENSOR_CHAN_GYRO_XYZ, gyro);
+	} else {
+		err = -ENOTSUP;
+	}
+
 	if (err == 0) {
 		out_sample->gyro_mdps_x = sensor_value_to_mdps(&gyro[0]);
 		out_sample->gyro_mdps_y = sensor_value_to_mdps(&gyro[1]);
 		out_sample->gyro_mdps_z = sensor_value_to_mdps(&gyro[2]);
-		out_sample->gyro_valid = g_runtime.gyro_enabled;
+		out_sample->gyro_valid = true;
+	} else {
+		out_sample->gyro_mdps_x = 0;
+		out_sample->gyro_mdps_y = 0;
+		out_sample->gyro_mdps_z = 0;
+		out_sample->gyro_valid = false;
 	}
 
+	motion_sensor_remap_sample(out_sample);
 	return 0;
 #else
 	ARG_UNUSED(out_sample);

@@ -17,6 +17,8 @@ struct in_hand_detector {
 	int16_t surface_gravity_x;
 	int16_t surface_gravity_y;
 	int16_t surface_gravity_z;
+	int32_t pickup_confidence_q8;
+	int32_t in_hand_confidence_q8;
 	int64_t still_since_ms;
 	int64_t last_motion_wake_ms;
 	int64_t last_pickup_ms;
@@ -33,6 +35,7 @@ struct in_hand_detector {
 };
 
 struct in_hand_detector_input {
+	int32_t dt_ms;
 	int16_t gravity_x;
 	int16_t gravity_y;
 	int16_t gravity_z;
@@ -46,6 +49,9 @@ struct in_hand_detector_input {
 	uint8_t cadence_confidence;
 	uint8_t stability_confidence;
 	uint8_t chaos_confidence;
+	uint8_t surface_still_confidence;
+	uint8_t hand_motion_confidence;
+	uint8_t rotation_confidence;
 	bool walking_active;
 	bool rough_motion;
 	bool motion_wake;
