@@ -40,6 +40,11 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 #define GRAVITY_MOVING_TAU_MS           900U
 #define GRAVITY_ROUGH_TAU_MS            1800U
 
+#define GAZE_GRAVITY_CALM_TAU_MS        120U
+#define GAZE_GRAVITY_MOVING_TAU_MS      260U
+#define GAZE_GRAVITY_ROTATING_TAU_MS    220U
+#define GAZE_GRAVITY_ROUGH_TAU_MS       700U
+
 #define STEP_PEAK_MG                    260U
 #define STEP_MIN_INTERVAL_MS            300LL
 #define STEP_MAX_INTERVAL_MS            900LL
@@ -49,14 +54,18 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 #define ACTIVE_MOTION_MG                55U
 
 #define GAZE_DEADBAND                   4
+#define GAZE_RAW_JITTER_UNITS           2
 #define GAZE_IDLE_RAW_THRESHOLD         7
-#define GAZE_SLEW_UNITS_PER_S           280
+#define GAZE_SLEW_UNITS_PER_S           380
 #define GAZE_LOW_BATT_SLEW_UNITS_PER_S  150
 #define GAZE_DECAY_UNITS_PER_S          55
 #define GAZE_HOLD_AFTER_STOP_MS         2600LL
 #define GAZE_HOLD_AFTER_LOST_MS         1200LL
 #define GAZE_HOLD_CONFIDENCE            38U
 #define GAZE_DECAY_CONFIDENCE           24U
+#define GAZE_SUPPRESS_LINEAR_MG         1300U
+#define GAZE_SUPPRESS_JERK_MG_PER_S     16000U
+#define GAZE_ROTATION_SOFTEN_SCORE      55U
 #define LOOK_SUPPRESS_AFTER_ROUGH_MS    700LL
 #define LOOK_SUPPRESS_AFTER_WALK_MS     500LL
 
@@ -157,12 +166,16 @@ struct motion_classifier_state {
 	bool walking_active;
 	bool in_hand;
 	bool look_reference_valid;
+	bool look_gravity_valid;
 
 	int8_t battery_percent;
 
 	int16_t gravity_x;
 	int16_t gravity_y;
 	int16_t gravity_z;
+	int16_t look_gravity_x;
+	int16_t look_gravity_y;
+	int16_t look_gravity_z;
 	int16_t prev_linear_x;
 	int16_t prev_linear_y;
 	int16_t prev_linear_z;
@@ -457,6 +470,55 @@ static void update_gravity(const struct motion_sensor_sample *sample,
 	}
 }
 
+static void update_look_gravity(const struct motion_sensor_sample *sample,
+				uint16_t accel_mag_mg,
+				uint16_t accel_delta_mg,
+				uint32_t gyro_sum_mdps,
+				int32_t dt_ms,
+				bool reset_history)
+{
+	bool plausible = accel_magnitude_plausible(accel_mag_mg);
+	uint16_t tau_ms;
+	int accel_error_mg;
+
+	if (!plausible) {
+		return;
+	}
+
+	if (!g_mc.look_gravity_valid || reset_history) {
+		g_mc.look_gravity_x = sample->accel_mg_x;
+		g_mc.look_gravity_y = sample->accel_mg_y;
+		g_mc.look_gravity_z = sample->accel_mg_z;
+		g_mc.look_gravity_valid = true;
+		return;
+	}
+
+	accel_error_mg = abs_i32((int)accel_mag_mg - 1000);
+	if (accel_delta_mg <= 35U && gyro_sum_mdps <= 5000U) {
+		tau_ms = GAZE_GRAVITY_CALM_TAU_MS;
+	} else if (accel_error_mg >= 170 ||
+		   (!sample->gyro_valid && accel_delta_mg >= 260U)) {
+		tau_ms = GAZE_GRAVITY_ROUGH_TAU_MS;
+	} else if (gyro_sum_mdps >= 20000U) {
+		tau_ms = GAZE_GRAVITY_ROTATING_TAU_MS;
+	} else {
+		tau_ms = GAZE_GRAVITY_MOVING_TAU_MS;
+	}
+
+	g_mc.look_gravity_x = lp_i16_dt(g_mc.look_gravity_x, sample->accel_mg_x,
+					tau_ms, dt_ms);
+	g_mc.look_gravity_y = lp_i16_dt(g_mc.look_gravity_y, sample->accel_mg_y,
+					tau_ms, dt_ms);
+	g_mc.look_gravity_z = lp_i16_dt(g_mc.look_gravity_z, sample->accel_mg_z,
+					tau_ms, dt_ms);
+
+	if (!accel_magnitude_plausible(vec_mag_mg(g_mc.look_gravity_x,
+						  g_mc.look_gravity_y,
+						  g_mc.look_gravity_z))) {
+		g_mc.look_gravity_valid = false;
+	}
+}
+
 static uint8_t compute_stability_score(const struct imu_processed_frame *f)
 {
 	int score = 100;
@@ -582,6 +644,8 @@ static bool build_frame(const struct motion_sensor_sample *sample,
 	if (!g_mc.gravity_valid) {
 		return false;
 	}
+	update_look_gravity(sample, accel_mag, accel_delta, gyro_sum, dt_ms,
+			    reset_history);
 
 	linear_x = sample->accel_mg_x - g_mc.gravity_x;
 	linear_y = sample->accel_mg_y - g_mc.gravity_y;
@@ -958,8 +1022,11 @@ static bool is_rough_motion(const struct imu_processed_frame *frame,
 {
 	return frame->linear_motion_mg >= 1200U ||
 	       frame->jerk_mg_per_s >= 12000U ||
-	       frame->gyro_sum_mdps >= 90000U ||
-	       short_win->chaos_score >= 82U;
+	       (frame->gyro_sum_mdps >= 110000U &&
+		(frame->linear_motion_mg >= 700U ||
+		 frame->jerk_mg_per_s >= 6000U)) ||
+	       (short_win->chaos_score >= 82U &&
+		short_win->peak_linear_motion_mg >= 900U);
 }
 
 static void check_shake(const struct imu_processed_frame *frame,
@@ -975,14 +1042,17 @@ static void check_shake(const struct imu_processed_frame *frame,
 	uint32_t gyro_peak = MAX(frame->gyro_sum_mdps,
 				 short_win->peak_gyro_sum_mdps);
 
-	if (linear_peak >= 1900U || jerk_peak >= 18000U || gyro_peak >= 125000U) {
+	if (linear_peak >= 1900U || jerk_peak >= 18000U ||
+	    (gyro_peak >= 125000U &&
+	     (linear_peak >= 1000U || jerk_peak >= 8000U))) {
 		type = APP_EVENT_IMPACT;
 		cooldown = SHAKE_COOLDOWN_IMPACT_MS;
 		g_mc.suppress_look_until_ms =
 			max64(g_mc.suppress_look_until_ms,
 			      frame->now_ms + LOOK_SUPPRESS_AFTER_ROUGH_MS);
 	} else if ((linear_peak >= 1300U && jerk_peak >= 9000U) ||
-		   gyro_peak >= 95000U) {
+		   (gyro_peak >= 95000U &&
+		    linear_peak >= 900U && jerk_peak >= 5500U)) {
 		type = APP_EVENT_SHAKE_ROUGH;
 		cooldown = SHAKE_COOLDOWN_ROUGH_MS;
 		g_mc.suppress_look_until_ms =
@@ -990,7 +1060,8 @@ static void check_shake(const struct imu_processed_frame *frame,
 			      frame->now_ms + LOOK_SUPPRESS_AFTER_ROUGH_MS);
 	} else if ((linear_peak >= 900U && jerk_peak >= 6500U &&
 		    short_win->chaos_score >= 48U) ||
-		   gyro_peak >= 76000U) {
+		   (gyro_peak >= 76000U &&
+		    linear_peak >= 650U && jerk_peak >= 4500U)) {
 		type = APP_EVENT_SHAKE_PLAY;
 		cooldown = SHAKE_COOLDOWN_PLAY_MS;
 	} else if (linear_peak >= 680U && jerk_peak >= 5200U &&
@@ -1026,13 +1097,18 @@ static void reset_look_reference(void)
 
 static void capture_look_reference(int64_t now_ms)
 {
-	if (!g_mc.gravity_valid) {
+	if (g_mc.look_gravity_valid) {
+		g_mc.look_ref_x = g_mc.look_gravity_x;
+		g_mc.look_ref_y = g_mc.look_gravity_y;
+		g_mc.look_ref_z = g_mc.look_gravity_z;
+	} else if (g_mc.gravity_valid) {
+		g_mc.look_ref_x = g_mc.gravity_x;
+		g_mc.look_ref_y = g_mc.gravity_y;
+		g_mc.look_ref_z = g_mc.gravity_z;
+	} else {
 		return;
 	}
 
-	g_mc.look_ref_x = g_mc.gravity_x;
-	g_mc.look_ref_y = g_mc.gravity_y;
-	g_mc.look_ref_z = g_mc.gravity_z;
 	g_mc.look_reference_valid = true;
 	g_mc.look_target_x = 0;
 	g_mc.look_target_y = 0;
@@ -1071,6 +1147,28 @@ static int16_t apply_look_deadband(int16_t value)
 			     (int16_t)(value + GAZE_DEADBAND);
 }
 
+static int16_t hold_look_jitter(int16_t value, int16_t previous)
+{
+	if (abs_i32(value - previous) <= GAZE_RAW_JITTER_UNITS) {
+		return previous;
+	}
+
+	return value;
+}
+
+static bool look_should_suppress(const struct imu_processed_frame *frame,
+				 const struct imu_window_summary *short_win)
+{
+	uint16_t linear_peak = MAX(frame->linear_motion_mg,
+				   short_win->peak_linear_motion_mg);
+	uint16_t jerk_peak = MAX(frame->jerk_mg_per_s,
+				 short_win->peak_jerk_mg_per_s);
+
+	return linear_peak >= GAZE_SUPPRESS_LINEAR_MG ||
+	       jerk_peak >= GAZE_SUPPRESS_JERK_MG_PER_S ||
+	       (short_win->chaos_score >= 92U && linear_peak >= 900U);
+}
+
 static void update_look_reference(const struct in_hand_detector_output *det,
 				  int64_t now_ms)
 {
@@ -1096,11 +1194,25 @@ static void update_look_target(const struct in_hand_detector_output *det,
 {
 	int16_t raw_x;
 	int16_t raw_y;
+	int16_t tilt_x = 0;
+	int16_t tilt_y = 0;
 	int slew;
+	int noise_penalty;
 	bool tracking;
+	bool tilt_valid;
 	bool decaying = false;
 
-	if (frame->chaos_score >= 80U || frame->gyro_sum_mdps >= 80000U) {
+	if (g_mc.look_gravity_valid) {
+		tilt_x = g_mc.look_gravity_x;
+		tilt_y = g_mc.look_gravity_y;
+		tilt_valid = true;
+	} else {
+		tilt_x = g_mc.gravity_x;
+		tilt_y = g_mc.gravity_y;
+		tilt_valid = frame->gravity_valid;
+	}
+
+	if (look_should_suppress(frame, short_win)) {
 		g_mc.suppress_look_until_ms =
 			max64(g_mc.suppress_look_until_ms,
 			      frame->now_ms + LOOK_SUPPRESS_AFTER_ROUGH_MS);
@@ -1109,16 +1221,18 @@ static void update_look_target(const struct in_hand_detector_output *det,
 	tracking = frame->now_ms >= g_mc.suppress_look_until_ms &&
 		   !g_mc.walking_active &&
 		   g_mc.look_reference_valid &&
-		   frame->gravity_valid &&
+		   tilt_valid &&
 		   (det->in_hand || det->look_confidence >= 18U);
 
 	if (tracking) {
-		raw_x = clamp_look((-(g_mc.gravity_x - g_mc.look_ref_x) * 100) /
+		raw_x = clamp_look((-(tilt_x - g_mc.look_ref_x) * 100) /
 				   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
-		raw_y = clamp_look(((g_mc.gravity_y - g_mc.look_ref_y) * 100) /
+		raw_y = clamp_look(((tilt_y - g_mc.look_ref_y) * 100) /
 				   CONFIG_KERFUR_MOTION_GAZE_TILT_DIVISOR_MG);
 		raw_x = apply_look_deadband(raw_x);
 		raw_y = apply_look_deadband(raw_y);
+		raw_x = hold_look_jitter(raw_x, g_mc.look_raw_prev_x);
+		raw_y = hold_look_jitter(raw_y, g_mc.look_raw_prev_y);
 	} else {
 		raw_x = g_mc.look_target_x;
 		raw_y = g_mc.look_target_y;
@@ -1166,9 +1280,15 @@ static void update_look_target(const struct in_hand_detector_output *det,
 	}
 
 	if (tracking && !decaying) {
+		noise_penalty = (int)short_win->chaos_score / 3;
+		if (short_win->rotation_score >= GAZE_ROTATION_SOFTEN_SCORE &&
+		    short_win->peak_linear_motion_mg < GAZE_SUPPRESS_LINEAR_MG &&
+		    short_win->peak_jerk_mg_per_s < GAZE_SUPPRESS_JERK_MG_PER_S) {
+			noise_penalty /= 2;
+		}
 		g_mc.look_confidence = clamp_u8(
 			(int)det->look_confidence -
-			(int)short_win->chaos_score / 3 -
+			noise_penalty -
 			(int)g_mc.cadence_confidence / 4);
 	} else if (g_mc.look_target_x == 0 && g_mc.look_target_y == 0) {
 		g_mc.look_confidence = 0U;
@@ -1243,7 +1363,6 @@ static void sync_detector_from_public_state(int64_t now_ms)
 	g_mc.in_hand_det.in_hand = g_mc.in_hand;
 	if (g_mc.in_hand) {
 		g_mc.in_hand_det.state = IN_HAND_DETECTOR_IN_HAND;
-		g_mc.in_hand_det.last_in_hand_ms = now_ms;
 	} else if (g_mc.in_hand_det.state == IN_HAND_DETECTOR_IN_HAND ||
 		   g_mc.in_hand_det.state == IN_HAND_DETECTOR_WALKING) {
 		g_mc.in_hand_det.exit_candidate_since_ms = now_ms;
