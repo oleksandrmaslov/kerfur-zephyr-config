@@ -52,6 +52,14 @@ struct battery_backend {
 /* Returns the active backend for this build (selected via Kconfig). */
 const struct battery_backend *battery_backend_get(void);
 
+#if defined(CONFIG_KERFUR_CHARGER_BQ2563X)
+/* Real backend: MAX17048 fuel gauge (`fuel_gauge0` alias, 0x36) + BQ25630
+ * charger (`charger0` alias, 0x6B). Falls back to unknowns if the aliases or
+ * I2C devices are not present, so it is safe to build before the board
+ * overlay is finalized. */
+const struct battery_backend *bq25630_backend_get(void);
+#endif
+
 /* Lifecycle / runtime (event publishing is owned here). */
 int  battery_monitor_init(int64_t now_ms);
 void battery_monitor_poll(int64_t now_ms);

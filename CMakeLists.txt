@@ -71,9 +71,24 @@ target_sources(app PRIVATE
     src/drivers/in_hand_detector.c
     src/drivers/mock_inputs.c
     src/drivers/touch_input.c
+    src/drivers/touch_gestures.c
     src/power/power_manager.c
     src/ble/ble_manager.c
 )
+
+if(CONFIG_KERFUR_BATTERY)
+    target_sources(app PRIVATE src/power/battery_monitor.c)
+    if(CONFIG_KERFUR_CHARGER_BQ2563X)
+        target_sources(app PRIVATE src/power/bq25630.c)
+    endif()
+endif()
+
+if(CONFIG_KERFUR_TOUCH_IQS7222A)
+    target_sources(app PRIVATE
+        src/drivers/iqs7222a.c
+        src/drivers/kerfur_iqs7222a_config.c
+    )
+endif()
 
 if(CONFIG_KERFUR_ENABLE_NEARBY)
     target_sources(app PRIVATE

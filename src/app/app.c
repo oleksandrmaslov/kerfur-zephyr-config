@@ -11,10 +11,16 @@
 #include "drivers/motion_classifier.h"
 #include "drivers/mock_inputs.h"
 #include "drivers/touch_input.h"
+#if defined(CONFIG_KERFUR_TOUCH_IQS7222A)
+#include "drivers/iqs7222a.h"
+#endif
 #if defined(CONFIG_KERFUR_ENABLE_NEARBY)
 #include "nearby/kerfur_nearby.h"
 #endif
 #include "power/power_manager.h"
+#if defined(CONFIG_KERFUR_BATTERY)
+#include "power/battery.h"
+#endif
 #include "ui/ui_renderer.h"
 
 LOG_MODULE_REGISTER(kerfur_app, CONFIG_LOG_DEFAULT_LEVEL);
@@ -73,6 +79,9 @@ int app_run(void)
 	now_ms = k_uptime_get();
 	behavior_engine_init(&pet, now_ms);
 	power_manager_init(now_ms);
+#if defined(CONFIG_KERFUR_BATTERY)
+	(void)battery_monitor_init(now_ms);
+#endif
 	display_policy_init(&pet, now_ms);
 	(void)motion_classifier_init(now_ms);
 	log_pet_snapshot(&pet, "Boot");
@@ -88,10 +97,17 @@ int app_run(void)
 		LOG_WRN("Mock inputs init issue (%d), continuing", err);
 	}
 
+#if defined(CONFIG_KERFUR_TOUCH_IQS7222A)
+	err = iqs7222a_init();
+	if (err) {
+		LOG_WRN("IQS7222A init issue (%d), continuing", err);
+	}
+#else
 	err = touch_input_init();
 	if (err) {
 		LOG_WRN("Touch input init issue (%d), continuing", err);
 	}
+#endif
 
 #if defined(CONFIG_KERFUR_ENABLE_NEARBY)
 	/* Must run before ble_manager_init() so that build_advertising_payloads()
@@ -136,6 +152,10 @@ int app_run(void)
 			(void)app_event_publish_with_timestamp(synthetic_event.type, synthetic_event.param,
 							       synthetic_event.timestamp_ms);
 		}
+
+#if defined(CONFIG_KERFUR_BATTERY)
+		battery_monitor_poll(now_ms);
+#endif
 
 		if ((now_ms - last_frame_ms) < CONFIG_KERFUR_UI_FRAME_MS) {
 			continue;

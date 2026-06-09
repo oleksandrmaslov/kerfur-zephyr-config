@@ -224,6 +224,66 @@ config KERFUR_MOTION_AXIS_INVERT_Z
 
 endif
 
+config KERFUR_BATTERY
+	bool "Enable battery / charger monitor"
+	default y
+	help
+	  Enables the battery_monitor module, which owns a battery_backend,
+	  polls it, and publishes BATTERY_PERCENT_UPDATE / CHARGER_CONNECTED /
+	  CHARGER_DISCONNECTED app events. With the default stub backend it
+	  reports everything as unknown (no behavior change); select a real
+	  backend below once charger hardware is wired.
+
+if KERFUR_BATTERY
+
+config KERFUR_BATTERY_POLL_MS
+	int "Battery monitor poll period (ms)"
+	range 250 60000
+	default 2000
+	help
+	  How often battery_monitor reads the backend. Kept slow to stay
+	  low-power; charger/gauge interrupt lines can drive faster updates
+	  later once their GPIOs are mapped.
+
+config KERFUR_CHARGER_BQ2563X
+	bool "Use BQ25630 charger + MAX17048 fuel gauge backend (I2C)"
+	default n
+	select I2C
+	help
+	  Selects the real power backend: a TI BQ25630 charger (charger0 alias,
+	  0x6B) for charger-present / charge-state / OTG, and a MAX17048 fuel
+	  gauge (fuel_gauge0 alias, 0x36) for state-of-charge and cell voltage.
+	  Safe to enable before the board overlay defines those aliases: the
+	  backend then degrades to "unknown" at runtime. Leave disabled to use
+	  the stub backend.
+
+endif
+
+config KERFUR_TOUCH_IQS7222A
+	bool "Use Azoteq IQS7222A capacitive touch controller"
+	default n
+	select I2C
+	select GPIO
+	help
+	  Replaces the single-GPIO touch front-end with the IQS7222A capacitive
+	  controller (I2C + RDY line, `touch_iqs0` alias). Reads per-channel
+	  touch state and feeds the shared gesture engine. Safe to enable before
+	  the board overlay exists: the driver returns -ENODEV at runtime and the
+	  GPIO front-end stays available. Needs a tuned config export for correct
+	  sensitivity (see kerfur_iqs7222a_config.c).
+
+if KERFUR_TOUCH_IQS7222A
+
+config KERFUR_TOUCH_IQS7222A_CHANNELS
+	int "IQS7222A petting channels"
+	range 1 10
+	default 6
+	help
+	  Number of capacitive channels used as petting zones. Touch bits above
+	  this (e.g. the Hall channel) are ignored by the gesture engine.
+
+endif
+
 config KERFUR_IDLE_TIMEOUT_S
 	int "Idle timeout (seconds)"
 	range 5 3600
