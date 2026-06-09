@@ -1,0 +1,140 @@
+# Kerfus / Kerfur — Next Steps Roadmap
+
+> Created: 2026-06-09 (companion to `KERFUS_PROJECT_STATE.md`)
+> Status legend: TODO · IN PROGRESS · DONE · BLOCKED
+> Priority legend: P0 (do first) · P1 · P2 · P3 (later/vision)
+
+This is a practical roadmap, ordered to stabilize first, then reach a "living
+prototype" MVP, then grow toward the social/app vision. Each task lists why,
+affected files, priority, and status.
+
+---
+
+## Immediate tasks (stabilize)
+
+### I1. Decide canonical name (Kerfus vs Kerfur)
+- **Why:** Vision docs (`01/02/Master_goal`) and these audit docs say **Kerfus**;
+  all code, the BLE device name, and `CONFIG_KERFUR_*` say **Kerfur**. Pick one
+  brand so future work and the companion app stay consistent. (The product docs
+  themselves are complete and consistent — no longer a gap.)
+- **Affected:** decision only; if "Kerfus" wins, a later mechanical rename of code
+  symbols/BLE name/Kconfig (large, do deliberately, not now).
+- **Priority:** P0 (decision) / P3 (any rename)
+- **Status:** TODO (owner decision needed — see KERFUS_AGENT_HANDOFF "open questions")
+
+### I2. Pin and document one Zephyr SDK version
+- **Why:** `build_codex` cache pins SDK 0.16.5 (path now broken); machine has
+  1.0.1. Incremental builds fail with a misleading toolchain error.
+- **Affected:** README build section; delete/regenerate stale `build_codex/` and
+  `build/nearby_test/`.
+- **Priority:** P0
+- **Status:** TODO
+
+### I3. Confirm a clean pristine build in CI-like conditions
+- **Why:** Prove the tree compiles on the current toolchain and keep it that way.
+- **Affected:** build only (no source).
+- **Priority:** P0
+- **Status:** DONE — pristine build verified 2026-06-09 (SDK 1.0.1, `nice_nano`,
+  `-DSHIELD=kerfur_oled`): exit 0, FLASH 72.3% / RAM 31.5%. See
+  `KERFUS_PROJECT_STATE.md` §6. (Keep CI green; recheck headroom as features grow.)
+
+### I4. Reconcile drive-variable vocabulary (doc ↔ code)
+- **Why:** `CLAUDE.md` §7 names mood/affection/social_interest/alertness/tiredness;
+  code uses energy/sleepiness/attachment/boredom/stress/arousal/social_load/trust/
+  curiosity. Pick one canonical vocabulary and map it.
+- **Affected:** `02_…` doc, comments in `include/behavior/pet_state.h`.
+- **Priority:** P1
+- **Status:** TODO
+
+---
+
+## MVP tasks (first living Kerfus prototype)
+
+The MVP per `CLAUDE.md` §19 is *almost* met. The missing pieces are battery
+realism, true sleep, and confidence (tests). Most face/touch/motion/notification
+MVP items already work.
+
+### M1. Real battery + charger sensing driver
+- **Why:** P0 product gap. `power_manager.c` never reads hardware; every layer
+  already reacts to `BATTERY_LOW/CRITICAL/PERCENT_UPDATE` + `CHARGER_*` events
+  that only mocks emit today. 18650 cell per spec.
+- **How:** new `src/power/battery_monitor.c` behind the existing events —
+  ADC/fuel-gauge read + charge-detect GPIO → publish battery % and charger
+  events on the bus. Keep it a driver; do not put emotional logic in it.
+- **Affected:** new `battery_monitor.c/.h`, `CMakeLists.txt`, `prj.conf` (ADC),
+  board overlays (ADC channel / charge-stat pin), `Kconfig`.
+- **Priority:** P0
+- **Status:** TODO (BLOCKED on hardware pin assignment — see open questions)
+
+### M2. True low-power sleep on SLEEP_REQUEST
+- **Why:** `SLEEP_REQUEST` is emitted/acked but the device never actually sleeps;
+  18650 runtime depends on it.
+- **How:** on `APP_EVENT_SLEEP_REQUEST` drive display off, lower BLE adv interval,
+  drop IMU to wake-on-motion, enter Zephyr PM; configure motion/touch/BLE wake.
+- **Affected:** `power_manager.c`, `display_policy.c`, `motion_sensor.c`,
+  `ble_manager.c`, `prj.conf` (CONFIG_PM).
+- **Priority:** P1
+- **Status:** TODO
+
+### M3. Unit tests for behavior + nearby state machines
+- **Why:** No safety net; these are the product's brain and are pure enough to
+  test off-target (native_sim / ztest).
+- **How:** feed synthetic event sequences, assert mode/expression transitions,
+  cooldowns, peer state transitions, RSSI hysteresis.
+- **Affected:** new `tests/` tree with `testcase.yaml`; possibly small seams in
+  `behavior_engine`/`kerfur_nearby` to allow injecting `now_ms`.
+- **Priority:** P1
+- **Status:** TODO
+
+### M4. Persistence / personality module
+- **Why:** `CLAUDE.md` §14. Survive reboot: device name, personality, affection,
+  known/friend peers, quiet settings. Personality must influence behavior, not be
+  a label.
+- **How:** `src/state/persistence.c` over Zephyr `settings`/NVS (already enabled);
+  load at boot into `pet_state` seed + a `personality` profile that biases drive
+  decay/weights in `behavior_engine`.
+- **Affected:** new module, `behavior_engine.c`, `pet_state.h`.
+- **Priority:** P2
+- **Status:** TODO
+
+---
+
+## Later tasks (app integration, OTA, social, advanced)
+
+### L1. Finish Android companion / Gadgetbridge payloads
+- Richer notification parsing beyond compact categories; finish the
+  notification-enable helper. **Affected:** `ble_manager.c`, `docs/gadgetbridge/`.
+  Priority P2. Status TODO.
+
+### L2. Companion app / mini app API surface
+- Onboarding, settings, notification filters, quiet hours, important contacts,
+  battery + firmware reporting, diagnostics, friend confirmation for nearby.
+  **Affected:** `ble_manager.c` companion service, new app-API module.
+  Priority P3. Status TODO.
+
+### L3. OTA / DFU
+- MCUboot is vendored; wire a DFU path + dual-slot partitioning for nice_nano.
+  Priority P3. Status TODO.
+
+### L4. Friend graph for nearby ("First Kerfus meet each other…")
+- Persistent friend identity gated by explicit pairing/confirmation in the app
+  (privacy rule: no hidden tracking; ephemeral IDs stay default).
+  **Affected:** `kerfur_nearby.c`, persistence, companion API. Priority P3. TODO.
+
+### L5. Move remaining hand-maintained face metadata into codegen
+- Reduce drift between `assets/face/*.json` and hand-written glue.
+  **Affected:** `tools/face_codegen.py`, `face_runtime.c`. Priority P3. TODO.
+
+### L6. Output expansion (haptics / LED / sound)
+- Add as new output modules behind the event bus when hardware is defined.
+  Priority P3. TODO.
+
+---
+
+## Suggested execution order
+
+1. I1, I2, I3 (stabilize + provable build) →
+2. I4 (vocabulary) + M3 (tests, so later changes are safe) →
+3. M1 (battery) + M2 (sleep) — the two real "living device" gaps →
+4. M4 (persistence/personality) →
+5. L-series as product/app matures.

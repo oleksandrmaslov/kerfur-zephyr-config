@@ -217,7 +217,10 @@ static bool is_night_time(const struct pet_state *state, int64_t now_ms)
 	int32_t day_s;
 	int hour;
 
-	if (!state->time_valid) {
+	/* Require a real wall-clock sync, not just a tz offset: otherwise a
+	 * tz-only TIME_SYNC leaves unix_time_at_sync == 0 and we would compute
+	 * the hour from epoch 0 and wrongly trigger night sleepiness. */
+	if (!pet_time_is_valid(state)) {
 		return false;
 	}
 

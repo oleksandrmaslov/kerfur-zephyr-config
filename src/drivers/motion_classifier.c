@@ -240,6 +240,14 @@ struct motion_classifier_state {
 
 static struct motion_classifier_state g_mc;
 
+/* g_mc is touched from three contexts with no other synchronization:
+ *  - the system workqueue (sample_work_handler)
+ *  - the LSM6DSO trigger thread (sensor_event_handler)
+ *  - the app main thread (motion_classifier_on_event)
+ * Guard every entry point with this mutex. All three run in thread context
+ * (never ISR), so k_mutex is safe and cannot tear the 64-bit fields. */
+static struct k_mutex g_mc_lock;
+
 static uint8_t clamp_u8(int value)
 {
 	return (uint8_t)CLAMP(value, 0, 100);
@@ -1547,7 +1555,7 @@ static void handle_battery_critical(int64_t now_ms)
 	switch_mode(MODE_IDLE, now_ms);
 }
 
-static void sample_work_handler(struct k_work *work)
+static void sample_work_run(void)
 {
 	struct motion_sensor_sample sample;
 	struct imu_processed_frame frame;
@@ -1560,8 +1568,6 @@ static void sample_work_handler(struct k_work *work)
 	bool rough;
 	bool active_motion;
 	int err;
-
-	ARG_UNUSED(work);
 
 	if (!g_mc.enabled) {
 		switch_mode(MODE_OFF, k_uptime_get());
@@ -1711,13 +1717,24 @@ static void sample_work_handler(struct k_work *work)
 	(void)k_work_reschedule(&g_mc.sample_work, K_MSEC(sample_period_ms()));
 }
 
+static void sample_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	k_mutex_lock(&g_mc_lock, K_FOREVER);
+	sample_work_run();
+	k_mutex_unlock(&g_mc_lock);
+}
+
 static void sensor_event_handler(uint32_t events, void *user_data)
 {
 	int64_t now_ms = k_uptime_get();
 
 	ARG_UNUSED(user_data);
 
+	k_mutex_lock(&g_mc_lock, K_FOREVER);
 	if (!g_mc.enabled || g_mc.battery_critical) {
+		k_mutex_unlock(&g_mc_lock);
 		return;
 	}
 
@@ -1725,6 +1742,7 @@ static void sensor_event_handler(uint32_t events, void *user_data)
 	g_mc.active_until_ms = now_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS;
 	switch_mode(MODE_ACTIVE_WINDOW, now_ms);
 	schedule_now();
+	k_mutex_unlock(&g_mc_lock);
 }
 
 int motion_classifier_init(int64_t now_ms)
@@ -1732,6 +1750,7 @@ int motion_classifier_init(int64_t now_ms)
 	int err;
 
 	memset(&g_mc, 0, sizeof(g_mc));
+	k_mutex_init(&g_mc_lock);
 	k_work_init_delayable(&g_mc.sample_work, sample_work_handler);
 	in_hand_detector_init(&g_mc.in_hand_det, now_ms);
 	g_mc.mode = MODE_OFF;
@@ -1766,9 +1785,14 @@ int motion_classifier_init(int64_t now_ms)
 void motion_classifier_on_event(const struct app_event *event,
 				const struct pet_state *state)
 {
+	bool was_critical;
+
 	if (event == NULL || !g_mc.initialized) {
 		return;
 	}
+
+	k_mutex_lock(&g_mc_lock, K_FOREVER);
+	was_critical = g_mc.battery_critical;
 
 	switch (event->type) {
 	case APP_EVENT_BATTERY_PERCENT_UPDATE:
@@ -1784,6 +1808,11 @@ void motion_classifier_on_event(const struct app_event *event,
 						   event->timestamp_ms + 1500LL);
 		}
 		if (g_mc.battery_critical) {
+			schedule_now();
+		} else if (was_critical) {
+			/* Recovered from critical: handle_battery_critical() had
+			 * parked the stack in MODE_IDLE (work cancelled on
+			 * polling boards). Kick it so sampling resumes. */
 			schedule_now();
 		}
 		break;
@@ -1802,6 +1831,14 @@ void motion_classifier_on_event(const struct app_event *event,
 		g_mc.charging = false;
 		break;
 	case APP_EVENT_WALKING_START:
+		/* These are produced by this classifier. When the sensor is
+		 * live, g_mc already holds the authoritative state, so ignoring
+		 * the round-tripped event avoids a self-feedback loop and the
+		 * Q8->u8 precision loss in sync_detector_from_public_state().
+		 * When disabled (no sensor), allow mock/shell injection through. */
+		if (g_mc.enabled) {
+			break;
+		}
 		g_mc.walking_active = true;
 		set_walking_confidence((event->param > 0) ?
 				       clamp_u8(event->param) :
@@ -1812,10 +1849,16 @@ void motion_classifier_on_event(const struct app_event *event,
 			      event->timestamp_ms + LOOK_SUPPRESS_AFTER_WALK_MS);
 		break;
 	case APP_EVENT_WALKING_STOP:
+		if (g_mc.enabled) {
+			break;
+		}
 		g_mc.walking_active = false;
 		set_walking_confidence(clamp_u8(event->param));
 		break;
 	case APP_EVENT_CARRY_STATE_UPDATE:
+		if (g_mc.enabled) {
+			break;
+		}
 		g_mc.in_hand = event->payload.carry_state.in_hand;
 		g_mc.pickup_confidence = event->payload.carry_state.pickup_confidence;
 		g_mc.in_hand_confidence =
@@ -1827,6 +1870,9 @@ void motion_classifier_on_event(const struct app_event *event,
 		}
 		break;
 	case APP_EVENT_PICKED_UP:
+		if (g_mc.enabled) {
+			break;
+		}
 		g_mc.last_pickup_ms = event->timestamp_ms;
 		g_mc.pickup_confidence =
 			MAX(g_mc.pickup_confidence, clamp_u8(event->param));
@@ -1835,6 +1881,9 @@ void motion_classifier_on_event(const struct app_event *event,
 			event->timestamp_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS;
 		break;
 	case APP_EVENT_IN_HAND_ENTER:
+		if (g_mc.enabled) {
+			break;
+		}
 		g_mc.last_in_hand_ms = event->timestamp_ms;
 		g_mc.in_hand = true;
 		g_mc.in_hand_confidence =
@@ -1842,6 +1891,9 @@ void motion_classifier_on_event(const struct app_event *event,
 		sync_detector_from_public_state(event->timestamp_ms);
 		break;
 	case APP_EVENT_IN_HAND_EXIT:
+		if (g_mc.enabled) {
+			break;
+		}
 		g_mc.in_hand = false;
 		g_mc.in_hand_confidence =
 			MIN(g_mc.in_hand_confidence, clamp_u8(event->param));
@@ -1858,6 +1910,8 @@ void motion_classifier_on_event(const struct app_event *event,
 		g_mc.battery_low = state->battery_low;
 		g_mc.battery_critical = state->battery_critical;
 	}
+
+	k_mutex_unlock(&g_mc_lock);
 }
 
 void motion_classifier_set_debug_logging(bool enabled)
