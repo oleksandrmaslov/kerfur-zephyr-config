@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/util.h>
 
 #include "ui/face_runtime.h"
@@ -735,6 +736,31 @@ static int16_t evaluate_whisker_wiggle(int64_t start_ms, int64_t now_ms)
 	return 0; /* animation finished */
 }
 
+/* --- Stage 5: organic micro-life helpers --- */
+
+static uint32_t face_rand(uint32_t span)
+{
+	return (span == 0U) ? 0U : (sys_rand32_get() % span);
+}
+
+/* Emotion-aware blink cadence: alert pets blink noticeably more often,
+ * sleepy pets slower (their blinks are also longer); the interval is
+ * always jittered so the rhythm never feels mechanical. */
+static int64_t next_blink_delay_ms(const struct pet_state *state, bool ambient)
+{
+	int64_t period = ambient ? FACE_BLINK_PERIOD_AMBIENT_MS
+				 : FACE_BLINK_PERIOD_FOREGROUND_MS;
+
+	if ((state->arousal > 55) || (state->stress > 45)) {
+		period = (period * 6) / 10;
+	} else if (state->sleepiness > 65) {
+		period = (period * 15) / 10;
+	}
+
+	/* ±40% jitter */
+	return (period * (int64_t)(60U + face_rand(81U))) / 100;
+}
+
 static void update_blink_state(struct face_runtime_state *runtime,
 			       const struct kerfur_face_recipe *recipe,
 			       enum kerfur_face_blink_profile_id profile,
@@ -742,8 +768,6 @@ static void update_blink_state(struct face_runtime_state *runtime,
 			       int64_t now_ms,
 			       bool ambient)
 {
-	const int64_t blink_period =
-		ambient ? FACE_BLINK_PERIOD_AMBIENT_MS : FACE_BLINK_PERIOD_FOREGROUND_MS;
 	const int64_t blink_duration =
 		blink_profile_is_sleepy(profile) ? FACE_BLINK_DURATION_SLEEPY_MS
 						: FACE_BLINK_DURATION_DEFAULT_MS;
@@ -757,8 +781,7 @@ static void update_blink_state(struct face_runtime_state *runtime,
 
 	/* Schedule first blink */
 	if (runtime->blink_next_ms == 0) {
-		runtime->blink_next_ms =
-			now_ms + blink_period + (((int64_t)state->arousal * 31LL) % 800LL);
+		runtime->blink_next_ms = now_ms + next_blink_delay_ms(state, ambient);
 		runtime->tgt_eye_openness = base_openness;
 		return;
 	}
@@ -769,9 +792,15 @@ static void update_blink_state(struct face_runtime_state *runtime,
 		if ((now_ms - runtime->blink_phase_start_ms) >= blink_duration) {
 			runtime->blink_descending = false;
 			runtime->tgt_eye_openness = base_openness;
-			runtime->blink_next_ms =
-				now_ms + blink_period +
-				(((int64_t)state->arousal * 31LL) % 800LL);
+			if (runtime->blink_double_pending) {
+				/* Quick second blink lands shortly after. */
+				runtime->blink_double_pending = false;
+				runtime->blink_next_ms =
+					now_ms + 350LL + (int64_t)face_rand(250U);
+			} else {
+				runtime->blink_next_ms =
+					now_ms + next_blink_delay_ms(state, ambient);
+			}
 		}
 		return;
 	}
@@ -781,11 +810,96 @@ static void update_blink_state(struct face_runtime_state *runtime,
 		runtime->blink_descending = true;
 		runtime->blink_phase_start_ms = now_ms;
 		runtime->tgt_eye_openness = 0;
+		/* Occasional double blink, more likely when alert. */
+		if (!blink_profile_is_sleepy(profile)) {
+			const uint32_t chance =
+				((state->arousal > 55) || (state->stress > 40)) ? 22U : 10U;
+
+			runtime->blink_double_pending = face_rand(100U) < chance;
+		}
 		return;
 	}
 
 	/* Not blinking — hold base openness */
 	runtime->tgt_eye_openness = base_openness;
+}
+
+/* Wandering idle gaze: when there is no real gaze input and nothing
+ * else is happening, the eyes occasionally drift to a random nearby
+ * point, hold it for a moment, then come back to rest. Sleepy faces
+ * mostly skip their turn; ambient mode wanders less often. */
+
+#define FACE_WANDER_RANGE 35
+
+static void update_wander(struct face_runtime_state *runtime,
+			  const struct pet_state *state,
+			  enum kerfur_face_reaction_id reaction_id,
+			  enum kerfur_face_blink_profile_id profile,
+			  bool ambient,
+			  int64_t now_ms)
+{
+	const bool quiet = (reaction_id == KERFUR_FACE_REACTION_REACTION_NONE) &&
+			   !state->in_hand &&
+			   (state->look_confidence < 5U) &&
+			   !state->battery_low && !state->battery_critical;
+
+	if (!quiet) {
+		runtime->wander_active = false;
+		runtime->wander_x = 0;
+		runtime->wander_y = 0;
+		/* Re-arm so the next quiet stretch doesn't fire instantly. */
+		runtime->wander_next_ms = now_ms + 4000LL + (int64_t)face_rand(6000U);
+		return;
+	}
+
+	if (runtime->wander_next_ms == 0LL) {
+		runtime->wander_next_ms = now_ms + 4000LL + (int64_t)face_rand(8000U);
+		return;
+	}
+
+	if (runtime->wander_active) {
+		if (now_ms >= runtime->wander_hold_until_ms) {
+			runtime->wander_active = false;
+			runtime->wander_x = 0;
+			runtime->wander_y = 0;
+			runtime->wander_next_ms = now_ms +
+				(ambient ? 12000LL : 6000LL) +
+				(int64_t)face_rand(ambient ? 14000U : 10000U);
+		}
+		return;
+	}
+
+	if (now_ms < runtime->wander_next_ms) {
+		return;
+	}
+
+	if (blink_profile_is_sleepy(profile) && (face_rand(100U) < 70U)) {
+		runtime->wander_next_ms = now_ms + 9000LL + (int64_t)face_rand(9000U);
+		return;
+	}
+
+	runtime->wander_x =
+		(int16_t)((int)face_rand((2U * FACE_WANDER_RANGE) + 1U) - FACE_WANDER_RANGE);
+	runtime->wander_y =
+		(int16_t)((int)face_rand(FACE_WANDER_RANGE + 1U) - (FACE_WANDER_RANGE / 2));
+	/* Avoid pointless 1–2 px micro-targets. */
+	if ((abs_i16(runtime->wander_x) < 12) && (abs_i16(runtime->wander_y) < 10)) {
+		runtime->wander_x = (runtime->wander_x >= 0) ? 18 : -18;
+	}
+	runtime->wander_active = true;
+	runtime->wander_hold_until_ms = now_ms + 1200LL + (int64_t)face_rand(1600U);
+}
+
+/* Slow breathing bob: a 1 px mouth/whisker rise-and-fall. Sleepier =
+ * slower and it keeps going while asleep — a sleeping pet that still
+ * breathes reads as alive, not switched off. */
+static int16_t breathing_offset(const struct pet_state *state, int64_t now_ms)
+{
+	const int64_t period_ms = (state->sleepiness > 65) ? 5200LL :
+				  (state->arousal > 55) ? 2800LL : 3800LL;
+	const int64_t phase = now_ms % period_ms;
+
+	return (phase < (period_ms / 2)) ? 0 : 1;
 }
 
 static void detect_expression_transition(struct face_runtime_state *runtime,
@@ -1122,6 +1236,24 @@ static void compute_context_bias(struct face_runtime_state *runtime,
 		brow_bias += 1;
 	}
 
+	/* Mood temperament on the face: a content pet carries its mouth a
+	 * touch higher, a worn-down one droops. */
+	if (state->mood >= 70) {
+		mouth_bias += -1;
+	} else if (state->mood <= 30) {
+		mouth_bias += 1;
+		brow_bias += 1;
+	}
+
+	/* Alertness opens the eyes a touch; heavy sleepiness drops the lids
+	 * beyond what the recipe encodes. */
+	if (state->arousal > 60) {
+		openness_bias += 4;
+	}
+	if (state->sleepiness > 75) {
+		openness_bias += -8;
+	}
+
 	runtime->ctx_openness_bias = openness_bias;
 	runtime->ctx_brow_bias_dy = brow_bias;
 	runtime->ctx_mouth_bias_dy = mouth_bias;
@@ -1207,12 +1339,39 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	/* Context bias computation (affects blink target) */
 	compute_context_bias(runtime, state);
 
+	/* Stage 5: breathing — a slow 1 px bob on mouth and whiskers
+	 * whenever no reaction/transition needs those channels. */
+	{
+		int16_t breath_dy = 0;
+
+		if ((reaction_id == KERFUR_FACE_REACTION_REACTION_NONE) &&
+		    !runtime->transition_active && !state->battery_critical) {
+			breath_dy = breathing_offset(state, now_ms);
+		}
+		runtime->ctx_mouth_bias_dy =
+			(int16_t)(runtime->ctx_mouth_bias_dy + breath_dy);
+		if (runtime->whisker_anim_start_ms == 0) {
+			runtime->tgt_left_whisker_dy = breath_dy;
+			runtime->tgt_right_whisker_dy = breath_dy;
+		}
+	}
+
 	/* WAKE_BLINK reaction forces a blink */
 	if (reaction_id == KERFUR_FACE_REACTION_REACTION_WAKE_BLINK &&
 	    reaction_id != runtime->current_reaction_id) {
 		runtime->blink_descending = true;
 		runtime->blink_phase_start_ms = now_ms;
 		runtime->tgt_eye_openness = 0;
+	}
+
+	/* Stage 5: a short settle blink right after big reactions. */
+	if ((reaction_id == KERFUR_FACE_REACTION_REACTION_NONE) &&
+	    ((previous_reaction_id == KERFUR_FACE_REACTION_REACTION_STARTLE) ||
+	     (previous_reaction_id == KERFUR_FACE_REACTION_REACTION_HAPPY_BOUNCE) ||
+	     (previous_reaction_id == KERFUR_FACE_REACTION_REACTION_NOTIF_BURST)) &&
+	    (face_rand(100U) < 60U)) {
+		runtime->blink_next_ms = MIN(runtime->blink_next_ms,
+					     now_ms + 250LL + (int64_t)face_rand(300U));
 	}
 
 	/* Blink / eye openness update */
@@ -1275,6 +1434,21 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 						 has_pupil);
 	dynamic_allowed = dynamic_reason == FACE_RUNTIME_DYNAMIC_ALLOWED;
 
+	/* Stage 5: wandering idle gaze. When the pupils sit idle (no tilt
+	 * gaze, not in hand), the eyes occasionally drift to a random spot
+	 * and back — combined with the recipe's ambient drift this keeps
+	 * the pupils alive instead of frozen at center. */
+	update_wander(runtime, state, reaction_id, blink_profile_id, ambient, now_ms);
+
+	const bool idle_pupils =
+		(dynamic_reason == FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND) &&
+		(reaction_id == KERFUR_FACE_REACTION_REACTION_NONE);
+
+	if (idle_pupils && runtime->wander_active) {
+		target_x = runtime->wander_x;
+		target_y = runtime->wander_y;
+	}
+
 	/* The motion classifier already incorporates in-hand quality and
 	 * chaos into look_confidence.  Don't double-penalize by taking
 	 * MIN(look_conf, in_hand_conf) — that kills gaze during the
@@ -1320,11 +1494,17 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 			motion_speed = MAX(motion_speed, 25U);
 			break;
 		case FACE_RUNTIME_DYNAMIC_DISABLED_MOTION_NOT_IN_HAND:
-			/* Gaze is decaying back to center — keep enough
-			 * confidence/speed that the drift looks deliberate. */
-			target_x = (target_x * 2) / 3;
-			target_y = (target_y * 2) / 3;
-			motion_speed = MAX(motion_speed, 30U);
+			if (idle_pupils && runtime->wander_active) {
+				/* Wandering glance: deliberate, unhurried. */
+				motion_confidence = MAX(motion_confidence, 60U);
+				motion_speed = MAX(motion_speed, 22U);
+			} else {
+				/* Gaze is decaying back to center — keep enough
+				 * confidence/speed that the drift looks deliberate. */
+				target_x = (target_x * 2) / 3;
+				target_y = (target_y * 2) / 3;
+				motion_speed = MAX(motion_speed, 30U);
+			}
 			break;
 		case FACE_RUNTIME_DYNAMIC_DISABLED_BATTERY_SAVE:
 			target_x /= 4;
@@ -1363,17 +1543,19 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 		resolve_ambient_pupil_drift(recipe, now_ms, &ambient_dx, &ambient_dy);
 	}
 
-	if (dynamic_allowed) {
+	if (dynamic_allowed || idle_pupils) {
+		/* idle_pupils also folds in the recipe's ambient drift, so a
+		 * resting face keeps a slow, breathing-pace pupil motion. */
 		if (zone_is_available(left_eye_asset)) {
 			resolve_pupil_offsets(left_eye_asset, runtime->look_render_x, runtime->look_render_y,
 					      recipe->dynamic_pupil_scale_x,
-					      recipe->dynamic_pupil_scale_y, 0, 0,
+					      recipe->dynamic_pupil_scale_y, ambient_dx, ambient_dy,
 					      &plan.left_pupil_offset_x, &plan.left_pupil_offset_y);
 		}
 		if (zone_is_available(right_eye_asset)) {
 			resolve_pupil_offsets(right_eye_asset, runtime->look_render_x, runtime->look_render_y,
 					      recipe->dynamic_pupil_scale_x,
-					      recipe->dynamic_pupil_scale_y, 0, 0,
+					      recipe->dynamic_pupil_scale_y, ambient_dx, ambient_dy,
 					      &plan.right_pupil_offset_x, &plan.right_pupil_offset_y);
 		}
 	}

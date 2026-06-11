@@ -44,7 +44,10 @@ affected files, priority, and status.
   curiosity. Pick one canonical vocabulary and map it.
 - **Affected:** `02_…` doc, comments in `include/behavior/pet_state.h`.
 - **Priority:** P1
-- **Status:** TODO
+- **Status:** PARTIALLY DONE (2026-06-11) — a real `mood` drive now exists in
+  code, and the doc↔code mapping table lives in
+  `KERFUS_EMOTION_RUNTIME.md` §1. Remaining: decide whether to mechanically
+  rename the other drives.
 
 ---
 
@@ -95,7 +98,11 @@ MVP items already work.
   decay/weights in `behavior_engine`.
 - **Affected:** new module, `behavior_engine.c`, `pet_state.h`.
 - **Priority:** P2
-- **Status:** TODO
+- **Status:** LARGELY DONE (2026-06-11) — `src/behavior/emotion_memory.c`
+  persists attachment/trust/mood/lifetime-pets/personality
+  (`kerfur/emo/traits`), and 5 personality profiles genuinely bias gains in
+  `behavior_engine.c` (see `KERFUS_EMOTION_RUNTIME.md` §3–4). Remaining: device
+  name, known/friend peers (see L4), quiet-hours settings.
 
 ---
 

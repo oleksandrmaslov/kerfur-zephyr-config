@@ -284,6 +284,18 @@ config KERFUR_TOUCH_IQS7222A_CHANNELS
 
 endif
 
+config KERFUR_EMOTION_MEMORY
+	bool "Persist slow emotional traits across reboots"
+	default y
+	depends on SETTINGS
+	help
+	  Stores the slow relationship traits (attachment, trust, mood,
+	  lifetime petting count, personality) in one small settings/NVS
+	  record so Kerfur remembers its owner across power cycles. Fast
+	  drives (arousal, stress, boredom, ...) always boot fresh. Saves
+	  are throttled by the behavior engine (about one write per 30 min
+	  of active drift) to protect flash.
+
 config KERFUR_IDLE_TIMEOUT_S
 	int "Idle timeout (seconds)"
 	range 5 3600

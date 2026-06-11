@@ -8,6 +8,18 @@ This file is the canonical "where are we now" snapshot. Future Claude / Codex /
 ChatGPT sessions should read this **first**, then `KERFUS_AGENT_HANDOFF.md` and
 `KERFUS_NEXT_STEPS.md`.
 
+> **Addendum 2026-06-11 — emotion runtime rework.** The behavior engine and
+> face runtime were significantly extended after this audit: mood axis,
+> emotional memory persistence (`src/behavior/emotion_memory.c`,
+> `CONFIG_KERFUR_EMOTION_MEMORY`), personality profiles, peer emotional
+> contagion, sleep inertia, idle micro-life, organic blinking / wandering
+> gaze / breathing on the face, and `kerfur emotion` shell commands. See
+> `KERFUS_EMOTION_RUNTIME.md` (architecture) and `KERFUS_AGENT_HANDOFF.md` §5
+> (change list). Battery monitor scaffolding (`src/power/battery_monitor.c`,
+> BQ25630 backend) and the IQS7222A touch driver also landed between the
+> audit and the rework. The build-status numbers in §6 are pre-rework; the
+> rework session itself did not run a build (owner builds manually).
+
 ---
 
 ## 1. Executive summary

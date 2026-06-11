@@ -76,6 +76,10 @@ target_sources(app PRIVATE
     src/ble/ble_manager.c
 )
 
+if(CONFIG_KERFUR_EMOTION_MEMORY)
+    target_sources(app PRIVATE src/behavior/emotion_memory.c)
+endif()
+
 if(CONFIG_KERFUR_BATTERY)
     target_sources(app PRIVATE src/power/battery_monitor.c)
     if(CONFIG_KERFUR_CHARGER_BQ2563X)

@@ -1,8 +1,9 @@
 # Kerfus / Kerfur — Agent Handoff
 
 > For the next Claude / Codex / ChatGPT session. Read this together with
-> `KERFUS_PROJECT_STATE.md` (detailed state) and `KERFUS_NEXT_STEPS.md` (roadmap).
-> Last updated: 2026-06-09.
+> `KERFUS_PROJECT_STATE.md` (detailed state), `KERFUS_NEXT_STEPS.md` (roadmap),
+> and `KERFUS_EMOTION_RUNTIME.md` (emotional architecture).
+> Last updated: 2026-06-11.
 
 ---
 
@@ -53,6 +54,8 @@ scanner + peer state machine + encounter log + social events), and a rich
 | Event types & payloads | `include/core/app_event.h` |
 | Event bus | `src/core/event_bus.c` |
 | Brain ("emotion engine") | `src/behavior/behavior_engine.c`, `include/behavior/pet_state.h` |
+| Emotion architecture doc | `docs/KERFUS_EMOTION_RUNTIME.md` |
+| Emotional memory (persistence) | `src/behavior/emotion_memory.c`, `include/behavior/emotion_memory.h` |
 | Face render | `src/ui/face_runtime.c`, `src/ui/ui_renderer.c`, `assets/face/kerfur_faces.json` |
 | Face codegen | `tools/face_codegen.py` (runs from `CMakeLists.txt`) |
 | Display states | `src/display/display_policy.c` |
@@ -85,14 +88,51 @@ Face codegen needs Python `Pillow` + (`cairosvg` or local Chrome).
 **Run without hardware:** set `CONFIG_KERFUR_ENABLE_MOCK_INPUTS=y` and/or drive
 the `kerfur` shell (`face …`, `nearby inject …`, battery injection).
 
-## 5. What changed in this session
+## 5. What changed in this session (2026-06-11 — emotion runtime rework)
 
-- Audited the repo; ran toolchain/build diagnosis.
-- Created `docs/KERFUS_PROJECT_STATE.md`, `docs/KERFUS_NEXT_STEPS.md`, and this
-  handoff. **No source code was modified.** No files deleted.
-- Ran a pristine verification build into `build/audit_nice_nano`: **SUCCESS**
-  (SDK 1.0.1, `nice_nano/nrf52840`, FLASH 72.3% / RAM 31.5%). Details in
-  PROJECT_STATE §6.
+Goal: make Kerfus feel genuinely alive, contextual, and emotionally present.
+Full description in `docs/KERFUS_EMOTION_RUNTIME.md`. Summary of what is now
+alive/contextual:
+
+- **Mood axis** (`pet_state.mood`, 0–100): slow day-scale valence fed by a
+  rate-limited accumulator (±2/min max), drifting home over hours; tilts
+  expression scoring, PLAY/WITHDRAW intent, and the resting face.
+- **Emotional memory** (`src/behavior/emotion_memory.c`, new module,
+  `CONFIG_KERFUR_EMOTION_MEMORY`): attachment/trust/mood/lifetime-pets/
+  personality persist across reboots in one settings/NVS record; throttled
+  saves (~30 min, plus charger-connect, plus immediate on personality change).
+- **Personality profiles** (balanced/curious/shy/playful/calm) scaling touch
+  warmth, stress sensitivity, social appetite, playfulness, tiredness; new
+  event `APP_EVENT_PERSONALITY_SET` + shell `kerfur emotion personality`.
+- **Peer emotional contagion**: PEER_NEAR / ENCOUNTER_START now read the
+  peer's broadcast mode/expression and classify a vibe (resting/bright/
+  strained) — quiet greeting for a sleeping Kerfur, shared excitement with a
+  happy one, concern for a strained/lonely one. Shell injects accept an
+  optional `[expr]` arg; default = IDLE/CALM peer.
+- **Sleep inertia**: 45 s grogginess after deep-sleep wake (90 s at night):
+  sleepy bias, REST intent bonus, happy-bounce suppressed. Night WAKE is more
+  reluctant. IDLE/AMBIENT timeouts now settle arousal/stress.
+- **Idle micro-life (behavior)**: intent-driven idle gestures every 25–70 s
+  (look up when attention-seeking, glances when curious, slow blink when
+  resting) — only while the screen is on, never on low battery.
+- **Face runtime "Stage 5" organic micro-life**: emotion-aware jittered blink
+  cadence + occasional double blinks + post-reaction settle blinks; wandering
+  idle gaze (random pupil drift-hold-return) which also finally applies the
+  recipes' ambient pupil drift (it was computed but dead before); 1 px
+  breathing bob on mouth/whiskers (continues during sleep); mood/arousal/
+  sleepiness bias on openness/brows/mouth.
+- **Diagnostics**: `kerfur emotion dump` (CLAUDE.md §15 "emotion print"),
+  arousal/social_load/mood/personality added to the heartbeat status dump.
+- Docs updated: `README.md` (features, architecture, Kconfig, shell),
+  new `docs/KERFUS_EMOTION_RUNTIME.md`, this handoff, NEXT_STEPS statuses.
+- **Not built in this session** (owner builds manually): code was
+  line-by-line traced instead. Build commands unchanged (see §4); the only
+  new source file is `src/behavior/emotion_memory.c` (CMake-gated on
+  `CONFIG_KERFUR_EMOTION_MEMORY`, default y, depends on `SETTINGS`).
+
+Earlier session (2026-06-09): repo audit, created PROJECT_STATE / NEXT_STEPS /
+this handoff; pristine verification build **SUCCESS** (SDK 1.0.1,
+`nice_nano/nrf52840`, FLASH 72.3% / RAM 31.5%) — pre-rework numbers.
 
 ## 6. What must NOT be broken
 
@@ -104,17 +144,40 @@ the `kerfur` shell (`face …`, `nearby inject …`, battery injection).
   `touch0` aliases are absent.
 - Privacy rule for nearby: ephemeral rotating IDs by default; persistent identity
   only via explicit future-app pairing. Never turn it into a tracker.
+  (Contagion only reads the anonymous beacon summary already broadcast.)
 - Keep emotional logic out of drivers and BLE out of emotion decisions
   (`CLAUDE.md` §16).
+- Emotion-runtime invariants (`KERFUS_EMOTION_RUNTIME.md` §10): mood changes
+  only via the rate-limited accumulator; personality IDs and the
+  emotion-memory record layout are persisted (append-only, version-bump on
+  change); idle micro-life stays subtle and battery-aware.
 
 ## 7. What the next agent should do first
 
-1. Read `CLAUDE.md`, then `KERFUS_PROJECT_STATE.md`.
-2. Resolve open questions in §8 with the owner.
-3. Do the P0 stabilization (NEXT_STEPS I1–I3): fill/remove empty docs, pin SDK,
-   confirm clean build.
-4. Then the two real "living device" gaps: battery driver (M1) and true sleep
-   (M2). Add behavior/nearby unit tests (M3) before larger refactors.
+1. Read `CLAUDE.md`, then `KERFUS_PROJECT_STATE.md`, then
+   `KERFUS_EMOTION_RUNTIME.md`.
+2. Verify the 2026-06-11 emotion rework builds clean (owner builds manually;
+   code was traced but not compiled in that session) and watch the new
+   runtime logs: `Emotional memory restored/saved`, `Groggy wake-up`,
+   `Encounter start: … vibe=…`, `Emotion dump …`.
+3. Resolve open questions in §8 with the owner.
+4. Then the remaining "living device" gaps: real charger/fuel-gauge wiring on
+   hardware (M1 — `battery_monitor.c` + BQ25630 backend now exist), true
+   sleep (M2), and behavior/nearby unit tests (M3) — the mood/contagion/
+   memory logic is pure enough to unit-test off-target.
+
+### What should be improved next (emotion-specific)
+
+- Unit tests for: mood accumulator rate limiting, peer-vibe classification,
+  grogginess window, emotion-memory record round-trip.
+- Let personality also bias idle-quirk cadence and blink/wander tuning (face
+  currently reads only drives/mood, not the profile).
+- Persist known/friend peers (L4) so contagion can deepen with relationship
+  history ("this friend is usually sleepy in the morning").
+- Hook `energy` to the real battery percent once M1 hardware lands (today
+  energy is display/charging-driven; battery flags arrive via events).
+- Optional: quiet hours from the companion app should damp notification
+  arousal/stress at night beyond the built-in night handling.
 
 ## 8. Open questions (need owner input)
 

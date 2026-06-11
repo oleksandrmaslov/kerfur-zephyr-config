@@ -1,5 +1,5 @@
 /*
- * Behavior engine — "mini AI" rewrite.
+ * Behavior engine — the emotional core ("mini AI").
  *
  * Pipeline (every event):
  *   1. Interpret incoming event in context
@@ -10,12 +10,19 @@
  *   6. Resolve mode
  *   7. Resolve expression (with hysteresis)
  *
+ * Emotional layers, fastest to slowest:
+ *   micro-reactions (seconds) → afterglow context (a minute) →
+ *   drives (minutes) → mood (hours) → persisted traits
+ *   (attachment / trust / mood / personality survive reboots).
+ *
  * Design goals:
  *   - Same event feels different depending on current emotional state
  *   - Short-lived context creates emotional momentum / afterglow
  *   - Intent gives the pet a brief behavioral "leaning"
+ *   - Mood gives the pet a day-scale temperament
+ *   - Personality biases gains/decays (same events, different pet)
+ *   - Peer encounters depend on how the *other* Kerfur feels (contagion)
  *   - Expression scoring integrates context + intent for stability
- *   - Zero new fields in pet_state (all new state is file-local runtime)
  */
 
 #include <stdio.h>
@@ -23,9 +30,11 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/util.h>
 
 #include "behavior/behavior_engine.h"
+#include "behavior/emotion_memory.h"
 #include "behavior/micro_reaction.h"
 #include "ui/generated/kerfur_face_assets.h"
 
@@ -87,6 +96,27 @@ struct behavior_runtime {
 	enum pet_intent intent;
 	int16_t intent_strength;       /* 0..100 */
 	int64_t intent_resolved_at_ms;
+
+	/* Mood: experience lands here first; the 60 s tick converts it
+	 * into at most ±2 mood per minute (rate limit against spam). */
+	int16_t mood_accum;
+
+	/* Personality */
+	enum pet_personality personality;
+	uint8_t rest_accum_pct;        /* fractional sleepiness accumulation */
+
+	/* Sleep inertia: pet stays visibly drowsy for a while after a
+	 * deep-sleep wake-up. */
+	int64_t groggy_until_ms;
+
+	/* Idle micro-life scheduling */
+	int64_t next_idle_quirk_ms;
+	bool idle_quirk_flip;
+
+	/* Emotional memory bookkeeping */
+	struct emotion_memory last_saved_memory;
+	int64_t last_memory_save_ms;
+	uint32_t lifetime_pets;
 };
 
 static struct behavior_runtime g_runtime;
@@ -183,6 +213,7 @@ static void clamp_state(struct pet_state *state)
 	state->social_load = clamp_0_100(state->social_load);
 	state->trust = clamp_0_100(state->trust);
 	state->curiosity = clamp_0_100(state->curiosity);
+	state->mood = clamp_0_100(state->mood);
 	state->walk_confidence = (uint8_t)clamp_0_100(state->walk_confidence);
 	state->walking_confidence = (uint8_t)clamp_0_100(state->walking_confidence);
 	if (state->walking_confidence == 0U) {
@@ -235,8 +266,71 @@ static bool is_night_time(const struct pet_state *state, int64_t now_ms)
 	return (hour < 7) || (hour >= 22);
 }
 
+/* ── Personality ─────────────────────────────────────────────────── *
+ *
+ * Personality is not a label: it scales how strongly classes of
+ * experience land. Same events, different pet. IDs are persisted in
+ * emotional memory — append new profiles, never reorder.
+ */
+
+struct personality_profile {
+	const char *name;
+	uint8_t warmth_pct;  /* touch → attachment/trust/comfort gains */
+	uint8_t stress_pct;  /* stress increments from rough/overload */
+	uint8_t social_pct;  /* peer + notification social/curiosity gains */
+	uint8_t play_pct;    /* arousal gains from play, PLAY intent score */
+	uint8_t rest_pct;    /* passive sleepiness accumulation */
+};
+
+static const struct personality_profile g_personalities[PET_PERSONALITY_COUNT] = {
+	[PET_PERSONALITY_BALANCED] = { "balanced", 100, 100, 100, 100, 100 },
+	[PET_PERSONALITY_CURIOUS]  = { "curious",  100,  95, 120, 105,  90 },
+	[PET_PERSONALITY_SHY]      = { "shy",      115, 125,  70,  85, 105 },
+	[PET_PERSONALITY_PLAYFUL]  = { "playful",  100,  90, 110, 130,  85 },
+	[PET_PERSONALITY_CALM]     = { "calm",     105,  70,  95,  85, 115 },
+};
+
+static const struct personality_profile *personality(void)
+{
+	return &g_personalities[g_runtime.personality];
+}
+
+/* Scale a positive emotional increment by a personality percentage
+ * (rounded). Only meant for positive values. */
+static int scale_pct(int value, uint8_t pct)
+{
+	return ((value * (int)pct) + 50) / 100;
+}
+
+/* ── Mood (slow valence) ─────────────────────────────────────────── */
+
+#define MOOD_ACCUM_LIMIT 60
+
+static void nudge_mood(int delta)
+{
+	g_runtime.mood_accum = (int16_t)CLAMP(g_runtime.mood_accum + delta,
+					      -MOOD_ACCUM_LIMIT, MOOD_ACCUM_LIMIT);
+}
+
+static int mood_bias(const struct pet_state *state)
+{
+	return (state->mood - 50) / 6; /* -8..+8 */
+}
+
+/* ── Sleep inertia ───────────────────────────────────────────────── */
+
+static bool is_groggy(int64_t now_ms)
+{
+	return now_ms < g_runtime.groggy_until_ms;
+}
+
 static void trigger_reaction(struct pet_state *state, enum micro_reaction_type reaction, int64_t now_ms)
 {
+	/* Sleep inertia: a just-woken pet does not bounce. */
+	if ((reaction == REACTION_HAPPY_BOUNCE) && is_groggy(now_ms)) {
+		reaction = REACTION_BLINK;
+	}
+
 	if (micro_reaction_trigger(reaction, now_ms)) {
 		state->last_reaction_timestamp_ms = now_ms;
 	}
@@ -299,6 +393,176 @@ static void decay_context(void)
 	clamp_context();
 }
 
+/* ── Emotional memory (persistence of slow traits) ───────────────── */
+
+#define EMOTION_SAVE_MIN_INTERVAL_MS (25LL * 60 * MSEC_PER_SEC)
+
+static int trait_delta(int16_t a, int16_t b)
+{
+	int d = (int)a - (int)b;
+
+	return (d < 0) ? -d : d;
+}
+
+static void fill_memory_record(const struct pet_state *state, struct emotion_memory *out)
+{
+	out->personality = (uint8_t)g_runtime.personality;
+	out->attachment = state->attachment;
+	out->trust = state->trust;
+	out->mood = state->mood;
+	out->lifetime_pets = g_runtime.lifetime_pets;
+}
+
+static bool memory_changed_enough(const struct emotion_memory *cur,
+				  const struct emotion_memory *saved)
+{
+	return (trait_delta(cur->attachment, saved->attachment) >= 3) ||
+	       (trait_delta(cur->trust, saved->trust) >= 3) ||
+	       (trait_delta(cur->mood, saved->mood) >= 4) ||
+	       (cur->personality != saved->personality) ||
+	       ((cur->lifetime_pets - saved->lifetime_pets) >= 10U);
+}
+
+/* Persist slow traits if they drifted meaningfully and the flash-wear
+ * throttle allows it. min_interval_ms == 0 forces past the throttle
+ * (used for explicit personality changes). */
+static void try_save_emotion_memory(const struct pet_state *state, int64_t now_ms,
+				    int64_t min_interval_ms)
+{
+	struct emotion_memory cur;
+
+	if (!IS_ENABLED(CONFIG_KERFUR_EMOTION_MEMORY)) {
+		return;
+	}
+
+	if ((now_ms - g_runtime.last_memory_save_ms) < min_interval_ms) {
+		return;
+	}
+
+	fill_memory_record(state, &cur);
+	if (!memory_changed_enough(&cur, &g_runtime.last_saved_memory)) {
+		return;
+	}
+
+	if (emotion_memory_store(&cur) == 0) {
+		g_runtime.last_saved_memory = cur;
+		g_runtime.last_memory_save_ms = now_ms;
+	}
+}
+
+/* ── Idle micro-life ─────────────────────────────────────────────── *
+ *
+ * When the world is quiet and the screen is on, the pet occasionally
+ * does something small on its own: glances around when curious, peeks
+ * up when it wants attention, slow-blinks when resting. One short
+ * micro-reaction every ~25–70 s (slower in ambient / drowsy), never
+ * when battery is low — alive, not fidgety.
+ */
+
+static void schedule_idle_quirk(const struct pet_state *state, int64_t now_ms)
+{
+	int64_t delay_ms = (25LL * MSEC_PER_SEC) +
+			   (int64_t)(sys_rand32_get() % (45U * MSEC_PER_SEC));
+
+	if (state->current_display_state == DISPLAY_AMBIENT) {
+		delay_ms *= 2;
+	}
+	if (state->current_mode == PET_MODE_DROWSY) {
+		delay_ms += delay_ms / 2;
+	}
+
+	g_runtime.next_idle_quirk_ms = now_ms + delay_ms;
+}
+
+static void maybe_idle_quirk(struct pet_state *state, int64_t now_ms)
+{
+	enum micro_reaction_type pick;
+
+	if (g_runtime.next_idle_quirk_ms == 0LL) {
+		schedule_idle_quirk(state, now_ms);
+		return;
+	}
+	if (now_ms < g_runtime.next_idle_quirk_ms) {
+		return;
+	}
+
+	/* Only when nothing else is going on and the face is visible. */
+	if ((state->current_display_state == DISPLAY_OFF) ||
+	    state->battery_low || state->battery_critical ||
+	    state->in_hand || state->walking_active ||
+	    (state->current_reaction != REACTION_NONE) ||
+	    (g_runtime.ctx.stimulation >= 12) ||
+	    ((state->current_mode != PET_MODE_IDLE) &&
+	     (state->current_mode != PET_MODE_DROWSY))) {
+		schedule_idle_quirk(state, now_ms);
+		return;
+	}
+
+	if ((g_runtime.intent == PET_INTENT_SEEK_ATTENTION) || (state->boredom > 55)) {
+		pick = REACTION_LOOK_UP; /* checking for its human */
+	} else if ((g_runtime.intent == PET_INTENT_OBSERVE) || (state->curiosity > 55)) {
+		pick = g_runtime.idle_quirk_flip ? REACTION_GLANCE_RIGHT
+						 : REACTION_GLANCE_LEFT;
+	} else if ((g_runtime.intent == PET_INTENT_REST) || (state->sleepiness > 60)) {
+		pick = REACTION_BLINK;
+	} else {
+		pick = g_runtime.idle_quirk_flip ? REACTION_GLANCE_LEFT : REACTION_BLINK;
+	}
+	g_runtime.idle_quirk_flip = !g_runtime.idle_quirk_flip;
+
+	trigger_reaction(state, pick, now_ms);
+	schedule_idle_quirk(state, now_ms);
+}
+
+/* ── Peer emotional contagion ────────────────────────────────────── *
+ *
+ * The nearby beacon carries the other Kerfur's mode/expression summary.
+ * Meeting another Kerfur depends on how that Kerfur feels: tip-toe
+ * around a resting one, light up with a bright one, show concern for a
+ * strained or lonely one. "First Kerfus meet each other."
+ */
+
+enum peer_vibe {
+	PEER_VIBE_NEUTRAL = 0,
+	PEER_VIBE_RESTING,
+	PEER_VIBE_BRIGHT,
+	PEER_VIBE_STRAINED,
+};
+
+static enum peer_vibe peer_vibe_from_payload(const struct app_event_peer *peer)
+{
+	const uint8_t mode = peer->mode_summary;
+	const uint8_t expr = peer->expression_summary;
+
+	if ((mode == (uint8_t)PET_MODE_ASLEEP) || (mode == (uint8_t)PET_MODE_DROWSY) ||
+	    (mode == (uint8_t)PET_MODE_LOW_POWER) || (mode == (uint8_t)PET_MODE_CHARGING) ||
+	    (expr == (uint8_t)PET_EXPR_ASLEEP) || (expr == (uint8_t)PET_EXPR_SLEEPY) ||
+	    (expr == (uint8_t)PET_EXPR_DRAINED) || (expr == (uint8_t)PET_EXPR_COZY)) {
+		return PEER_VIBE_RESTING;
+	}
+	if ((mode == (uint8_t)PET_MODE_OVERLOADED) ||
+	    (expr == (uint8_t)PET_EXPR_ANNOYED) ||
+	    (expr == (uint8_t)PET_EXPR_OVERSTIMULATED) ||
+	    (expr == (uint8_t)PET_EXPR_NEEDY) || (expr == (uint8_t)PET_EXPR_LONELY)) {
+		return PEER_VIBE_STRAINED;
+	}
+	if ((expr == (uint8_t)PET_EXPR_HAPPY) || (expr == (uint8_t)PET_EXPR_PLAYFUL) ||
+	    (expr == (uint8_t)PET_EXPR_CONTENT)) {
+		return PEER_VIBE_BRIGHT;
+	}
+	return PEER_VIBE_NEUTRAL;
+}
+
+static const char *peer_vibe_str(enum peer_vibe vibe)
+{
+	switch (vibe) {
+	case PEER_VIBE_RESTING:  return "RESTING";
+	case PEER_VIBE_BRIGHT:   return "BRIGHT";
+	case PEER_VIBE_STRAINED: return "STRAINED";
+	default:                 return "NEUTRAL";
+	}
+}
+
 /* ── Intent resolution ───────────────────────────────────────────── */
 
 #define INTENT_RESOLVE_INTERVAL_MS 5000LL
@@ -340,7 +604,8 @@ static void resolve_intent(struct pet_state *state, int64_t now_ms)
 		scores[PET_INTENT_REST] = (int16_t)(
 			(state->sleepiness - 35) +
 			(45 - state->arousal) / 3 +
-			(g_runtime.ctx.comfort > 30 ? 8 : 0));
+			(g_runtime.ctx.comfort > 30 ? 8 : 0) +
+			(is_groggy(now_ms) ? 12 : 0));
 	}
 
 	/* SEEK_ATTENTION: bored or lonely */
@@ -359,13 +624,16 @@ static void resolve_intent(struct pet_state *state, int64_t now_ms)
 			((g_runtime.ctx.stimulation > 15 && g_runtime.ctx.stimulation < 50) ? 6 : 0));
 	}
 
-	/* PLAY: energetic + trusting + not stressed */
+	/* PLAY: energetic + trusting + not stressed.
+	 * Personality scales the appetite; mood tilts it. */
 	if (state->arousal > 45 && state->trust > 35 && state->stress < 45) {
 		scores[PET_INTENT_PLAY] = (int16_t)(
-			state->arousal / 2 +
-			state->trust / 5 -
-			state->stress / 4 +
-			(state->energy > 40 ? 5 : 0));
+			scale_pct(state->arousal / 2 +
+				  state->trust / 5 -
+				  state->stress / 4 +
+				  (state->energy > 40 ? 5 : 0),
+				  personality()->play_pct) +
+			mood_bias(state));
 	}
 
 	/* SELF_SOOTHE: moderate stress + recent comfort */
@@ -375,13 +643,14 @@ static void resolve_intent(struct pet_state *state, int64_t now_ms)
 			g_runtime.ctx.comfort / 3);
 	}
 
-	/* WITHDRAW: high stress or overstimulated */
+	/* WITHDRAW: high stress or overstimulated; a good mood buffers it */
 	if (state->stress > 45 || g_runtime.ctx.stimulation > 55) {
 		scores[PET_INTENT_WITHDRAW] = (int16_t)(
 			state->stress / 2 +
 			(g_runtime.ctx.stimulation > 55
 				? (g_runtime.ctx.stimulation - 35) / 3 : 0) -
-			(g_runtime.ctx.comfort > 30 ? 8 : 0));
+			(g_runtime.ctx.comfort > 30 ? 8 : 0) -
+			mood_bias(state) / 2);
 	}
 
 	/* Find best */
@@ -439,6 +708,15 @@ static void apply_5min_drift(struct pet_state *state, int64_t now_ms)
 	if (is_night_time(state, now_ms)) {
 		state->sleepiness += 1;
 	}
+
+	/* Mood drifts home to neutral when no fresh experience is pending. */
+	if (g_runtime.mood_accum == 0) {
+		if (state->mood > 50) {
+			state->mood -= 1;
+		} else if (state->mood < 50) {
+			state->mood += 1;
+		}
+	}
 }
 
 static void apply_30min_drift(struct pet_state *state, int64_t now_ms)
@@ -448,11 +726,15 @@ static void apply_30min_drift(struct pet_state *state, int64_t now_ms)
 
 	if (no_interaction_ms >= (2LL * 60 * 60 * MSEC_PER_SEC)) {
 		state->attachment -= 1;
+		/* Long loneliness wears on the mood, too. */
+		nudge_mood(-2);
 	}
 
 	if (no_rough_ms >= (2LL * 60 * 60 * MSEC_PER_SEC)) {
 		state->trust += 1;
 	}
+
+	try_save_emotion_memory(state, now_ms, EMOTION_SAVE_MIN_INTERVAL_MS);
 }
 
 static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
@@ -498,6 +780,8 @@ static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 		state->boredom -= 1;
 		if ((now_ms - state->last_social_glance_ms) >= (8 * MSEC_PER_SEC)) {
 			state->last_social_glance_ms = now_ms;
+			/* Shared walks are good for the soul. */
+			nudge_mood(1);
 			trigger_reaction(state,
 					 (now_ms & 1LL) ? REACTION_GLANCE_RIGHT
 							: REACTION_GLANCE_LEFT,
@@ -507,6 +791,9 @@ static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 
 	/* Context afterglow decay */
 	decay_context();
+
+	/* Autonomous idle micro-life */
+	maybe_idle_quirk(state, now_ms);
 
 	sync_daily_step_counter(state, now_ms);
 }
@@ -564,9 +851,29 @@ static void apply_tick_60s(struct pet_state *state, int64_t now_ms)
 	const int64_t no_real_interaction_ms = now_ms - state->last_real_interaction_timestamp_ms;
 
 	if ((state->current_mode != PET_MODE_ASLEEP) && !state->charging) {
-		state->sleepiness += 1;
+		/* Personality-scaled tiredness: rest_pct=100 -> +1/min. */
+		g_runtime.rest_accum_pct += personality()->rest_pct;
+		while (g_runtime.rest_accum_pct >= 100U) {
+			g_runtime.rest_accum_pct -= 100U;
+			state->sleepiness += 1;
+		}
 	} else {
 		state->sleepiness -= 1;
+	}
+
+	/* Convert accumulated experience into mood (max ±2/min); stale
+	 * residue evaporates instead of acting minutes later. */
+	{
+		const int step = CLAMP(g_runtime.mood_accum / 5, -2, 2);
+
+		if (step != 0) {
+			state->mood += step;
+			g_runtime.mood_accum -= (int16_t)(step * 5);
+		} else if (g_runtime.mood_accum > 0) {
+			g_runtime.mood_accum--;
+		} else if (g_runtime.mood_accum < 0) {
+			g_runtime.mood_accum++;
+		}
 	}
 
 	if (state->current_mode == PET_MODE_WALK_AWAKE) {
@@ -679,6 +986,7 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 		state->arousal += 2;
 		state->boredom -= 1;
+		nudge_mood(1);
 
 		if (drowsy) {
 			/* Reluctant wake — the pet was resting */
@@ -703,13 +1011,15 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		const bool buzzing = g_runtime.ctx.stimulation > 55;
 		const bool warm = g_runtime.ctx.comfort > 40;
 
-		g_runtime.ctx.comfort += 20;
+		g_runtime.ctx.comfort += scale_pct(20, personality()->warmth_pct);
 		g_runtime.ctx.stimulation += 6;
 		state->last_pet_timestamp_ms = now;
+		g_runtime.lifetime_pets++;
+		nudge_mood(4);
 
-		/* Base warmth and trust (preserved from original) */
-		state->attachment += 8;
-		state->trust += 6;
+		/* Base warmth and trust (personality-scaled) */
+		state->attachment += scale_pct(8, personality()->warmth_pct);
+		state->trust += scale_pct(6, personality()->warmth_pct);
 		state->stress -= 7;
 		state->boredom -= 5;
 
@@ -749,12 +1059,14 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		const bool drowsy = state->sleepiness > 60;
 		const bool stressed = state->stress > 40;
 
-		g_runtime.ctx.comfort += 25;
+		g_runtime.ctx.comfort += scale_pct(25, personality()->warmth_pct);
 		g_runtime.ctx.stimulation += 5;
 		state->last_pet_timestamp_ms = now;
+		g_runtime.lifetime_pets++;
+		nudge_mood(5);
 
-		state->attachment += 10;
-		state->trust += 4;
+		state->attachment += scale_pct(10, personality()->warmth_pct);
+		state->trust += scale_pct(4, personality()->warmth_pct);
 		state->stress -= 6;
 		state->boredom -= 4;
 
@@ -777,12 +1089,13 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 	}
 
 	case APP_EVENT_USER_HOLD: {
-		g_runtime.ctx.comfort += 15;
+		g_runtime.ctx.comfort += scale_pct(15, personality()->warmth_pct);
 		g_runtime.ctx.stimulation += 3;
 		state->last_pet_timestamp_ms = now;
+		nudge_mood(2);
 
-		state->attachment += 4;
-		state->trust += 3;
+		state->attachment += scale_pct(4, personality()->warmth_pct);
+		state->trust += scale_pct(3, personality()->warmth_pct);
 		state->stress -= 2;
 		state->boredom -= 2;
 
@@ -837,14 +1150,16 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		if (carried) {
 			/* Deliberate play shake while held */
 			g_runtime.ctx.stimulation += 8;
-			state->arousal += 4;
+			state->arousal += scale_pct(4, personality()->play_pct);
 			state->curiosity += 2;
 			state->boredom -= 2;
 			state->sleepiness -= 3;
-			state->stress += (state->trust >= 40) ? 0 : 2;
+			state->stress += (state->trust >= 40) ?
+					 0 : scale_pct(2, personality()->stress_pct);
 
 			if (playful && state->trust > 40) {
 				state->boredom -= 2;
+				nudge_mood(2);
 				trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
 			} else if (stressed_already) {
 				trigger_reaction(state, REACTION_STARTLE, now);
@@ -852,14 +1167,16 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		} else {
 			/* Play shake on surface: more startling */
 			g_runtime.ctx.stimulation += 10;
-			state->arousal += 5;
+			state->arousal += scale_pct(5, personality()->play_pct);
 			state->curiosity += 3;
 			state->boredom -= 3;
 			state->sleepiness -= 4;
-			state->stress += (state->trust >= 40) ? 1 : 3;
+			state->stress += (state->trust >= 40) ?
+					 1 : scale_pct(3, personality()->stress_pct);
 
 			if (playful && state->trust > 40) {
 				state->boredom -= 2;
+				nudge_mood(1);
 			} else if (stressed_already) {
 				state->stress += 2;
 			}
@@ -901,13 +1218,15 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 		/* Trust-dependent damage: familiar handler vs stranger */
 		if (state->trust >= 50) {
-			state->stress += 5;
+			state->stress += scale_pct(5, personality()->stress_pct);
 			state->trust -= 2;
 			state->attachment -= 1;
+			nudge_mood(-8);
 		} else {
-			state->stress += 10;
+			state->stress += scale_pct(10, personality()->stress_pct);
 			state->trust -= 4;
 			state->attachment -= 2;
+			nudge_mood(-10);
 		}
 
 		trigger_reaction(state, REACTION_STARTLE, now);
@@ -918,8 +1237,9 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		g_runtime.ctx.stimulation += 15;
 		g_runtime.ctx.comfort -= 4;
 
-		state->stress += 6;
+		state->stress += scale_pct(6, personality()->stress_pct);
 		state->trust -= 1;
+		nudge_mood(-6);
 		state->arousal += 5;
 		state->last_motion_timestamp_ms = now;
 		state->last_motion_sample_timestamp_ms = now;
@@ -972,6 +1292,7 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		} else {
 			/* Actually walking: exploring the world */
 			g_runtime.ctx.stimulation += 8;
+			nudge_mood(2);
 			if (was_bored) {
 				state->curiosity += 4;
 				state->boredom -= 3;
@@ -1116,7 +1437,7 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		state->last_phone_event_timestamp_ms = now;
 
 		state->social_load += 5;
-		state->curiosity += 6;
+		state->curiosity += scale_pct(6, personality()->social_pct);
 		state->arousal += 4;
 		state->boredom -= 2;
 
@@ -1150,12 +1471,14 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 		if (already_loaded) {
 			/* Overload: this is too much */
-			state->stress += 12;
+			state->stress += scale_pct(12, personality()->stress_pct);
 			state->curiosity -= 2;
+			nudge_mood(-4);
 		} else {
 			/* First burst: stressful but manageable */
-			state->stress += 8;
+			state->stress += scale_pct(8, personality()->stress_pct);
 			state->curiosity += 2;
+			nudge_mood(-1);
 		}
 
 		trigger_reaction(state, REACTION_NOTIF_BURST, now);
@@ -1228,6 +1551,16 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		state->stress -= 4;
 		state->sleepiness += 2;
 		state->curiosity -= 1;
+		nudge_mood(2);
+
+		/* Being tucked in while drowsy is extra cozy. */
+		if (state->sleepiness > 60) {
+			g_runtime.ctx.comfort += 4;
+		}
+
+		/* Docking is a natural moment to remember who we've become. */
+		try_save_emotion_memory(state, now, 10LL * 60 * MSEC_PER_SEC);
+
 		trigger_reaction(state, REACTION_CHARGE_PULSE, now);
 		break;
 
@@ -1264,6 +1597,7 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 	case APP_EVENT_PEER_NEAR: {
 		const bool is_friend = event->payload.peer.is_friend;
+		const enum peer_vibe vibe = peer_vibe_from_payload(&event->payload.peer);
 
 		state->peer_nearby = true;
 		state->current_active_peer_id = event->payload.peer.ephemeral_id;
@@ -1271,14 +1605,36 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		state->social_load += 1;
 
 		if (is_friend) {
-			g_runtime.ctx.social_warmth += 25;
+			g_runtime.ctx.social_warmth += scale_pct(25, personality()->social_pct);
 			g_runtime.ctx.comfort += 10;
-			state->curiosity += 5;
+			state->curiosity += scale_pct(5, personality()->social_pct);
 			state->attachment += 2;
+			nudge_mood(3);
 		} else {
-			g_runtime.ctx.social_warmth += 15;
+			g_runtime.ctx.social_warmth += scale_pct(15, personality()->social_pct);
 			g_runtime.ctx.stimulation += 5;
-			state->curiosity += 6;
+			state->curiosity += scale_pct(6, personality()->social_pct);
+			nudge_mood(2);
+		}
+
+		/* Contagion: how the other Kerfur feels colors the moment. */
+		switch (vibe) {
+		case PEER_VIBE_RESTING:
+			/* Quiet interest — don't get worked up near a sleeper. */
+			state->arousal -= 1;
+			g_runtime.ctx.stimulation -= 3;
+			break;
+		case PEER_VIBE_BRIGHT:
+			state->arousal += scale_pct(2, personality()->play_pct);
+			nudge_mood(2);
+			break;
+		case PEER_VIBE_STRAINED:
+			/* Mild concern for the other one. */
+			state->stress += scale_pct(1, personality()->stress_pct);
+			state->curiosity += 2;
+			break;
+		default:
+			break;
 		}
 
 		show_social_indicator(state,
@@ -1311,19 +1667,22 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 	case APP_EVENT_ENCOUNTER_START: {
 		const bool is_friend = event->payload.peer.is_friend;
+		const enum peer_vibe vibe = peer_vibe_from_payload(&event->payload.peer);
+		enum micro_reaction_type hello;
 
 		state->peer_nearby = true;
 		state->current_active_peer_id = event->payload.peer.ephemeral_id;
 		state->peer_known_friend = is_friend;
 
 		if (is_friend) {
-			g_runtime.ctx.social_warmth += 30;
+			g_runtime.ctx.social_warmth += scale_pct(30, personality()->social_pct);
 			g_runtime.ctx.comfort += 15;
 			g_runtime.ctx.stimulation += 8;
 
 			state->attachment += 6;
 			state->trust += 3;
 			state->stress -= 2;
+			nudge_mood(8);
 
 			/* Reuniting when bored is extra warm */
 			if (state->boredom > 40) {
@@ -1331,25 +1690,78 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 				state->attachment += 3;
 			}
 
+			hello = REACTION_HAPPY_BOUNCE;
+			switch (vibe) {
+			case PEER_VIBE_RESTING:
+				/* Settle in next to a resting friend instead
+				 * of bouncing at it. */
+				state->sleepiness += 2;
+				state->arousal -= 1;
+				g_runtime.ctx.stimulation -= 6;
+				hello = REACTION_PET_BOW;
+				break;
+			case PEER_VIBE_STRAINED:
+				/* Worry for the friend: gentle and alert. */
+				state->stress += scale_pct(2, personality()->stress_pct);
+				state->curiosity += 4;
+				hello = REACTION_GLANCE_LEFT;
+				break;
+			case PEER_VIBE_BRIGHT:
+				/* Joy is contagious. */
+				state->arousal += scale_pct(4, personality()->play_pct);
+				nudge_mood(4);
+				break;
+			default:
+				break;
+			}
+
 			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_FILLED,
 					      now, 3000);
-			trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
+			trigger_reaction(state, hello, now);
 		} else {
-			g_runtime.ctx.social_warmth += 20;
+			g_runtime.ctx.social_warmth += scale_pct(20, personality()->social_pct);
 			g_runtime.ctx.stimulation += 10;
 
-			state->curiosity += 6;
+			state->curiosity += scale_pct(6, personality()->social_pct);
 			state->attachment += 2;
+			nudge_mood(3);
 
 			/* Observing intent amplifies curiosity */
 			if (g_runtime.intent == PET_INTENT_OBSERVE) {
 				state->curiosity += 3;
 			}
 
+			hello = REACTION_PET_BOW;
+			switch (vibe) {
+			case PEER_VIBE_RESTING:
+				/* A quiet once-over of the sleepy stranger. */
+				state->arousal -= 1;
+				g_runtime.ctx.stimulation -= 5;
+				hello = REACTION_GLANCE_RIGHT;
+				break;
+			case PEER_VIBE_STRAINED:
+				state->stress += scale_pct(1, personality()->stress_pct);
+				state->curiosity += 2;
+				break;
+			case PEER_VIBE_BRIGHT:
+				state->arousal += scale_pct(3, personality()->play_pct);
+				nudge_mood(2);
+				if ((g_runtime.intent == PET_INTENT_PLAY) &&
+				    (state->trust > 50)) {
+					hello = REACTION_HAPPY_BOUNCE;
+				}
+				break;
+			default:
+				break;
+			}
+
 			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
 					      now, 3000);
-			trigger_reaction(state, REACTION_PET_BOW, now);
+			trigger_reaction(state, hello, now);
 		}
+
+		LOG_INF("Encounter start: %s peer vibe=%s",
+			is_friend ? "friend" : "unknown", peer_vibe_str(vibe));
 		state->encounter_sync_pending = true;
 		break;
 	}
@@ -1359,6 +1771,10 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 		if (event->payload.peer.duration_s >= 30) {
 			state->boredom += 4;
+		}
+		/* A proper visit leaves a warm afterglow even once it ends. */
+		if (event->payload.peer.duration_s >= 60) {
+			nudge_mood(2);
 		}
 		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
 			state->peer_nearby = false;
@@ -1372,11 +1788,12 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 	case APP_EVENT_PEER_PLAY_INVITE:
 		g_runtime.ctx.stimulation += 10;
-		g_runtime.ctx.social_warmth += 12;
+		g_runtime.ctx.social_warmth += scale_pct(12, personality()->social_pct);
 
-		state->arousal += 8;
+		state->arousal += scale_pct(8, personality()->play_pct);
 		state->boredom -= 4;
 		state->curiosity += 2;
+		nudge_mood(3);
 		show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
 				      now, 2500);
 		trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
@@ -1384,27 +1801,42 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 	case APP_EVENT_PEER_PLAY_ACK:
 		g_runtime.ctx.stimulation += 8;
-		g_runtime.ctx.social_warmth += 10;
+		g_runtime.ctx.social_warmth += scale_pct(10, personality()->social_pct);
 
-		state->arousal += 6;
+		state->arousal += scale_pct(6, personality()->play_pct);
 		state->boredom -= 3;
 		state->attachment += 2;
+		nudge_mood(3);
 		trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
 		break;
 
 	/* ── System / lifecycle events ───────────────────────────────── */
 
-	case APP_EVENT_WAKE:
-		g_runtime.ctx.stimulation += 10;
+	case APP_EVENT_WAKE: {
+		/* Night wake-ups are reluctant: less alert, still sleepy. */
+		const bool night = is_night_time(state, now);
 
-		state->sleepiness -= 8;
-		state->arousal += 5;
+		g_runtime.ctx.stimulation += 10;
+		state->sleepiness -= night ? 4 : 8;
+		state->arousal += night ? 3 : 5;
 		trigger_reaction(state, REACTION_WAKE_BLINK, now);
 		break;
+	}
 
 	case APP_EVENT_SLEEP_REQUEST:
 		state->arousal -= 6;
 		trigger_reaction(state, REACTION_SLEEP_FADE, now);
+		break;
+
+	case APP_EVENT_IDLE_TIMEOUT:
+		/* Nothing has happened for a while — settle. */
+		state->arousal -= 1;
+		break;
+
+	case APP_EVENT_DISPLAY_AMBIENT_TIMEOUT:
+		/* Screen going dark: the pet lets go of the moment. */
+		state->arousal -= 2;
+		state->stress -= 1;
 		break;
 
 	case APP_EVENT_SELF_WAKE_TIMER:
@@ -1495,8 +1927,26 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 			micro_reaction_str((enum micro_reaction_type)event->param));
 		break;
 
-	case APP_EVENT_FACE_DEBUG_DUMP:
+	case APP_EVENT_FACE_DEBUG_DUMP: {
+		char emotion[192];
+
 		log_face_snapshot(state, "Face dump");
+		behavior_engine_emotion_dump(state, emotion, sizeof(emotion));
+		LOG_INF("Emotion dump %s", emotion);
+		break;
+	}
+
+	case APP_EVENT_PERSONALITY_SET:
+		if ((event->param < 0) || (event->param >= PET_PERSONALITY_COUNT)) {
+			LOG_WRN("Ignoring invalid personality id=%d", event->param);
+			break;
+		}
+		if (g_runtime.personality != (enum pet_personality)event->param) {
+			g_runtime.personality = (enum pet_personality)event->param;
+			LOG_INF("Personality -> %s", personality()->name);
+			/* Persist immediately: an explicit owner choice. */
+			try_save_emotion_memory(state, now, 0);
+		}
 		break;
 
 	case APP_EVENT_FACE_SET_DYNAMIC_PUPILS_DEBUG:
@@ -1597,13 +2047,16 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 	int ctx_bonus = 0;
 	int int_bonus = 0;
 	const int16_t is = g_runtime.intent_strength;
+	/* Day-scale temperament: a pet that has had a good stretch leans
+	 * warm; a worn-down one leans needy/cranky. ±8 max. */
+	const int mb = mood_bias(state);
 
 	/* ── Base scoring (original logic preserved) ── */
 
 	switch (expr) {
 	case PET_EXPR_CALM:
 		base = 60 - state->stress - (state->social_load / 2) -
-		       (state->boredom / 4) + (state->energy / 4);
+		       (state->boredom / 4) + (state->energy / 4) + (mb / 3);
 		/* Context: calm benefits from low recent stimulation */
 		if (g_runtime.ctx.stimulation < 15) {
 			ctx_bonus = 5;
@@ -1635,14 +2088,14 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 
 	case PET_EXPR_CONTENT:
 		base = (state->attachment / 2) + (state->trust / 2) + (recent_pet ? 16 : 0) -
-		       (state->stress / 2);
+		       (state->stress / 2) + ((mb * 2) / 3);
 		/* Context: recent comfort boosts contentment */
 		ctx_bonus = g_runtime.ctx.comfort / 5;
 		break;
 
 	case PET_EXPR_HAPPY:
 		base = (state->attachment / 2) + (state->energy / 3) + (recent_pet ? 18 : 0) +
-		       (fresh_pet ? 26 : 0) - (state->stress / 2);
+		       (fresh_pet ? 26 : 0) - (state->stress / 2) + mb;
 		/* Context: comfort afterglow lingers as happiness */
 		ctx_bonus = g_runtime.ctx.comfort / 5;
 		break;
@@ -1661,7 +2114,7 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 				walk_bonus = 4;
 			}
 		}
-		base = state->arousal + (state->trust / 3) + walk_bonus -
+		base = state->arousal + (state->trust / 3) + walk_bonus + (mb / 2) -
 		       (state->battery_low ? 20 : 0);
 		/* Context: moderate stimulation supports playfulness */
 		if (g_runtime.ctx.stimulation > 25 && g_runtime.ctx.stimulation < 65) {
@@ -1672,12 +2125,14 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 
 	case PET_EXPR_SLEEPY:
 		base = state->sleepiness + ((state->arousal < 35) ? 8 : 0) + (night ? 6 : 0) +
-		       ((no_real_interaction_ms > (5LL * 60 * MSEC_PER_SEC)) ? 10 : 0);
+		       ((no_real_interaction_ms > (5LL * 60 * MSEC_PER_SEC)) ? 10 : 0) +
+		       (is_groggy(now_ms) ? 14 : 0);
 		break;
 
 	case PET_EXPR_NEEDY:
 		base = state->boredom + (state->attachment / 4) + (recent_pet ? -10 : 12) +
-		       ((no_real_interaction_ms > (8LL * 60 * MSEC_PER_SEC)) ? 10 : 0);
+		       ((no_real_interaction_ms > (8LL * 60 * MSEC_PER_SEC)) ? 10 : 0) -
+		       (mb / 2);
 		/* Context: recent social warmth and comfort dampen neediness */
 		ctx_bonus = -(g_runtime.ctx.social_warmth / 4) -
 			    (g_runtime.ctx.comfort / 5);
@@ -1685,14 +2140,15 @@ static int score_for_expression(enum pet_expression expr, const struct pet_state
 
 	case PET_EXPR_LONELY:
 		base = state->boredom + (long_disconnect ? 20 : 0) + (recent_motion ? -8 : 8) +
-		       ((no_real_interaction_ms > (20LL * 60 * MSEC_PER_SEC)) ? 16 : 0);
+		       ((no_real_interaction_ms > (20LL * 60 * MSEC_PER_SEC)) ? 16 : 0) - mb;
 		/* Context: social warmth and comfort dampen loneliness */
 		ctx_bonus = -(g_runtime.ctx.social_warmth / 4) -
 			    (g_runtime.ctx.comfort / 5);
 		break;
 
 	case PET_EXPR_ANNOYED:
-		base = state->stress + (rough_recent ? 24 : 0) + ((state->trust < 40) ? 12 : 0);
+		base = state->stress + (rough_recent ? 24 : 0) + ((state->trust < 40) ? 12 : 0) -
+		       (mb / 2);
 		/* Context: high stimulation feeds annoyance */
 		if (g_runtime.ctx.stimulation > 65) {
 			ctx_bonus = (g_runtime.ctx.stimulation - 45) / 5;
@@ -2035,9 +2491,33 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->social_load = 10;
 	state->trust = 55;
 	state->curiosity = 45;
+	state->mood = 52;
 	state->walk_confidence = 0;
 	state->walking_confidence = 0;
 	state->notification_burst_level = 0;
+
+	/* Emotional memory: restore the slow relationship traits so this
+	 * stays the same pet across power cycles. Values come back lightly
+	 * compressed toward the middle — "rested, but it's still me". */
+	{
+		struct emotion_memory mem;
+
+		emotion_memory_init();
+		if (emotion_memory_get(&mem)) {
+			state->attachment = (int16_t)CLAMP((int)mem.attachment, 25, 90);
+			state->trust = (int16_t)CLAMP((int)mem.trust, 25, 90);
+			state->mood = (int16_t)CLAMP((int)mem.mood, 35, 70);
+			if (mem.personality < (uint8_t)PET_PERSONALITY_COUNT) {
+				g_runtime.personality = (enum pet_personality)mem.personality;
+			}
+			g_runtime.lifetime_pets = mem.lifetime_pets;
+			LOG_INF("Emotional memory restored: att=%d trust=%d mood=%d pets=%u pers=%s",
+				state->attachment, state->trust, state->mood,
+				g_runtime.lifetime_pets, personality()->name);
+		}
+	}
+	fill_memory_record(state, &g_runtime.last_saved_memory);
+	g_runtime.last_memory_save_ms = now_ms;
 
 	/* Seed boot in a neutral state */
 	state->last_pet_timestamp_ms = stale_pet_ms;
@@ -2107,6 +2587,16 @@ void behavior_engine_handle_event(struct pet_state *state, const struct app_even
 	/* 6. Resolve mode */
 	update_mode(state, event->timestamp_ms);
 
+	/* Sleep inertia: leaving deep sleep keeps the pet visibly drowsy
+	 * for a while (longer at night). */
+	if ((prev_mode == PET_MODE_ASLEEP) && (state->current_mode != PET_MODE_ASLEEP)) {
+		const bool night = is_night_time(state, event->timestamp_ms);
+
+		g_runtime.groggy_until_ms = event->timestamp_ms +
+			((night ? 90 : 45) * MSEC_PER_SEC);
+		LOG_INF("Groggy wake-up (%s)", night ? "night" : "day");
+	}
+
 	/* 7. Resolve expression (with hysteresis) */
 	update_expression(state, event->timestamp_ms);
 
@@ -2175,6 +2665,37 @@ const char *pet_display_state_str(enum pet_display_state state)
 	}
 }
 
+const char *pet_personality_str(enum pet_personality personality_id)
+{
+	if (((int)personality_id < 0) ||
+	    ((int)personality_id >= (int)PET_PERSONALITY_COUNT)) {
+		return "UNKNOWN";
+	}
+
+	return g_personalities[personality_id].name;
+}
+
+void behavior_engine_emotion_dump(const struct pet_state *state, char *buffer, size_t buffer_len)
+{
+	if ((buffer == NULL) || (buffer_len == 0U)) {
+		return;
+	}
+
+	(void)snprintf(buffer, buffer_len,
+		       "E=%d Sl=%d At=%d Bo=%d St=%d Ar=%d So=%d Tr=%d Cu=%d "
+		       "Mo=%d(acc=%d) ctx=%d/%d/%d intent=%s(%d) groggy=%d "
+		       "pers=%s pets=%u",
+		       state->energy, state->sleepiness, state->attachment,
+		       state->boredom, state->stress, state->arousal,
+		       state->social_load, state->trust, state->curiosity,
+		       state->mood, g_runtime.mood_accum,
+		       g_runtime.ctx.stimulation, g_runtime.ctx.comfort,
+		       g_runtime.ctx.social_warmth,
+		       pet_intent_str(g_runtime.intent), g_runtime.intent_strength,
+		       is_groggy(k_uptime_get()) ? 1 : 0,
+		       personality()->name, g_runtime.lifetime_pets);
+}
+
 void behavior_engine_status_dump(const struct pet_state *state, char *buffer, size_t buffer_len)
 {
 	if ((buffer == NULL) || (buffer_len == 0U)) {
@@ -2185,7 +2706,7 @@ void behavior_engine_status_dump(const struct pet_state *state, char *buffer, si
 		"mode=%s expr=%s force=%s disp=%s react=%s ind=%d ov=%d look_t=%d,%d "
 		"look_r=%d,%d look_c=%u carry=%d/%u/%u/%u walk_act=%d step_day=%u "
 		"total=%u hw=%u batt=%d known=%d E=%d Sl=%d Bo=%d St=%d Tr=%d Cu=%d "
-		"At=%d ctx=%d/%d/%d intent=%s(%d) "
+		"At=%d Ar=%d So=%d Mo=%d ctx=%d/%d/%d intent=%s(%d) pers=%s "
 		"last_m=%lld last_w=%lld last_p=%lld last_h=%lld last_s=%lld "
 		"dyn=%d time=%s",
 		       pet_mode_str(state->current_mode),
@@ -2213,9 +2734,11 @@ void behavior_engine_status_dump(const struct pet_state *state, char *buffer, si
 		       state->battery_percent_known ? 1 : 0,
 		       state->energy, state->sleepiness, state->boredom, state->stress,
 		       state->trust, state->curiosity, state->attachment,
+		       state->arousal, state->social_load, state->mood,
 		       g_runtime.ctx.stimulation, g_runtime.ctx.comfort,
 		       g_runtime.ctx.social_warmth,
 		       pet_intent_str(g_runtime.intent), g_runtime.intent_strength,
+		       personality()->name,
 		       (long long)state->last_motion_timestamp_ms,
 		       (long long)state->last_walk_timestamp_ms,
 		       (long long)state->last_pickup_timestamp_ms,

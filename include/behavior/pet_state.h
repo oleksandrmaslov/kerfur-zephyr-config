@@ -40,6 +40,17 @@ enum pet_display_state {
 	DISPLAY_OFF,
 };
 
+/* Personality biases drive gains/decays in the behavior engine.
+ * IDs are persisted in emotional memory — append only, never reorder. */
+enum pet_personality {
+	PET_PERSONALITY_BALANCED = 0,
+	PET_PERSONALITY_CURIOUS,
+	PET_PERSONALITY_SHY,
+	PET_PERSONALITY_PLAYFUL,
+	PET_PERSONALITY_CALM,
+	PET_PERSONALITY_COUNT
+};
+
 struct pet_state {
 	/* Core internal variables (0..100). */
 	int16_t energy;
@@ -51,6 +62,9 @@ struct pet_state {
 	int16_t social_load;
 	int16_t trust;
 	int16_t curiosity;
+	/* Slow valence: how life has felt lately. 50 = neutral; moves at most
+	 * a couple of points per minute, drifts back to 50 over hours. */
+	int16_t mood;
 
 	/* Derived/session values. */
 	uint8_t walk_confidence;

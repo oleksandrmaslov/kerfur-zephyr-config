@@ -7,14 +7,11 @@
 #include <zephyr/shell/shell.h>
 
 #include "ble/ble_manager.h"
-#if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+#include "behavior/behavior_engine.h"
 #include "core/app_event.h"
 #include "core/event_bus.h"
-#endif
 #if defined(CONFIG_KERFUR_ENABLE_FACE_SHELL_CMDS)
-#include "behavior/behavior_engine.h"
 #include "behavior/micro_reaction.h"
-#include "core/event_bus.h"
 #include "drivers/motion_classifier.h"
 #endif
 
@@ -800,6 +797,26 @@ static int cmd_nearby_inject_checking(const struct shell *shell, size_t argc, ch
 	return 0;
 }
 
+/* Parse an optional peer expression id (enum pet_expression) used to
+ * test emotional contagion. Defaults keep the peer looking like a
+ * plain idle/calm Kerfur. */
+static int parse_peer_expression(const struct shell *shell, const char *arg,
+				 struct app_event_peer *peer)
+{
+	uint8_t expr;
+	int err;
+
+	err = parse_u8_arg(arg, &expr);
+	if ((err != 0) || (expr > (uint8_t)PET_EXPR_ASLEEP)) {
+		shell_error(shell, "invalid peer expression id: %s (0..%d)",
+			    arg, PET_EXPR_ASLEEP);
+		return -EINVAL;
+	}
+
+	peer->expression_summary = expr;
+	return 0;
+}
+
 static int cmd_nearby_inject_near(const struct shell *shell, size_t argc, char **argv)
 {
 	struct app_event_peer peer = {0};
@@ -807,8 +824,9 @@ static int cmd_nearby_inject_near(const struct shell *shell, size_t argc, char *
 	int8_t rssi = -65;
 	int err;
 
-	if ((argc < 2U) || (argc > 3U)) {
-		shell_error(shell, "usage: kerfur nearby inject near <ephemeral_id> [rssi]");
+	if ((argc < 2U) || (argc > 4U)) {
+		shell_error(shell,
+			    "usage: kerfur nearby inject near <ephemeral_id> [rssi] [expr]");
 		return -EINVAL;
 	}
 
@@ -817,7 +835,7 @@ static int cmd_nearby_inject_near(const struct shell *shell, size_t argc, char *
 		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
 		return err;
 	}
-	if (argc == 3U) {
+	if (argc >= 3U) {
 		err = parse_i8_arg(argv[2], &rssi);
 		if (err != 0) {
 			shell_error(shell, "invalid rssi: %s", argv[2]);
@@ -827,6 +845,14 @@ static int cmd_nearby_inject_near(const struct shell *shell, size_t argc, char *
 
 	peer.ephemeral_id = id;
 	peer.rssi = rssi;
+	peer.mode_summary = (uint8_t)PET_MODE_IDLE;
+	peer.expression_summary = (uint8_t)PET_EXPR_CALM;
+	if (argc == 4U) {
+		err = parse_peer_expression(shell, argv[3], &peer);
+		if (err != 0) {
+			return err;
+		}
+	}
 
 	err = app_event_publish_peer(APP_EVENT_PEER_NEAR, &peer);
 	if (err != 0) {
@@ -834,7 +860,8 @@ static int cmd_nearby_inject_near(const struct shell *shell, size_t argc, char *
 		return err;
 	}
 
-	shell_print(shell, "PEER_NEAR queued id=0x%08x rssi=%d", id, rssi);
+	shell_print(shell, "PEER_NEAR queued id=0x%08x rssi=%d expr=%u",
+		    id, rssi, peer.expression_summary);
 	return 0;
 }
 
@@ -844,8 +871,8 @@ static int cmd_nearby_inject_friend(const struct shell *shell, size_t argc, char
 	uint32_t id;
 	int err;
 
-	if (argc != 2U) {
-		shell_error(shell, "usage: kerfur nearby inject friend <ephemeral_id>");
+	if ((argc < 2U) || (argc > 3U)) {
+		shell_error(shell, "usage: kerfur nearby inject friend <ephemeral_id> [expr]");
 		return -EINVAL;
 	}
 
@@ -859,6 +886,14 @@ static int cmd_nearby_inject_friend(const struct shell *shell, size_t argc, char
 	peer.encounter_id = id ^ 0xA5A5A5A5U;
 	peer.is_friend = true;
 	peer.rssi = -55;
+	peer.mode_summary = (uint8_t)PET_MODE_IDLE;
+	peer.expression_summary = (uint8_t)PET_EXPR_CALM;
+	if (argc == 3U) {
+		err = parse_peer_expression(shell, argv[2], &peer);
+		if (err != 0) {
+			return err;
+		}
+	}
 
 	err = app_event_publish_peer(APP_EVENT_ENCOUNTER_START, &peer);
 	if (err != 0) {
@@ -866,7 +901,8 @@ static int cmd_nearby_inject_friend(const struct shell *shell, size_t argc, char
 		return err;
 	}
 
-	shell_print(shell, "ENCOUNTER_START (friend) queued id=0x%08x", id);
+	shell_print(shell, "ENCOUNTER_START (friend) queued id=0x%08x expr=%u",
+		    id, peer.expression_summary);
 	return 0;
 }
 
@@ -876,8 +912,8 @@ static int cmd_nearby_inject_unknown(const struct shell *shell, size_t argc, cha
 	uint32_t id;
 	int err;
 
-	if (argc != 2U) {
-		shell_error(shell, "usage: kerfur nearby inject unknown <ephemeral_id>");
+	if ((argc < 2U) || (argc > 3U)) {
+		shell_error(shell, "usage: kerfur nearby inject unknown <ephemeral_id> [expr]");
 		return -EINVAL;
 	}
 
@@ -891,6 +927,14 @@ static int cmd_nearby_inject_unknown(const struct shell *shell, size_t argc, cha
 	peer.encounter_id = id ^ 0x5A5A5A5AU;
 	peer.is_friend = false;
 	peer.rssi = -60;
+	peer.mode_summary = (uint8_t)PET_MODE_IDLE;
+	peer.expression_summary = (uint8_t)PET_EXPR_CALM;
+	if (argc == 3U) {
+		err = parse_peer_expression(shell, argv[2], &peer);
+		if (err != 0) {
+			return err;
+		}
+	}
 
 	err = app_event_publish_peer(APP_EVENT_ENCOUNTER_START, &peer);
 	if (err != 0) {
@@ -898,7 +942,8 @@ static int cmd_nearby_inject_unknown(const struct shell *shell, size_t argc, cha
 		return err;
 	}
 
-	shell_print(shell, "ENCOUNTER_START (unknown) queued id=0x%08x", id);
+	shell_print(shell, "ENCOUNTER_START (unknown) queued id=0x%08x expr=%u",
+		    id, peer.expression_summary);
 	return 0;
 }
 
@@ -1071,6 +1116,60 @@ static int cmd_ble_gb_test(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_emotion_dump(const struct shell *shell, size_t argc, char **argv)
+{
+	int err;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	/* The behavior engine answers on the bus with a full face +
+	 * emotion log dump ("emotion print"). */
+	err = app_event_publish(APP_EVENT_FACE_DEBUG_DUMP, 0);
+	if (err != 0) {
+		shell_error(shell, "emotion dump publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "emotion dump queued (see log output)");
+	return 0;
+}
+
+static int cmd_emotion_personality(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t id;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell,
+			    "usage: kerfur emotion personality <0..%d> "
+			    "(0=balanced 1=curious 2=shy 3=playful 4=calm)",
+			    PET_PERSONALITY_COUNT - 1);
+		return -EINVAL;
+	}
+
+	err = parse_u8_arg(argv[1], &id);
+	if ((err != 0) || (id >= (uint8_t)PET_PERSONALITY_COUNT)) {
+		shell_error(shell, "invalid personality id: %s", argv[1]);
+		return -EINVAL;
+	}
+
+	err = app_event_publish(APP_EVENT_PERSONALITY_SET, (int32_t)id);
+	if (err != 0) {
+		shell_error(shell, "personality publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "personality -> %s", pet_personality_str((enum pet_personality)id));
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_emotion,
+	SHELL_CMD(dump, NULL, "Print emotional state to log", cmd_emotion_dump),
+	SHELL_CMD(personality, NULL, "Set personality <id>", cmd_emotion_personality),
+	SHELL_SUBCMD_SET_END
+);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_ble,
 	SHELL_CMD(status, NULL, "Show BLE connection state", cmd_ble_status),
 	SHELL_CMD(adv_restart, NULL, "Restart BLE advertising", cmd_ble_adv_restart),
@@ -1085,9 +1184,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_ble,
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_nearby_inject,
 	SHELL_CMD(seen, NULL, "Inject PEER_SEEN <id>", cmd_nearby_inject_seen),
 	SHELL_CMD(checking, NULL, "Inject PEER_CHECKING <id>", cmd_nearby_inject_checking),
-	SHELL_CMD(near, NULL, "Inject PEER_NEAR <id> [rssi]", cmd_nearby_inject_near),
-	SHELL_CMD(friend, NULL, "Inject ENCOUNTER_START as friend <id>", cmd_nearby_inject_friend),
-	SHELL_CMD(unknown, NULL, "Inject ENCOUNTER_START as unknown <id>", cmd_nearby_inject_unknown),
+	SHELL_CMD(near, NULL, "Inject PEER_NEAR <id> [rssi] [expr]", cmd_nearby_inject_near),
+	SHELL_CMD(friend, NULL, "Inject ENCOUNTER_START as friend <id> [expr]", cmd_nearby_inject_friend),
+	SHELL_CMD(unknown, NULL, "Inject ENCOUNTER_START as unknown <id> [expr]", cmd_nearby_inject_unknown),
 	SHELL_CMD(play_invite, NULL, "Inject PEER_PLAY_INVITE <id>", cmd_nearby_inject_play_invite),
 	SHELL_CMD(play_ack, NULL, "Inject PEER_PLAY_ACK <id>", cmd_nearby_inject_play_ack),
 	SHELL_CMD(lost, NULL, "Inject PEER_LOST <id>", cmd_nearby_inject_lost),
@@ -1137,6 +1236,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_face,
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur,
 	SHELL_CMD(ble, &sub_kerfur_ble, "BLE maintenance commands", NULL),
+	SHELL_CMD(emotion, &sub_kerfur_emotion, "Emotional state debug commands", NULL),
 	SHELL_CMD(face, &sub_kerfur_face, "Face state debug commands", NULL),
 #if defined(CONFIG_KERFUR_ENABLE_NEARBY)
 	SHELL_CMD(nearby, &sub_kerfur_nearby, "Kerfur-to-Kerfur nearby debug commands", NULL),
@@ -1146,6 +1246,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur,
 #else
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur,
 	SHELL_CMD(ble, &sub_kerfur_ble, "BLE maintenance commands", NULL),
+	SHELL_CMD(emotion, &sub_kerfur_emotion, "Emotional state debug commands", NULL),
 #if defined(CONFIG_KERFUR_ENABLE_NEARBY)
 	SHELL_CMD(nearby, &sub_kerfur_nearby, "Kerfur-to-Kerfur nearby debug commands", NULL),
 #endif

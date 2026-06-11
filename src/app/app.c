@@ -29,7 +29,7 @@ LOG_MODULE_REGISTER(kerfur_app, CONFIG_LOG_DEFAULT_LEVEL);
 
 static void log_pet_snapshot(const struct pet_state *pet, const char *tag)
 {
-	char status[256];
+	char status[384];
 
 	behavior_engine_status_dump(pet, status, sizeof(status));
 	LOG_INF("%s %s", tag, status);

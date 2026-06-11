@@ -5,7 +5,9 @@ Kerfur is an event-driven "smart pet" firmware base for nRF52840 boards running 
 ## Current Capabilities
 
 - Event-driven application core with a central Zephyr message-queue event bus
-- Behavior engine with pet modes, expression scoring, short-lived context/afterglow, and micro-reactions
+- Behavior engine with pet modes, expression scoring, short-lived context/afterglow, micro-reactions, a slow mood axis, sleep inertia, idle micro-life, and personality profiles
+- Emotional memory: attachment / trust / mood / lifetime petting count / personality persist across reboots (settings/NVS)
+- Peer emotional contagion: reactions to other Kerfurs depend on the mode/expression carried in their beacon
 - Modular face renderer driven by generated assets from `assets/face/kerfur_faces.json`
 - LVGL canvas renderer for SSD1306-style 128x64 monochrome displays
 - Display policy with foreground / ambient / off states, contrast changes, ambient pixel shift, and self-wake scheduling
@@ -118,6 +120,13 @@ If `motion0` is not present, the firmware still builds and the motion stack stay
 - [src/behavior/behavior_engine.c](src/behavior/behavior_engine.c) maintains long-lived pet state.
 - It resolves pet mode, expression, intent, and micro-reactions from incoming events and passive time drift.
 - The current state includes carry state, look target/render state, battery flags, walking data, and social state.
+- Emotional layers, fastest to slowest: micro-reactions (seconds) → afterglow context (a minute) → drives (minutes) → mood (hours) → persisted traits (across reboots).
+- [src/behavior/emotion_memory.c](src/behavior/emotion_memory.c) persists the slow traits (attachment, trust, mood, lifetime pets, personality) in one settings/NVS record; saves are throttled (~30 min) plus on charger connect.
+- Personality profiles (balanced / curious / shy / playful / calm) scale how strongly touch, stress, social events, play, and tiredness land — selectable at runtime via `kerfur emotion personality <id>` and persisted.
+- Peer events carry the other Kerfur's mode/expression summary; the engine classifies the peer's "vibe" (resting / bright / strained) and greets accordingly: it doesn't bounce at a sleeping friend, lights up with a happy one, and shows concern for a strained or lonely one.
+- Sleep inertia: leaving deep sleep keeps the pet groggy (sleepy expression bias, no happy-bounce) for 45 s (90 s at night).
+- Idle micro-life: when nothing is happening and the screen is on, the pet occasionally glances around (curious), peeks up (wants attention), or slow-blinks (resting), every ~25–70 s.
+- See [docs/KERFUS_EMOTION_RUNTIME.md](docs/KERFUS_EMOTION_RUNTIME.md) for the full emotional architecture.
 
 3. Motion stack
 - [src/drivers/motion_sensor.c](src/drivers/motion_sensor.c) abstracts the IMU and runtime capabilities.
@@ -128,6 +137,7 @@ If `motion0` is not present, the firmware still builds and the motion stack stay
 - [src/display/display_policy.c](src/display/display_policy.c) drives foreground, ambient, and off transitions.
 - [src/ui/ui_renderer.c](src/ui/ui_renderer.c) renders the face on an LVGL canvas and applies contrast / pixel shift policy.
 - [src/ui/face_runtime.c](src/ui/face_runtime.c) composes recipes, reactions, blink state, pupil movement, indicators, overlays, and effects.
+- Organic micro-life (Stage 5): emotion-aware randomized blink cadence with occasional double blinks and post-reaction settle blinks; wandering idle gaze (pupils drift to a random point, hold, return) plus recipe ambient drift when no real gaze input exists; a slow 1 px breathing bob on mouth/whiskers that continues during sleep; mood/arousal/sleepiness bias eye openness, brows, and mouth.
 - Face assets and recipes are generated during build from `assets/face/kerfur_faces.json` and the SVG sources in `assets/face/`.
 
 5. BLE and nearby
@@ -195,6 +205,7 @@ The most important project-level switches live in [Kconfig](Kconfig):
 - `CONFIG_KERFUR_ENABLE_FACE_SHELL_CMDS`
 - `CONFIG_KERFUR_ENABLE_MOCK_INPUTS`
 - `CONFIG_KERFUR_MOTION`
+- `CONFIG_KERFUR_EMOTION_MEMORY`
 - `CONFIG_KERFUR_TRACE_EVENTS`
 - `CONFIG_KERFUR_FACE_DEBUG`
 
@@ -234,13 +245,23 @@ Nearby debugging:
 
 - `kerfur nearby inject seen <id>`
 - `kerfur nearby inject checking <id>`
-- `kerfur nearby inject near <id> [rssi]`
-- `kerfur nearby inject friend <id>`
-- `kerfur nearby inject unknown <id>`
+- `kerfur nearby inject near <id> [rssi] [expr]`
+- `kerfur nearby inject friend <id> [expr]`
+- `kerfur nearby inject unknown <id> [expr]`
 - `kerfur nearby inject play_invite <id>`
 - `kerfur nearby inject play_ack <id>`
 - `kerfur nearby inject lost <id>`
 - `kerfur nearby end <id> [duration_s]`
+
+The optional `expr` argument (a `pet_expression` id, 0–12) simulates the peer's
+broadcast expression so emotional contagion can be tested: e.g. `5` (SLEEPY)
+yields a quiet greeting, `4` (PLAYFUL) an excited one, `9` (OVERSTIMULATED) a
+concerned one.
+
+Emotional state debugging (always available with shell support):
+
+- `kerfur emotion dump` — print drives, mood, context, intent, grogginess, personality, lifetime pets to the log
+- `kerfur emotion personality <0..4>` — switch personality (0 balanced, 1 curious, 2 shy, 3 playful, 4 calm); persisted via emotional memory
 
 ## Face Authoring Tooling
 

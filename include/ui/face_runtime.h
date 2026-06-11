@@ -166,6 +166,14 @@ struct face_runtime_state {
 	int16_t ctx_openness_bias;
 	int16_t ctx_brow_bias_dy;
 	int16_t ctx_mouth_bias_dy;
+
+	/* Organic micro-life (Stage 5) */
+	bool blink_double_pending;
+	bool wander_active;
+	int16_t wander_x;
+	int16_t wander_y;
+	int64_t wander_next_ms;
+	int64_t wander_hold_until_ms;
 };
 
 void face_runtime_init(struct face_runtime_state *runtime);
