@@ -4,16 +4,24 @@
  * Calibration discipline for the weight table:
  *   - every feature is 0..100;
  *   - score = bias + sum(w * f) / 100;
- *   - per row, bias + sum of positive weights <= ~135 (hard ceiling),
- *     and a *typical* strong state for that emotion should land 60..95;
+ *   - all rows share one envelope: typical winning scores land 40..95,
+ *     extremes stay below ~130. (A row's theoretical positive sum may
+ *     exceed that when its features are strongly correlated — e.g.
+ *     FRESH_PET implies RECENT_PET — the scenario suite is the real
+ *     enforcement, not the column sum.);
  *   - mutually exclusive expressions are separated by their dominant
  *     feature's weight, not by raw scale (the old engine let SLEEPY and
  *     CURIOUS structurally outscore CALM — that class of bug is what
  *     this table fixes).
  *
- * The rows were derived from the legacy hand-tuned formulas so the
- * device's proven "feel" carries over; the table just makes the scales
- * commensurate and puts every number in one reviewable place.
+ * THE NUMBERS BELOW ARE BAKED FROM `tools/appraisal_calibrate.py` — an
+ * executable mirror of this table that runs 20 canonical emotional
+ * scenarios (boot calm, deep night sleep, fresh petting vs settled
+ * contentment, rough handling, notification overload, lonely vs needy,
+ * charging cozy, battery low/critical, fresh walk, unknown vs friend
+ * Kerfur, worn-quiet, groggy wake, soothed stress, bored poke-me) and
+ * asserts the winner and its margin. When changing any weight: edit the
+ * script first, make the suite pass, then copy the numbers here.
  */
 
 #include <zephyr/kernel.h>
@@ -162,7 +170,7 @@ static const struct appraisal_row g_appraisal[PET_EXPR_COUNT] = {
 	},
 	/* CONTENT — secure bond at rest. */
 	[PET_EXPR_CONTENT] = {
-		.bias = 4,
+		.bias = 6,
 		.w = {
 			W(APF_ATTACHMENT, 40), W(APF_TRUST, 38),
 			W(APF_RECENT_PET, 16), W(APF_STRESS, -45),
@@ -170,14 +178,16 @@ static const struct appraisal_row g_appraisal[PET_EXPR_COUNT] = {
 			W(APF_COMFORT, 18),
 		},
 	},
-	/* HAPPY — active joy, spikes right after petting. */
+	/* HAPPY — active joy: spikes after petting, and social warmth +
+	 * arousal let a friend's arrival read as joy, not just play. */
 	[PET_EXPR_HAPPY] = {
 		.bias = 0,
 		.w = {
-			W(APF_ATTACHMENT, 42), W(APF_ENERGY, 28),
-			W(APF_RECENT_PET, 18), W(APF_FRESH_PET, 26),
+			W(APF_ATTACHMENT, 42), W(APF_ENERGY, 24),
+			W(APF_RECENT_PET, 22), W(APF_FRESH_PET, 26),
 			W(APF_STRESS, -45), W(APF_MOOD_HIGH, 16),
 			W(APF_MOOD_LOW, -12), W(APF_COMFORT, 18),
+			W(APF_SOCIAL_WARMTH, 14), W(APF_AROUSAL, 10),
 		},
 	},
 	/* PLAYFUL — high arousal with trust behind it. */
@@ -249,7 +259,7 @@ static const struct appraisal_row g_appraisal[PET_EXPR_COUNT] = {
 	[PET_EXPR_DRAINED] = {
 		.bias = 24,
 		.w = {
-			W(APF_BATT_CRITICAL, 62), W(APF_BATT_LOW, 20),
+			W(APF_BATT_CRITICAL, 62), W(APF_BATT_LOW, 24),
 			W(APF_ENERGY, -24), W(APF_SLEEPINESS, 28),
 		},
 	},
@@ -329,14 +339,15 @@ static const struct situation_policy g_situations[PET_SITUATION_COUNT] = {
 			[PET_EXPR_PLAYFUL] = -10,
 		},
 	},
-	/* Another Kerfur is here — be present for it. */
+	/* Another Kerfur is here — be present for it. Joy outranks raw
+	 * play so a friend's arrival greets, not just bounces. */
 	[PET_SITUATION_SOCIAL] = {
 		.name = "SOCIAL",
 		.allowed_mask = EXPR_ALL_MASK,
 		.bias = {
 			[PET_EXPR_CURIOUS] = 10,
 			[PET_EXPR_HAPPY] = 8,
-			[PET_EXPR_PLAYFUL] = 6,
+			[PET_EXPR_PLAYFUL] = 3,
 			[PET_EXPR_SLEEPY] = -10,
 			[PET_EXPR_LONELY] = -25,
 			[PET_EXPR_NEEDY] = -15,

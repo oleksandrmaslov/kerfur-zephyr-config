@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Appraisal weight calibration / regression harness for Kerfus.
+
+Mirrors the integer scoring math of src/behavior/appraisal.c exactly
+(C division truncates toward zero) and runs a suite of canonical
+emotional scenarios. Each scenario states which expression must win the
+appraisal and by what minimum margin over the runner-up.
+
+Usage:
+    python tools/appraisal_calibrate.py            # run the suite
+    python tools/appraisal_calibrate.py --table    # dump score tables
+
+When tuning: edit WEIGHTS / BIAS / SITUATION_BIAS here first, make the
+suite pass, then copy the numbers into src/behavior/appraisal.c (and
+keep both in sync — this file is the executable spec for that table).
+"""
+
+import argparse
+import sys
+
+# ── Expression / feature / situation vocabulary (mirror pet_state.h) ──
+
+EXPRS = [
+    "CALM", "CURIOUS", "CONTENT", "HAPPY", "PLAYFUL", "SLEEPY",
+    "NEEDY", "LONELY", "ANNOYED", "OVERSTIMULATED", "COZY",
+    "DRAINED", "ASLEEP",
+]
+
+FEATURES = [
+    "ENERGY", "SLEEPINESS", "ATTACHMENT", "BOREDOM", "STRESS", "AROUSAL",
+    "SOCIAL_LOAD", "TRUST", "CURIOSITY", "MOOD_HIGH", "MOOD_LOW",
+    "COMFORT", "STIMULATION", "SOCIAL_WARMTH", "FRESH_PET", "RECENT_PET",
+    "RECENT_MOTION", "RECENT_NOTIF", "ROUGH_RECENT", "NEGLECT",
+    "LONG_DISCONNECT", "NIGHT", "GROGGY", "BATT_LOW", "BATT_CRITICAL",
+    "CHARGING", "WALK_NOVELTY", "BURST",
+]
+
+SITUATIONS = ["RESTING", "ENGAGED", "WORN_QUIET", "WORN_LIVELY",
+              "CHARGING", "SOCIAL"]
+
+# ── Weight table (the numbers under calibration) ─────────────────────
+
+BIAS = {
+    "CALM": 52, "CURIOUS": 6, "CONTENT": 6, "HAPPY": 0, "PLAYFUL": 0,
+    "SLEEPY": 0, "NEEDY": 6, "LONELY": 0, "ANNOYED": 8,
+    "OVERSTIMULATED": 0, "COZY": 8, "DRAINED": 24, "ASLEEP": -100,
+}
+
+WEIGHTS = {
+    "CALM": {"STRESS": -85, "SOCIAL_LOAD": -40, "BOREDOM": -22,
+             "ENERGY": 22, "MOOD_HIGH": 10, "MOOD_LOW": -8,
+             "STIMULATION": -12, "NIGHT": 4},
+    "CURIOUS": {"CURIOSITY": 62, "RECENT_NOTIF": 14, "RECENT_MOTION": 11,
+                "WALK_NOVELTY": 16, "STIMULATION": 10, "SLEEPINESS": -30},
+    "CONTENT": {"ATTACHMENT": 40, "TRUST": 38, "RECENT_PET": 16,
+                "STRESS": -45, "MOOD_HIGH": 12, "MOOD_LOW": -8,
+                "COMFORT": 18},
+    "HAPPY": {"ATTACHMENT": 42, "ENERGY": 24, "RECENT_PET": 22,
+              "FRESH_PET": 26, "STRESS": -45, "MOOD_HIGH": 16,
+              "MOOD_LOW": -12, "COMFORT": 18, "SOCIAL_WARMTH": 14,
+              "AROUSAL": 10},
+    "PLAYFUL": {"AROUSAL": 75, "TRUST": 28, "WALK_NOVELTY": 12,
+                "MOOD_HIGH": 10, "MOOD_LOW": -8, "BATT_LOW": -20,
+                "STIMULATION": 10, "SLEEPINESS": -15},
+    "SLEEPY": {"SLEEPINESS": 78, "AROUSAL": -18, "NIGHT": 8,
+               "NEGLECT": 10, "GROGGY": 14, "CHARGING": 6},
+    "NEEDY": {"BOREDOM": 55, "ATTACHMENT": 18, "RECENT_PET": -20,
+              "NEGLECT": 18, "MOOD_LOW": 10, "MOOD_HIGH": -6,
+              "SOCIAL_WARMTH": -22, "COMFORT": -16},
+    "LONELY": {"BOREDOM": 48, "LONG_DISCONNECT": 20, "RECENT_MOTION": -10,
+               "NEGLECT": 26, "MOOD_LOW": 14, "MOOD_HIGH": -10,
+               "SOCIAL_WARMTH": -22, "COMFORT": -14},
+    "ANNOYED": {"STRESS": 70, "ROUGH_RECENT": 24, "TRUST": -16,
+                "MOOD_LOW": 8, "MOOD_HIGH": -6, "STIMULATION": 14},
+    "OVERSTIMULATED": {"SOCIAL_LOAD": 60, "BURST": 35, "AROUSAL": 25,
+                       "STIMULATION": 18},
+    "COZY": {"CHARGING": 52, "STRESS": -30, "RECENT_PET": 10,
+             "COMFORT": 24, "SLEEPINESS": 8, "NIGHT": 4},
+    "DRAINED": {"BATT_CRITICAL": 62, "BATT_LOW": 24, "ENERGY": -24,
+                "SLEEPINESS": 28},
+    "ASLEEP": {},
+}
+
+SITUATION_BIAS = {
+    "RESTING": {"CALM": 6, "SLEEPY": 4},
+    "ENGAGED": {"CURIOUS": 8, "HAPPY": 6, "PLAYFUL": 6, "SLEEPY": -10,
+                "LONELY": -20, "NEEDY": -10},
+    "WORN_QUIET": {"CALM": 8, "CONTENT": 4},
+    "WORN_LIVELY": {"CURIOUS": 6, "PLAYFUL": 4, "LONELY": -15,
+                    "NEEDY": -10},
+    "CHARGING": {"COZY": 10, "CALM": 6, "SLEEPY": 4, "PLAYFUL": -10},
+    "SOCIAL": {"CURIOUS": 10, "HAPPY": 8, "PLAYFUL": 3, "SLEEPY": -10,
+               "LONELY": -25, "NEEDY": -15},
+}
+
+ALLOWED = {
+    "WORN_QUIET": {"CALM", "CONTENT", "CURIOUS", "SLEEPY", "DRAINED",
+                   "ASLEEP"},
+}
+
+# Intent alignment bonuses (mirror intent_alignment_bonus in the engine),
+# expressed as (expr -> divisor of intent strength).
+INTENT_BONUS = {
+    "REST": {"SLEEPY": 6, "COZY": 7, "CALM": 9},
+    "PLAY": {"PLAYFUL": 5, "HAPPY": 7},
+    "OBSERVE": {"CURIOUS": 5, "CALM": 9},
+    "SEEK_ATTENTION": {"NEEDY": 6, "LONELY": 8},
+    "WITHDRAW": {"ANNOYED": 6, "OVERSTIMULATED": 7},
+    "SELF_SOOTHE": {"CONTENT": 6, "CALM": 7},
+}
+
+
+def trunc_div(a, b):
+    """C-style integer division (truncate toward zero)."""
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b >= 0) else -q
+
+
+def score(expr, situation, feats, intent=None, intent_strength=0):
+    acc = 0
+    for f, w in WEIGHTS[expr].items():
+        acc += w * feats.get(f, 0)
+    s = BIAS[expr] + SITUATION_BIAS[situation].get(expr, 0) + trunc_div(acc, 100)
+    if intent and expr in INTENT_BONUS.get(intent, {}):
+        s += trunc_div(intent_strength, INTENT_BONUS[intent][expr])
+    return s
+
+
+def allowed(expr, situation):
+    if expr == "CALM":
+        return True
+    return expr in ALLOWED.get(situation, set(EXPRS))
+
+
+def rank(situation, feats, intent=None, intent_strength=0):
+    rows = []
+    for e in EXPRS:
+        s = score(e, situation, feats, intent, intent_strength) \
+            if allowed(e, situation) else -1000
+        rows.append((s, e))
+    rows.sort(reverse=True)
+    return rows
+
+
+# ── Scenario suite ────────────────────────────────────────────────────
+
+BOOT = {  # behavior_engine_init seed, afterglow empty, nothing recent
+    "ENERGY": 72, "SLEEPINESS": 22, "ATTACHMENT": 50, "BOREDOM": 20,
+    "STRESS": 18, "AROUSAL": 30, "SOCIAL_LOAD": 10, "TRUST": 55,
+    "CURIOSITY": 45, "MOOD_HIGH": 4, "MOOD_LOW": 0,
+}
+
+
+def F(**over):
+    feats = dict.fromkeys(FEATURES, 0)
+    feats.update(BOOT)
+    feats.update(over)
+    return feats
+
+
+# (name, situation, features, intent, strength, expected winner,
+#  min margin over runner-up, allowed runners-up that may sit close)
+SCENARIOS = [
+    ("boot idle desk", "RESTING", F(), None, 0,
+     "CALM", 8, ()),
+
+    ("deep sleepy night", "RESTING",
+     F(SLEEPINESS=85, AROUSAL=12, NEGLECT=100, NIGHT=100, ENERGY=40),
+     "REST", 60, "SLEEPY", 10, ()),
+
+    ("drowsy evening", "RESTING",
+     F(SLEEPINESS=70, AROUSAL=22, NEGLECT=40, NIGHT=100),
+     None, 0, "SLEEPY", 3, ("CALM",)),
+
+    ("fresh petting (30 s after, warm)", "ENGAGED",
+     F(ATTACHMENT=72, TRUST=68, STRESS=8, RECENT_PET=95, FRESH_PET=0,
+       COMFORT=55, STIMULATION=25, AROUSAL=45, MOOD_HIGH=24),
+     None, 0, "HAPPY", 4, ("CONTENT",)),
+
+    ("after petting (8 min, settled)", "RESTING",
+     F(ATTACHMENT=70, TRUST=68, STRESS=8, RECENT_PET=20, COMFORT=10,
+       AROUSAL=25, MOOD_HIGH=20),
+     None, 0, "CONTENT", 3, ("CALM", "HAPPY")),
+
+    ("playful in hand", "ENGAGED",
+     F(AROUSAL=70, TRUST=62, STIMULATION=42, ENERGY=70, CURIOSITY=55,
+       RECENT_MOTION=80, MOOD_HIGH=16),
+     "PLAY", 60, "PLAYFUL", 5, ()),
+
+    ("rough handled", "RESTING",
+     F(STRESS=62, ROUGH_RECENT=90, TRUST=32, MOOD_LOW=28, AROUSAL=55,
+       STIMULATION=60, RECENT_MOTION=100),
+     "WITHDRAW", 50, "ANNOYED", 8, ()),
+
+    ("notification overload", "RESTING",
+     F(SOCIAL_LOAD=72, BURST=60, AROUSAL=62, STIMULATION=75,
+       RECENT_NOTIF=100, STRESS=42, CURIOSITY=50),
+     "WITHDRAW", 40, "OVERSTIMULATED", 6, ()),
+
+    ("lonely afternoon", "RESTING",
+     F(BOREDOM=70, NEGLECT=100, LONG_DISCONNECT=100, MOOD_LOW=24,
+       SLEEPINESS=35, ENERGY=55),
+     "SEEK_ATTENTION", 50, "LONELY", 4, ("NEEDY",)),
+
+    ("needy but connected", "RESTING",
+     F(BOREDOM=62, NEGLECT=65, ATTACHMENT=72, MOOD_LOW=12,
+       SLEEPINESS=30, ENERGY=60),
+     "SEEK_ATTENTION", 45, "NEEDY", 3, ("LONELY",)),
+
+    ("charging cozy", "CHARGING",
+     F(CHARGING=100, COMFORT=40, STRESS=10, SLEEPINESS=48, AROUSAL=18),
+     "REST", 40, "COZY", 6, ()),
+
+    ("battery low and tired", "RESTING",
+     F(BATT_LOW=100, ENERGY=28, SLEEPINESS=60, AROUSAL=18, NEGLECT=60),
+     None, 0, "DRAINED", 3, ("SLEEPY",)),
+
+    ("battery critical", "RESTING",
+     F(BATT_CRITICAL=100, BATT_LOW=100, ENERGY=8, SLEEPINESS=70,
+       AROUSAL=10),
+     None, 0, "DRAINED", 15, ()),
+
+    ("fresh walk, curious", "WORN_LIVELY",
+     F(WALK_NOVELTY=100, CURIOSITY=62, STIMULATION=30, RECENT_MOTION=100,
+       AROUSAL=45, ENERGY=68),
+     "OBSERVE", 50, "CURIOUS", 5, ()),
+
+    ("unknown kerfur nearby", "SOCIAL",
+     F(CURIOSITY=68, SOCIAL_WARMTH=35, STIMULATION=38, AROUSAL=48,
+       RECENT_MOTION=50, SOCIAL_LOAD=20),
+     "OBSERVE", 55, "CURIOUS", 5, ()),
+
+    ("friend kerfur encounter", "SOCIAL",
+     F(CURIOSITY=55, SOCIAL_WARMTH=70, COMFORT=35, STIMULATION=40,
+       AROUSAL=52, ATTACHMENT=68, TRUST=62, MOOD_HIGH=30, ENERGY=65),
+     None, 0, "HAPPY", 3, ("CURIOUS", "CONTENT", "PLAYFUL")),
+
+    ("worn quiet, content day", "WORN_QUIET",
+     F(ATTACHMENT=60, TRUST=60, MOOD_HIGH=14, SLEEPINESS=35,
+       RECENT_MOTION=100, STIMULATION=10),
+     None, 0, "CALM", 3, ("CONTENT",)),
+
+    ("groggy wake-up", "RESTING",
+     F(SLEEPINESS=74, AROUSAL=34, GROGGY=100, STIMULATION=15,
+       RECENT_MOTION=100),
+     "REST", 40, "SLEEPY", 6, ()),
+
+    ("stressed then comforted", "ENGAGED",
+     F(STRESS=42, COMFORT=60, ATTACHMENT=62, TRUST=60, RECENT_PET=75,
+       FRESH_PET=0, AROUSAL=35, MOOD_HIGH=8),
+     "SELF_SOOTHE", 45, "CONTENT", 3, ("HAPPY",)),
+
+    ("bored midday poke-me", "RESTING",
+     F(BOREDOM=48, NEGLECT=45, CURIOSITY=30, SLEEPINESS=30, ENERGY=60),
+     None, 0, "NEEDY", -2, ("CALM",)),  # near-tie with CALM is fine
+]
+
+
+def run_suite(verbose=False):
+    failures = 0
+    for (name, sit, feats, intent, strength, want, margin, near_ok) \
+            in SCENARIOS:
+        rows = rank(sit, feats, intent, strength)
+        win_score, winner = rows[0]
+        runner_score, runner = rows[1]
+        ok = winner == want and (win_score - runner_score) >= margin
+        if winner == want and runner in near_ok and \
+                (win_score - runner_score) >= 0:
+            ok = ok or (win_score - runner_score) >= min(margin, 0)
+        status = "ok  " if ok else "FAIL"
+        if not ok:
+            failures += 1
+        print(f"[{status}] {name:34s} ({sit:11s}) -> "
+              f"{winner} {win_score} | {runner} {runner_score} "
+              f"(want {want} +{margin})")
+        if verbose or not ok:
+            top = ", ".join(f"{e}={s}" for s, e in rows[:5])
+            print(f"        {top}")
+    print()
+    if failures:
+        print(f"{failures} scenario(s) FAILED")
+        return 1
+    print(f"all {len(SCENARIOS)} scenarios pass")
+    return 0
+
+
+def dump_tables():
+    for sit in SITUATIONS:
+        print(f"=== {sit} (boot state) ===")
+        for s, e in rank(sit, F()):
+            print(f"  {e:15s} {s}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--table", action="store_true")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args()
+    if args.table:
+        dump_tables()
+        return 0
+    return run_suite(args.verbose)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
