@@ -88,6 +88,54 @@ Face codegen needs Python `Pillow` + (`cairosvg` or local Chrome).
 **Run without hardware:** set `CONFIG_KERFUR_ENABLE_MOCK_INPUTS=y` and/or drive
 the `kerfur` shell (`face …`, `nearby inject …`, battery injection).
 
+## 5a. What changed 2026-06-12 — scoring + motion production rework
+
+Owner direction: the old expression scoring had production-grade flaws
+(incommensurate scales, magic numbers in a switch, no notion of situation),
+and the motion stack did not understand the real product: a **keychain worn
+on jeans/backpack** that must still recognize being taken into the hand.
+Both were reworked (clean-break approved; built nothing — owner builds):
+
+- **Hybrid context + table scoring.** New `src/behavior/appraisal.c`:
+  normalized 0..100 feature vector (28 features) × one calibrated weight
+  table per expression; deterministic situation layer
+  (CHARGING > SOCIAL > ENGAGED > WORN_QUIET/WORN_LIVELY > RESTING) adds
+  per-situation biases and allowed-expression masks. The 170-line
+  `score_for_expression()` switch is gone; intent alignment, transition
+  affinity, hysteresis and the petting/asleep overrides remain in the
+  engine. All scoring tuning now lives in `appraisal.c`.
+- **Carry context** (`enum pet_carry_context` in pet_state, resolved by the
+  motion stack, published as `APP_EVENT_CARRY_CONTEXT_CHANGED` + extended
+  carry payload): ON_SURFACE / IN_HAND / WORN / TRANSITION / UNKNOWN.
+- **WORN detection** (`in_hand_detector.c`, heavily reworked): worn evidence
+  accumulator fed by gait cadence + new swing-periodicity feature
+  (`compute_swing_score` — zero-crossing regularity of gravity-projected
+  bounce); sticky while the owner sits still; exits to surface/in-hand only.
+  **Grab capture**: while worn, pickup/in-hand evidence is gated behind the
+  dangle-oscillation-collapse signature, so body bounce can never become a
+  phantom pickup but a real grab is recognized in ~1–2 s.
+- **Worn sanity**: SHAKE_LIGHT/PLAY never fire worn; ROUGH/IMPACT need
+  ~1.4× energy; MOTION_WAKE app events suppressed while worn (wake line
+  still opens short evaluation bursts); new `MODE_WORN_WATCH` classifier
+  mode (150 ms heartbeat, hw step counter alive) replaces the old behavior
+  of burning full-rate active windows on every step.
+- **Worn style configurable** (owner chose "both modes"):
+  `CONFIG_KERFUR_WORN_EXPRESSIVE` default + `kerfur emotion worn
+  <quiet|expressive>` persisted in emotional memory (flags byte, layout
+  unchanged). Quiet (default): display rests, motion/notification wakes and
+  idle quirks suppressed, steps/peers/grabs/touch/charger still act.
+  New `PET_MODE_WORN` (beacon value 9, append-only).
+- Display policy worn handling; `kerfur face carry … [ctx]` injection;
+  emotion dump now prints carry context + situation + worn style.
+- Docs: `KERFUS_EMOTION_RUNTIME.md` §1a/§1b (situation/appraisal + carry),
+  README updated. All new code line-by-line traced, not compiled.
+- **Known limitations for the next agent**: grab-while-walking is detected
+  late (capture needs the swing to collapse — usually when the owner stops
+  or holds it steady); boards without a hw step counter lose sw step
+  detection in `MODE_WORN_WATCH` (low sample rate); swing detection
+  freezes (decays) during worn-watch and re-measures during bursts. The
+  worn thresholds (`WORN_*`, `GRAB_*`, `SWING_*`) need on-body tuning.
+
 ## 5. What changed in this session (2026-06-11 — emotion runtime rework)
 
 Goal: make Kerfus feel genuinely alive, contextual, and emotionally present.

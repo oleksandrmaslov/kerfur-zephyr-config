@@ -5,8 +5,9 @@ Kerfur is an event-driven "smart pet" firmware base for nRF52840 boards running 
 ## Current Capabilities
 
 - Event-driven application core with a central Zephyr message-queue event bus
-- Behavior engine with pet modes, expression scoring, short-lived context/afterglow, micro-reactions, a slow mood axis, sleep inertia, idle micro-life, and personality profiles
-- Emotional memory: attachment / trust / mood / lifetime petting count / personality persist across reboots (settings/NVS)
+- Behavior engine with pet modes, a deterministic situation layer (resting / engaged / worn / charging / social), normalized table-driven expression appraisal, short-lived context/afterglow, micro-reactions, a slow mood axis, sleep inertia, idle micro-life, and personality profiles
+- Carry-context motion stack for a worn keychain: ON_SURFACE / IN_HAND / WORN resolution with swing-periodicity worn detection, grab-capture in-hand recognition, worn-gated shake events, and a low-power worn-watch sampling mode
+- Emotional memory: attachment / trust / mood / lifetime petting count / personality / worn style persist across reboots (settings/NVS)
 - Peer emotional contagion: reactions to other Kerfurs depend on the mode/expression carried in their beacon
 - Modular face renderer driven by generated assets from `assets/face/kerfur_faces.json`
 - LVGL canvas renderer for SSD1306-style 128x64 monochrome displays
@@ -121,6 +122,8 @@ If `motion0` is not present, the firmware still builds and the motion stack stay
 - It resolves pet mode, expression, intent, and micro-reactions from incoming events and passive time drift.
 - The current state includes carry state, look target/render state, battery flags, walking data, and social state.
 - Emotional layers, fastest to slowest: micro-reactions (seconds) → afterglow context (a minute) → drives (minutes) → mood (hours) → persisted traits (across reboots).
+- A deterministic situation layer (charging > social > in-hand > worn > resting) selects how the emotional state may show; [src/behavior/appraisal.c](src/behavior/appraisal.c) then scores expressions from a normalized 0–100 feature vector against one calibrated weight table (all scoring tuning lives in that file).
+- Carry context (`ON_SURFACE` / `IN_HAND` / `WORN`) comes from the motion stack: worn keychains are detected by gait-band swing periodicity, stay sticky while the owner sits still, and recognize a grab through the dangle oscillation collapsing (see [src/drivers/in_hand_detector.c](src/drivers/in_hand_detector.c)). Worn style is configurable: quiet companion (default — screen rests in the pocket, steps and peers still count) or expressive (`kerfur emotion worn …`, `CONFIG_KERFUR_WORN_EXPRESSIVE`).
 - [src/behavior/emotion_memory.c](src/behavior/emotion_memory.c) persists the slow traits (attachment, trust, mood, lifetime pets, personality) in one settings/NVS record; saves are throttled (~30 min) plus on charger connect.
 - Personality profiles (balanced / curious / shy / playful / calm) scale how strongly touch, stress, social events, play, and tiredness land — selectable at runtime via `kerfur emotion personality <id>` and persisted.
 - Peer events carry the other Kerfur's mode/expression summary; the engine classifies the peer's "vibe" (resting / bright / strained) and greets accordingly: it doesn't bounce at a sleeping friend, lights up with a happy one, and shows concern for a strained or lonely one.
@@ -206,6 +209,7 @@ The most important project-level switches live in [Kconfig](Kconfig):
 - `CONFIG_KERFUR_ENABLE_MOCK_INPUTS`
 - `CONFIG_KERFUR_MOTION`
 - `CONFIG_KERFUR_EMOTION_MEMORY`
+- `CONFIG_KERFUR_WORN_EXPRESSIVE`
 - `CONFIG_KERFUR_TRACE_EVENTS`
 - `CONFIG_KERFUR_FACE_DEBUG`
 
@@ -260,8 +264,11 @@ concerned one.
 
 Emotional state debugging (always available with shell support):
 
-- `kerfur emotion dump` — print drives, mood, context, intent, grogginess, personality, lifetime pets to the log
+- `kerfur emotion dump` — print drives, mood, context, intent, grogginess, personality, lifetime pets, carry context, and situation to the log
 - `kerfur emotion personality <0..4>` — switch personality (0 balanced, 1 curious, 2 shy, 3 playful, 4 calm); persisted via emotional memory
+- `kerfur emotion worn <quiet|expressive>` — switch the worn style; persisted via emotional memory
+
+Carry-context injection (face debug shell): `kerfur face carry <in_hand> <pickup> <inhand_conf> <walk_conf> [ctx]` where ctx is 0 unknown / 1 surface / 2 in-hand / 3 worn / 4 transition.
 
 ## Face Authoring Tooling
 

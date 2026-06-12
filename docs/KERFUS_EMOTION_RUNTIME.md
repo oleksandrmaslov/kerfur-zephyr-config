@@ -1,8 +1,10 @@
 # Kerfus Emotion Runtime
 
-> How the emotional core works after the 2026-06-11 rework.
-> Code: `src/behavior/behavior_engine.c`, `src/behavior/emotion_memory.c`,
-> `src/behavior/micro_reaction.c`, `src/ui/face_runtime.c`.
+> How the emotional core works after the 2026-06-11/12 reworks.
+> Code: `src/behavior/behavior_engine.c`, `src/behavior/appraisal.c`,
+> `src/behavior/emotion_memory.c`, `src/behavior/micro_reaction.c`,
+> `src/ui/face_runtime.c`; carry context from
+> `src/drivers/in_hand_detector.c` + `src/drivers/motion_classifier.c`.
 > Product law: `CLAUDE.md` — "Kerfus is a tiny emotional social companion that
 > feels alive, reacts contextually and helps turn digital events into real
 > human connection."
@@ -17,12 +19,81 @@
 | Afterglow context | `behavior_engine.c` runtime (`stimulation`, `comfort`, `social_warmth`) | ~1 min | Emotional momentum: what just happened colors what happens next |
 | Drives | `pet_state` (energy, sleepiness, attachment, boredom, stress, arousal, social_load, trust, curiosity) | minutes | The classic needs/arousal model; decays via 1 s / 10 s / 60 s / 5 min / 30 min ticks |
 | Mood | `pet_state.mood` (0–100, 50 = neutral) | hours | Day-scale valence/temperament: how life has felt lately |
-| Persisted traits | settings/NVS via `emotion_memory.c` | across reboots | Attachment, trust, mood, lifetime petting count, personality — "it is still the same pet" |
+| Persisted traits | settings/NVS via `emotion_memory.c` | across reboots | Attachment, trust, mood, lifetime petting count, personality, worn style — "it is still the same pet" |
 | Intent | runtime (`REST/SEEK_ATTENTION/OBSERVE/PLAY/SELF_SOOTHE/WITHDRAW`) | ~5 s resolution, hysteresis | A behavioral "leaning" that biases expression choice and idle behavior |
+
+Orthogonal to the timescales, a deterministic **situation layer** (§1a)
+decides *where the pet is living right now* and selects how the emotional
+state is allowed to show.
 
 Doc-vocabulary mapping (CLAUDE.md §7 ↔ code): mood↔mood, affection↔attachment,
 social_interest↔social_load/social_warmth, alertness↔arousal,
 tiredness/sleepiness↔sleepiness, plus boredom/trust/curiosity as extensions.
+
+## 1a. Situation layer + normalized appraisal (production scoring)
+
+The old per-expression formulas mixed incommensurate scales (SLEEPY could
+reach ~138 while CALM topped out near 85) and buried ~60 magic numbers in a
+switch. They were replaced by a hybrid **context + table** design:
+
+1. **Situation resolver** (`resolve_situation`, deterministic priority
+   ladder): CHARGING > SOCIAL (peer present) > ENGAGED (in hand) >
+   WORN_QUIET / WORN_LIVELY (carry context WORN, by worn style) > RESTING.
+2. **Feature vector** (`appraisal_compute_features`): every input is
+   normalized to 0..100 — drives pass through, recencies become linear
+   ramps (fresh-pet 8 s, neglect 2→30 min, …), booleans become 0/100.
+3. **Weight table** (`g_appraisal[expr]` in `appraisal.c`):
+   `score = bias + Σ(weight × feature)/100`, every row calibrated to the
+   same envelope (typical winning scores 40..90, ceiling ~130). All tuning
+   lives in this one table.
+4. **Situation policy** (`g_situations[]`): per-situation additive bias
+   (e.g. ENGAGED leans HAPPY/CURIOUS and forbids LONELY from winning —
+   being held *is* attention) and an allowed-expression mask
+   (WORN_QUIET only shows CALM/CONTENT/CURIOUS/SLEEPY/DRAINED/ASLEEP).
+   CALM is always allowed (guaranteed fallback).
+5. The engine keeps **intent alignment, transition affinity and
+   hysteresis** on top, and the petting/asleep/forced overrides still win.
+
+`appraisal.c` is pure (no globals, no time reads) — unit-test it off-target.
+
+## 1b. Carry context: ON_SURFACE / IN_HAND / WORN (keychain reality)
+
+The motion stack resolves `pet_state.carry_context` — see §11 of
+`02_SOFTWARE_REQUIREMENTS…` ("pocket_motion") and the keychain product
+reality: Kerfus hangs from jeans or a backpack most of the day.
+
+- **WORN detection** (`in_hand_detector.c`): a worn evidence accumulator
+  charged by gait cadence and **swing periodicity** (`compute_swing_score`
+  in the classifier: zero-crossing regularity of the gravity-projected
+  bounce in the 0.7–3 Hz band). Worn is sticky — a keychain on a sitting
+  owner is still worn — and exits only to a confirmed surface, an in-hand
+  capture, or after a long ambiguous quiet stretch.
+- **Grab capture**: while WORN, pickup/in-hand evidence is *gated*. It can
+  only accumulate inside a capture window opened by the dangle oscillation
+  collapsing below its rolling baseline while orientation stabilizes (a
+  hand damps the swing), or by sustained calm hand-like motion. This is
+  what makes "grabbed off the bag" fast and reliable while body bounce can
+  never become a phantom pickup.
+- **Shake sanity while worn**: SHAKE_LIGHT/SHAKE_PLAY are never emitted
+  while worn; SHAKE_ROUGH/IMPACT need ~1.4× the energy (real drops still
+  register). The wake interrupt stops spamning MOTION_WAKE while worn.
+- **Power**: a worn-but-quiet device sits in `MODE_WORN_WATCH` (slow
+  classification heartbeat, hw step counter alive) instead of burning
+  full-rate active windows on every step.
+
+Worn style is configurable (`CONFIG_KERFUR_WORN_EXPRESSIVE` default +
+`kerfur emotion worn <quiet|expressive>`, persisted in emotional memory):
+
+- **quiet** (default): screen rests in the pocket; motion/notification
+  display wake-ups and idle quirks are suppressed; steps keep feeding
+  mood/boredom; peers, grabs, deliberate touch and the charger still wake
+  the face ("First Kerfus meet each other" works from a backpack).
+- **expressive**: ambient companionship while dangling; everything wakes
+  the face as usual.
+
+Context edges are events (`APP_EVENT_CARRY_CONTEXT_CHANGED`) with small
+emotional meaning: clipping on = a bit of adventure; being grabbed off the
+bag = warmth + wake blink; set down = settle.
 
 ## 2. Mood (slow valence)
 
@@ -158,9 +229,15 @@ reactions, expression transitions, blinking (for gaze), battery-low/critical
 
 - `kerfur emotion dump` → logs `Face dump …` + `Emotion dump E=.. Sl=.. At=..
   Bo=.. St=.. Ar=.. So=.. Tr=.. Cu=.. Mo=..(acc=..) ctx=s/c/w intent=..
-  groggy=.. pers=.. pets=..` (the CLAUDE.md §15 "emotion print").
+  groggy=.. pers=.. pets=.. carry=..(..) sit=.. worn_style=..` (the
+  CLAUDE.md §15 "emotion print").
 - `kerfur emotion personality <0..4>` → switch + persist personality.
+- `kerfur emotion worn <quiet|expressive>` → switch + persist worn style.
 - `kerfur nearby inject near|friend|unknown … [expr]` → contagion testing.
+- `kerfur face carry <in_hand> <pickup> <inhand> <walk> [ctx 0-4]` →
+  carry-context injection (3 = WORN) for situation testing without an IMU.
+- Motion debug logging (`kerfur face motion conf_log on`) now includes
+  `swing= worn=` columns.
 - Heartbeat status line (`CONFIG_KERFUR_TRACE_EVENTS`) now includes
   `Ar= So= Mo= pers=`.
 
@@ -168,6 +245,7 @@ reactions, expression transitions, blinking (for gaze), battery-low/critical
 
 | What | Where |
 |------|-------|
+| **Expression weights / situation biases / masks** | `g_appraisal[]`, `g_situations[]` in `src/behavior/appraisal.c` (the one place for scoring tuning) |
 | Mood rate limit / accumulator bound | `MOOD_ACCUM_LIMIT`, transfer code in `apply_tick_60s` |
 | Mood event nudges | `nudge_mood(...)` calls in `apply_event` |
 | Personality table | `g_personalities[]` |
@@ -177,14 +255,28 @@ reactions, expression transitions, blinking (for gaze), battery-low/critical
 | Blink cadence/jitter | `next_blink_delay_ms`, double-blink chances in `update_blink_state` |
 | Wander range/cadence | `FACE_WANDER_RANGE`, `update_wander` |
 | Breathing period | `breathing_offset` |
+| Worn enter/exit, grab capture | `WORN_*` / `GRAB_*` in `in_hand_detector.c` |
+| Swing periodicity band | `SWING_*` in `motion_classifier.c` |
+| Worn heartbeat / burst length | `WORN_POLL_MS`, `WORN_ACTIVE_BURST_MS` |
+| Worn shake thresholds | worn-scaled constants in `check_shake` |
 
 ## 10. Invariants (do not break)
 
 - Mood changes only through the accumulator (rate-limited); never write
   `state->mood` directly from an event handler.
 - Personality IDs and the emotion-memory record layout are persisted:
-  append, never reorder; bump `EMOTION_MEMORY_VERSION` on layout change.
+  append, never reorder; bump `EMOTION_MEMORY_VERSION` on layout change
+  (the flags byte reuses an old reserved byte — old records read as 0 =
+  quiet worn style, by design).
 - Emotional logic stays out of drivers; contagion reads only the anonymous
   beacon summary already broadcast (privacy rule, CLAUDE.md §12).
 - Idle micro-life must stay subtle: long randomized intervals, suppressed on
   low battery and while anything else is happening.
+- Appraisal calibration: every weight row stays on the shared envelope
+  (bias + positive weights ≤ ~135); `appraisal.c` stays pure (no globals,
+  no clock) so it remains unit-testable.
+- While WORN, pickup/in-hand evidence may only accumulate inside a grab
+  window; SHAKE_LIGHT/PLAY are never emitted worn. Body bounce must never
+  become a pickup, a play shake, or a full-rate sampling loop.
+- `enum pet_mode` values ride in the nearby beacon (4 bits) — append only
+  (PET_MODE_WORN = 9).
