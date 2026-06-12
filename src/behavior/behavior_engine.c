@@ -33,6 +33,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/sys/util.h>
 
+#include "behavior/appraisal.h"
 #include "behavior/behavior_engine.h"
 #include "behavior/emotion_memory.h"
 #include "behavior/micro_reaction.h"
@@ -117,9 +118,13 @@ struct behavior_runtime {
 	struct emotion_memory last_saved_memory;
 	int64_t last_memory_save_ms;
 	uint32_t lifetime_pets;
+	bool worn_style_loaded;
 };
 
 static struct behavior_runtime g_runtime;
+
+/* Defined with the scoring layer below; used by gating helpers above it. */
+static enum pet_situation resolve_situation(const struct pet_state *state);
 
 /* ── Utility helpers ─────────────────────────────────────────────── */
 
@@ -411,6 +416,7 @@ static void fill_memory_record(const struct pet_state *state, struct emotion_mem
 	out->trust = state->trust;
 	out->mood = state->mood;
 	out->lifetime_pets = g_runtime.lifetime_pets;
+	out->worn_expressive = state->worn_expressive;
 }
 
 static bool memory_changed_enough(const struct emotion_memory *cur,
@@ -420,6 +426,7 @@ static bool memory_changed_enough(const struct emotion_memory *cur,
 	       (trait_delta(cur->trust, saved->trust) >= 3) ||
 	       (trait_delta(cur->mood, saved->mood) >= 4) ||
 	       (cur->personality != saved->personality) ||
+	       (cur->worn_expressive != saved->worn_expressive) ||
 	       ((cur->lifetime_pets - saved->lifetime_pets) >= 10U);
 }
 
@@ -474,6 +481,17 @@ static void schedule_idle_quirk(const struct pet_state *state, int64_t now_ms)
 	g_runtime.next_idle_quirk_ms = now_ms + delay_ms;
 }
 
+static bool situation_allows_idle_quirks(const struct pet_state *state)
+{
+	switch (resolve_situation(state)) {
+	case PET_SITUATION_WORN_QUIET: /* dark screen on a bag strap */
+	case PET_SITUATION_SOCIAL:     /* busy with another Kerfur */
+		return false;
+	default:
+		return true;
+	}
+}
+
 static void maybe_idle_quirk(struct pet_state *state, int64_t now_ms)
 {
 	enum micro_reaction_type pick;
@@ -492,8 +510,10 @@ static void maybe_idle_quirk(struct pet_state *state, int64_t now_ms)
 	    state->in_hand || state->walking_active ||
 	    (state->current_reaction != REACTION_NONE) ||
 	    (g_runtime.ctx.stimulation >= 12) ||
+	    !situation_allows_idle_quirks(state) ||
 	    ((state->current_mode != PET_MODE_IDLE) &&
-	     (state->current_mode != PET_MODE_DROWSY))) {
+	     (state->current_mode != PET_MODE_DROWSY) &&
+	     (state->current_mode != PET_MODE_WORN))) {
 		schedule_idle_quirk(state, now_ms);
 		return;
 	}
@@ -1869,11 +1889,63 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		state->in_hand_confidence = event->payload.carry_state.in_hand_confidence;
 		state->walking_confidence = event->payload.carry_state.walking_confidence;
 		state->walk_confidence = event->payload.carry_state.walking_confidence;
-		if (IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG_VERBOSE)) {
-			LOG_INF("Face carry -> in_hand=%d pickup=%u in_hand_conf=%u walk_conf=%u",
-				state->in_hand ? 1 : 0, state->pickup_confidence,
-				state->in_hand_confidence, state->walking_confidence);
+		if (event->payload.carry_state.carry_context < (uint8_t)PET_CARRY_TRANSITION + 1U) {
+			state->carry_context = (enum pet_carry_context)
+				event->payload.carry_state.carry_context;
+			state->carry_context_confidence =
+				event->payload.carry_state.carry_context_confidence;
 		}
+		if (IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG_VERBOSE)) {
+			LOG_INF("Face carry -> in_hand=%d pickup=%u in_hand_conf=%u walk_conf=%u ctx=%u",
+				state->in_hand ? 1 : 0, state->pickup_confidence,
+				state->in_hand_confidence, state->walking_confidence,
+				event->payload.carry_state.carry_context);
+		}
+		break;
+
+	case APP_EVENT_CARRY_CONTEXT_CHANGED: {
+		const enum pet_carry_context prev_ctx = state->carry_context;
+		const uint8_t raw_ctx = event->payload.carry_state.carry_context;
+		enum pet_carry_context ctx;
+
+		if (raw_ctx > (uint8_t)PET_CARRY_TRANSITION) {
+			break;
+		}
+		ctx = (enum pet_carry_context)raw_ctx;
+		state->carry_context = ctx;
+		state->carry_context_confidence =
+			event->payload.carry_state.carry_context_confidence;
+
+		/* Context edges carry meaning of their own. */
+		if ((ctx == PET_CARRY_WORN) && (prev_ctx != PET_CARRY_WORN)) {
+			/* Clipped on and moving: going on an adventure. */
+			state->curiosity += 2;
+			g_runtime.ctx.stimulation += 3;
+			nudge_mood(1);
+			LOG_INF("Carry context: worn (conf=%u)",
+				state->carry_context_confidence);
+		} else if ((prev_ctx == PET_CARRY_WORN) &&
+			   (ctx == PET_CARRY_IN_HAND)) {
+			/* Grabbed off the bag — "you picked me!" */
+			state->attachment += 2;
+			state->arousal += 3;
+			g_runtime.ctx.comfort += 6;
+			nudge_mood(2);
+			trigger_reaction(state, REACTION_WAKE_BLINK, now);
+		} else if ((prev_ctx == PET_CARRY_WORN) &&
+			   (ctx == PET_CARRY_ON_SURFACE)) {
+			/* Taken off and set down: settle. */
+			state->arousal -= 1;
+		}
+		break;
+	}
+
+	case APP_EVENT_WORN_STYLE_SET:
+		state->worn_expressive = (event->param != 0);
+		LOG_INF("Worn style -> %s",
+			state->worn_expressive ? "expressive" : "quiet");
+		/* Explicit owner choice: persist immediately. */
+		try_save_emotion_memory(state, now, 0);
 		break;
 
 	case APP_EVENT_BATTERY_PERCENT_UPDATE:
@@ -1928,7 +2000,7 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		break;
 
 	case APP_EVENT_FACE_DEBUG_DUMP: {
-		char emotion[192];
+		char emotion[256];
 
 		log_face_snapshot(state, "Face dump");
 		behavior_engine_emotion_dump(state, emotion, sizeof(emotion));
@@ -2013,6 +2085,11 @@ static void update_mode(struct pet_state *state, int64_t now_ms)
 	} else if ((state->sleepiness > 88) && (state->arousal < 25) &&
 		   (state->current_display_state == DISPLAY_OFF)) {
 		mode = PET_MODE_ASLEEP;
+	} else if ((state->carry_context == PET_CARRY_WORN) &&
+		   (idle_ms >= (10 * MSEC_PER_SEC))) {
+		/* Dangling on jeans/backpack, not being interacted with:
+		 * along for the ride. A nap (above) still beats it. */
+		mode = PET_MODE_WORN;
 	} else if (state->sleepiness > drowsy_threshold) {
 		mode = PET_MODE_DROWSY;
 	} else if (idle_ms < (45 * MSEC_PER_SEC)) {
@@ -2024,219 +2101,93 @@ static void update_mode(struct pet_state *state, int64_t now_ms)
 	state->current_mode = mode;
 }
 
-/* ── Expression scoring ──────────────────────────────────────────── *
+/* ── Situation resolution + expression scoring ───────────────────── *
  *
- * Each expression gets:
- *   base      — original scoring from pet_state variables (preserved)
- *   ctx_bonus — afterglow context modulation (comfort / stimulation / warmth)
- *   int_bonus — intent alignment bonus
+ * The deterministic situation layer decides *where the pet is living*
+ * (charging dock, owner's hand, dangling on a backpack, ...). The
+ * normalized appraisal table (behavior/appraisal.c) then scores
+ * expressions within that situation. The engine keeps intent alignment,
+ * transition affinity and hysteresis on top.
  */
 
-static int score_for_expression(enum pet_expression expr, const struct pet_state *state, int64_t now_ms)
+static enum pet_situation resolve_situation(const struct pet_state *state)
 {
-	const bool recent_pet = (now_ms - state->last_pet_timestamp_ms) < (10LL * 60 * MSEC_PER_SEC);
-	const bool fresh_pet = (now_ms - state->last_pet_timestamp_ms) < (8 * MSEC_PER_SEC);
-	const bool recent_motion = (now_ms - state->last_motion_timestamp_ms) < (45 * MSEC_PER_SEC);
-	const bool recent_notif = (now_ms - state->last_phone_event_timestamp_ms) < (30 * MSEC_PER_SEC);
-	const bool rough_recent = (now_ms - state->last_rough_event_timestamp_ms) < (60 * MSEC_PER_SEC);
-	const int64_t no_real_interaction_ms = now_ms - state->last_real_interaction_timestamp_ms;
-	const bool long_disconnect = !state->ble_connected &&
-				     ((now_ms - state->last_phone_event_timestamp_ms) > (30LL * 60 * MSEC_PER_SEC));
-	const bool night = is_night_time(state, now_ms);
-	int base = 0;
-	int ctx_bonus = 0;
-	int int_bonus = 0;
+	if (state->charging) {
+		return PET_SITUATION_CHARGING;
+	}
+	if (state->peer_nearby) {
+		return PET_SITUATION_SOCIAL;
+	}
+	if (state->in_hand || (state->carry_context == PET_CARRY_IN_HAND)) {
+		return PET_SITUATION_ENGAGED;
+	}
+	if (state->carry_context == PET_CARRY_WORN) {
+		return state->worn_expressive ? PET_SITUATION_WORN_LIVELY
+					      : PET_SITUATION_WORN_QUIET;
+	}
+	return PET_SITUATION_RESTING;
+}
+
+static int intent_alignment_bonus(enum pet_expression expr)
+{
 	const int16_t is = g_runtime.intent_strength;
-	/* Day-scale temperament: a pet that has had a good stretch leans
-	 * warm; a worn-down one leans needy/cranky. ±8 max. */
-	const int mb = mood_bias(state);
-
-	/* ── Base scoring (original logic preserved) ── */
-
-	switch (expr) {
-	case PET_EXPR_CALM:
-		base = 60 - state->stress - (state->social_load / 2) -
-		       (state->boredom / 4) + (state->energy / 4) + (mb / 3);
-		/* Context: calm benefits from low recent stimulation */
-		if (g_runtime.ctx.stimulation < 15) {
-			ctx_bonus = 5;
-		}
-		break;
-
-	case PET_EXPR_CURIOUS: {
-		int walk_bonus = 0;
-
-		if (state->current_mode == PET_MODE_WALK_AWAKE) {
-			int64_t walk_s = (now_ms - state->walking_session_start_ms) / MSEC_PER_SEC;
-
-			if (walk_s < 120) {
-				walk_bonus = 18;
-			} else if (walk_s < 600) {
-				walk_bonus = 18 - (int)((walk_s - 120) * 14 / 480);
-			} else {
-				walk_bonus = 4;
-			}
-		}
-		base = state->curiosity + (recent_notif ? 16 : 0) + (recent_motion ? 12 : 0) +
-		       walk_bonus + (state->app_session_active ? 8 : 0) - (state->sleepiness / 3);
-		/* Context: moderate stimulation feeds curiosity */
-		if (g_runtime.ctx.stimulation > 15 && g_runtime.ctx.stimulation < 55) {
-			ctx_bonus = g_runtime.ctx.stimulation / 7;
-		}
-		break;
-	}
-
-	case PET_EXPR_CONTENT:
-		base = (state->attachment / 2) + (state->trust / 2) + (recent_pet ? 16 : 0) -
-		       (state->stress / 2) + ((mb * 2) / 3);
-		/* Context: recent comfort boosts contentment */
-		ctx_bonus = g_runtime.ctx.comfort / 5;
-		break;
-
-	case PET_EXPR_HAPPY:
-		base = (state->attachment / 2) + (state->energy / 3) + (recent_pet ? 18 : 0) +
-		       (fresh_pet ? 26 : 0) - (state->stress / 2) + mb;
-		/* Context: comfort afterglow lingers as happiness */
-		ctx_bonus = g_runtime.ctx.comfort / 5;
-		break;
-
-	case PET_EXPR_PLAYFUL: {
-		int walk_bonus = 0;
-
-		if (state->current_mode == PET_MODE_WALK_AWAKE) {
-			int64_t walk_s = (now_ms - state->walking_session_start_ms) / MSEC_PER_SEC;
-
-			if (walk_s < 120) {
-				walk_bonus = 14;
-			} else if (walk_s < 600) {
-				walk_bonus = 14 - (int)((walk_s - 120) * 10 / 480);
-			} else {
-				walk_bonus = 4;
-			}
-		}
-		base = state->arousal + (state->trust / 3) + walk_bonus + (mb / 2) -
-		       (state->battery_low ? 20 : 0);
-		/* Context: moderate stimulation supports playfulness */
-		if (g_runtime.ctx.stimulation > 25 && g_runtime.ctx.stimulation < 65) {
-			ctx_bonus = g_runtime.ctx.stimulation / 8;
-		}
-		break;
-	}
-
-	case PET_EXPR_SLEEPY:
-		base = state->sleepiness + ((state->arousal < 35) ? 8 : 0) + (night ? 6 : 0) +
-		       ((no_real_interaction_ms > (5LL * 60 * MSEC_PER_SEC)) ? 10 : 0) +
-		       (is_groggy(now_ms) ? 14 : 0);
-		break;
-
-	case PET_EXPR_NEEDY:
-		base = state->boredom + (state->attachment / 4) + (recent_pet ? -10 : 12) +
-		       ((no_real_interaction_ms > (8LL * 60 * MSEC_PER_SEC)) ? 10 : 0) -
-		       (mb / 2);
-		/* Context: recent social warmth and comfort dampen neediness */
-		ctx_bonus = -(g_runtime.ctx.social_warmth / 4) -
-			    (g_runtime.ctx.comfort / 5);
-		break;
-
-	case PET_EXPR_LONELY:
-		base = state->boredom + (long_disconnect ? 20 : 0) + (recent_motion ? -8 : 8) +
-		       ((no_real_interaction_ms > (20LL * 60 * MSEC_PER_SEC)) ? 16 : 0) - mb;
-		/* Context: social warmth and comfort dampen loneliness */
-		ctx_bonus = -(g_runtime.ctx.social_warmth / 4) -
-			    (g_runtime.ctx.comfort / 5);
-		break;
-
-	case PET_EXPR_ANNOYED:
-		base = state->stress + (rough_recent ? 24 : 0) + ((state->trust < 40) ? 12 : 0) -
-		       (mb / 2);
-		/* Context: high stimulation feeds annoyance */
-		if (g_runtime.ctx.stimulation > 65) {
-			ctx_bonus = (g_runtime.ctx.stimulation - 45) / 5;
-		}
-		break;
-
-	case PET_EXPR_OVERSTIMULATED:
-		base = state->social_load + (state->notification_burst_level * 10) +
-		       (state->arousal / 2);
-		/* Context: recent stimulation overload */
-		if (g_runtime.ctx.stimulation > 55) {
-			ctx_bonus = (g_runtime.ctx.stimulation - 35) / 4;
-		}
-		break;
-
-	case PET_EXPR_COZY:
-		base = (state->charging ? 60 : 0) + ((100 - state->stress) / 2) +
-		       (recent_pet ? 10 : 0);
-		/* Context: comfort afterglow strongly boosts cozy */
-		ctx_bonus = g_runtime.ctx.comfort / 4;
-		break;
-
-	case PET_EXPR_DRAINED:
-		base = (state->battery_critical ? 80 : 0) + (state->battery_low ? 40 : 0) +
-		       ((100 - state->energy) / 2) + (state->sleepiness / 2);
-		break;
-
-	case PET_EXPR_ASLEEP:
-		base = (state->current_mode == PET_MODE_ASLEEP ? 100 : 0) +
-		       (state->current_display_state == DISPLAY_OFF ? 20 : 0);
-		break;
-
-	default:
-		return 0;
-	}
-
-	/* ── Intent alignment bonus ── */
 
 	switch (g_runtime.intent) {
 	case PET_INTENT_REST:
 		if (expr == PET_EXPR_SLEEPY) {
-			int_bonus = is / 6;
-		} else if (expr == PET_EXPR_COZY) {
-			int_bonus = is / 7;
-		} else if (expr == PET_EXPR_CALM) {
-			int_bonus = is / 9;
+			return is / 6;
+		}
+		if (expr == PET_EXPR_COZY) {
+			return is / 7;
+		}
+		if (expr == PET_EXPR_CALM) {
+			return is / 9;
 		}
 		break;
 	case PET_INTENT_PLAY:
 		if (expr == PET_EXPR_PLAYFUL) {
-			int_bonus = is / 5;
-		} else if (expr == PET_EXPR_HAPPY) {
-			int_bonus = is / 7;
+			return is / 5;
+		}
+		if (expr == PET_EXPR_HAPPY) {
+			return is / 7;
 		}
 		break;
 	case PET_INTENT_OBSERVE:
 		if (expr == PET_EXPR_CURIOUS) {
-			int_bonus = is / 5;
-		} else if (expr == PET_EXPR_CALM) {
-			int_bonus = is / 9;
+			return is / 5;
+		}
+		if (expr == PET_EXPR_CALM) {
+			return is / 9;
 		}
 		break;
 	case PET_INTENT_SEEK_ATTENTION:
 		if (expr == PET_EXPR_NEEDY) {
-			int_bonus = is / 6;
-		} else if (expr == PET_EXPR_LONELY) {
-			int_bonus = is / 8;
+			return is / 6;
+		}
+		if (expr == PET_EXPR_LONELY) {
+			return is / 8;
 		}
 		break;
 	case PET_INTENT_WITHDRAW:
 		if (expr == PET_EXPR_ANNOYED) {
-			int_bonus = is / 6;
-		} else if (expr == PET_EXPR_OVERSTIMULATED) {
-			int_bonus = is / 7;
+			return is / 6;
+		}
+		if (expr == PET_EXPR_OVERSTIMULATED) {
+			return is / 7;
 		}
 		break;
 	case PET_INTENT_SELF_SOOTHE:
 		if (expr == PET_EXPR_CONTENT) {
-			int_bonus = is / 6;
-		} else if (expr == PET_EXPR_CALM) {
-			int_bonus = is / 7;
+			return is / 6;
+		}
+		if (expr == PET_EXPR_CALM) {
+			return is / 7;
 		}
 		break;
 	default:
 		break;
 	}
-
-	return base + ctx_bonus + int_bonus;
+	return 0;
 }
 
 /* Emotional adjacency: returns a small score bonus (0..5) for expressions
@@ -2423,12 +2374,37 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 		return;
 	}
 
-	/* ── Score all expressions ── */
+	/* ── Score all expressions (situation + normalized appraisal) ── */
 	curr_expr = state->current_expression;
 
-	for (expr = 0; expr < PET_EXPR_COUNT; expr++) {
-		scores[expr] = score_for_expression((enum pet_expression)expr, state, now_ms);
-		scores[expr] += transition_affinity(curr_expr, (enum pet_expression)expr);
+	{
+		const enum pet_situation situation = resolve_situation(state);
+		struct appraisal_inputs in = {
+			.state = state,
+			.ctx_stimulation = g_runtime.ctx.stimulation,
+			.ctx_comfort = g_runtime.ctx.comfort,
+			.ctx_social_warmth = g_runtime.ctx.social_warmth,
+			.groggy = is_groggy(now_ms),
+			.night = is_night_time(state, now_ms),
+			.now_ms = now_ms,
+		};
+		uint8_t features[APF_COUNT];
+
+		appraisal_compute_features(&in, features);
+
+		for (expr = 0; expr < PET_EXPR_COUNT; expr++) {
+			if (!appraisal_expression_allowed((enum pet_expression)expr,
+							  situation)) {
+				scores[expr] = -1000;
+				continue;
+			}
+			scores[expr] = appraisal_expression_score(
+					       (enum pet_expression)expr,
+					       situation, features) +
+				       intent_alignment_bonus((enum pet_expression)expr) +
+				       transition_affinity(curr_expr,
+							   (enum pet_expression)expr);
+		}
 	}
 
 	best_expr = PET_EXPR_CALM;
@@ -2511,9 +2487,12 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 				g_runtime.personality = (enum pet_personality)mem.personality;
 			}
 			g_runtime.lifetime_pets = mem.lifetime_pets;
-			LOG_INF("Emotional memory restored: att=%d trust=%d mood=%d pets=%u pers=%s",
+			state->worn_expressive = mem.worn_expressive;
+			g_runtime.worn_style_loaded = true;
+			LOG_INF("Emotional memory restored: att=%d trust=%d mood=%d pets=%u pers=%s worn=%s",
 				state->attachment, state->trust, state->mood,
-				g_runtime.lifetime_pets, personality()->name);
+				g_runtime.lifetime_pets, personality()->name,
+				state->worn_expressive ? "expressive" : "quiet");
 		}
 	}
 	fill_memory_record(state, &g_runtime.last_saved_memory);
@@ -2563,6 +2542,14 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	state->tz_offset_minutes = 0;
 	state->unix_time_at_sync = 0;
 	state->uptime_at_sync_ms = now_ms;
+
+	state->carry_context = PET_CARRY_UNKNOWN;
+	state->carry_context_confidence = 0U;
+	/* Worn style: Kconfig default, overridden by persisted owner choice
+	 * in the emotional-memory block above. */
+	if (!g_runtime.worn_style_loaded) {
+		state->worn_expressive = IS_ENABLED(CONFIG_KERFUR_WORN_EXPRESSIVE);
+	}
 
 	micro_reaction_init(now_ms);
 }
@@ -2631,6 +2618,7 @@ const char *pet_mode_str(enum pet_mode mode)
 	case PET_MODE_CHARGING:    return "CHARGING";
 	case PET_MODE_LOW_POWER:   return "LOW_POWER";
 	case PET_MODE_OVERLOADED:  return "OVERLOADED";
+	case PET_MODE_WORN:        return "WORN";
 	default:                   return "UNKNOWN";
 	}
 }
@@ -2684,7 +2672,7 @@ void behavior_engine_emotion_dump(const struct pet_state *state, char *buffer, s
 	(void)snprintf(buffer, buffer_len,
 		       "E=%d Sl=%d At=%d Bo=%d St=%d Ar=%d So=%d Tr=%d Cu=%d "
 		       "Mo=%d(acc=%d) ctx=%d/%d/%d intent=%s(%d) groggy=%d "
-		       "pers=%s pets=%u",
+		       "pers=%s pets=%u carry=%s(%u) sit=%s worn_style=%s",
 		       state->energy, state->sleepiness, state->attachment,
 		       state->boredom, state->stress, state->arousal,
 		       state->social_load, state->trust, state->curiosity,
@@ -2693,7 +2681,11 @@ void behavior_engine_emotion_dump(const struct pet_state *state, char *buffer, s
 		       g_runtime.ctx.social_warmth,
 		       pet_intent_str(g_runtime.intent), g_runtime.intent_strength,
 		       is_groggy(k_uptime_get()) ? 1 : 0,
-		       personality()->name, g_runtime.lifetime_pets);
+		       personality()->name, g_runtime.lifetime_pets,
+		       pet_carry_context_str(state->carry_context),
+		       state->carry_context_confidence,
+		       pet_situation_str(resolve_situation(state)),
+		       state->worn_expressive ? "expressive" : "quiet");
 }
 
 void behavior_engine_status_dump(const struct pet_state *state, char *buffer, size_t buffer_len)

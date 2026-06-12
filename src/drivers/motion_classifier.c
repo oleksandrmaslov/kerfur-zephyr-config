@@ -76,6 +76,19 @@ LOG_MODULE_REGISTER(motion_classifier, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define WALK_CONF_Q8_MAX                (100 * 256)
 
+/* Worn-watch: relaxed processing cadence while the device is dangling on
+ * jeans/backpack and nothing needs full-rate evaluation. Fast enough to
+ * notice the dangle collapsing into a hand within ~2 frames. */
+#define WORN_POLL_MS                    150
+#define WORN_ACTIVE_BURST_MS            1300LL
+
+/* Swing (pendulum/bounce) periodicity detection. */
+#define SWING_CROSS_HYST_MG             60
+#define SWING_MIN_CROSSINGS             4U
+#define SWING_HALF_PERIOD_MIN_MS        150
+#define SWING_HALF_PERIOD_MAX_MS        700
+#define SWING_MAX_INTERVALS             16U
+
 struct imu_processed_frame {
 	int64_t now_ms;
 	int32_t dt_ms;
@@ -91,6 +104,9 @@ struct imu_processed_frame {
 	int16_t linear_x_mg;
 	int16_t linear_y_mg;
 	int16_t linear_z_mg;
+	/* Linear acceleration projected onto gravity (signed, mg):
+	 * the vertical bounce component used for gait/pendulum analysis. */
+	int16_t linear_vert_mg;
 
 	uint16_t accel_magnitude_mg;
 	uint16_t linear_motion_mg;
@@ -142,6 +158,9 @@ enum motion_classifier_mode {
 	MODE_ACTIVE_WINDOW,
 	MODE_WALK_MAINTAIN,
 	MODE_IN_HAND_TRACK,
+	/* Worn on jeans/backpack and quiet-ish: keep the step counter and a
+	 * slow classification heartbeat, no full-rate processing. */
+	MODE_WORN_WATCH,
 };
 
 struct motion_classifier_state {
@@ -201,6 +220,7 @@ struct motion_classifier_state {
 	uint8_t surface_still_confidence;
 	uint8_t hand_motion_confidence;
 	uint8_t rotation_confidence;
+	uint8_t swing_confidence;
 
 	int32_t walking_confidence_q8;
 	uint16_t last_hw_step_counter;
@@ -233,6 +253,7 @@ struct motion_classifier_state {
 	uint8_t pub_pickup_conf;
 	uint8_t pub_in_hand_conf;
 	uint8_t pub_walk_conf;
+	uint8_t pub_carry_ctx;
 	int16_t pub_look_x;
 	int16_t pub_look_y;
 	uint8_t pub_look_conf;
@@ -665,6 +686,16 @@ static bool build_frame(const struct motion_sensor_sample *sample,
 					       g_mc.prev_linear_z);
 	}
 
+	/* Vertical (along-gravity) bounce component for gait/swing analysis.
+	 * Gravity magnitude is ~1000 mg, so dot/1000 is the projection. */
+	{
+		int32_t vert_dot = (int32_t)linear_x * g_mc.gravity_x +
+				   (int32_t)linear_y * g_mc.gravity_y +
+				   (int32_t)linear_z * g_mc.gravity_z;
+
+		frame->linear_vert_mg = (int16_t)CLAMP(vert_dot / 1000, -8000, 8000);
+	}
+
 	if (had_gravity && !reset_history) {
 		orientation_delta = vec_distance_mg(g_mc.gravity_x, g_mc.gravity_y,
 						    g_mc.gravity_z, prev_gravity_x,
@@ -802,6 +833,112 @@ static void summarise_window(struct imu_window_summary *out, int64_t now_ms,
 	out->surface_still_score = (uint8_t)(sum_surface / count);
 	out->hand_motion_score = (uint8_t)(sum_hand / count);
 	out->rotation_score = (uint8_t)(sum_rotation / count);
+}
+
+/* Swing/bounce periodicity: a dangling keychain oscillates in the gait
+ * band (~0.7–3 Hz). Measure zero crossings of the vertical bounce
+ * component over the long window; regular intervals at sane amplitude
+ * mean "pendulum on a moving body", which is strong WORN evidence and
+ * strong NOT-a-hand evidence. Requires full-rate sampling — callers skip
+ * this in low-rate modes and let the value decay instead. */
+static uint8_t compute_swing_score(int64_t now_ms)
+{
+	int64_t cross_ms[SWING_MAX_INTERVALS + 1U];
+	uint8_t cross_count = 0U;
+	uint32_t sum_amp = 0U;
+	uint16_t amp_count = 0U;
+	int sign_state = 0;
+	uint8_t count = g_mc.frame_count;
+	uint8_t start = (g_mc.frame_count == FEATURE_HISTORY_FRAMES) ?
+			g_mc.frame_index : 0U;
+	int64_t sum_interval = 0LL;
+	int64_t mean_interval;
+	int64_t max_dev = 0LL;
+	uint16_t avg_amp;
+	int regularity;
+	int amplitude;
+	int score;
+	uint8_t i;
+
+	for (i = 0U; i < count; i++) {
+		const struct imu_processed_frame *f =
+			&g_mc.frames[(start + i) % FEATURE_HISTORY_FRAMES];
+		int sign;
+
+		if ((now_ms - f->now_ms) > FEATURE_LONG_WINDOW_MS) {
+			continue;
+		}
+
+		sum_amp += (uint32_t)abs_i32(f->linear_vert_mg);
+		amp_count++;
+
+		if (f->linear_vert_mg > SWING_CROSS_HYST_MG) {
+			sign = 1;
+		} else if (f->linear_vert_mg < -SWING_CROSS_HYST_MG) {
+			sign = -1;
+		} else {
+			continue;
+		}
+
+		if ((sign_state != 0) && (sign != sign_state) &&
+		    (cross_count <= SWING_MAX_INTERVALS)) {
+			cross_ms[cross_count++] = f->now_ms;
+		}
+		sign_state = sign;
+	}
+
+	if ((cross_count < SWING_MIN_CROSSINGS) || (amp_count == 0U)) {
+		return 0U;
+	}
+
+	for (i = 1U; i < cross_count; i++) {
+		sum_interval += cross_ms[i] - cross_ms[i - 1U];
+	}
+	mean_interval = sum_interval / (cross_count - 1U);
+	if ((mean_interval < SWING_HALF_PERIOD_MIN_MS) ||
+	    (mean_interval > SWING_HALF_PERIOD_MAX_MS)) {
+		return 0U;
+	}
+
+	for (i = 1U; i < cross_count; i++) {
+		int64_t dev = (cross_ms[i] - cross_ms[i - 1U]) - mean_interval;
+
+		if (dev < 0) {
+			dev = -dev;
+		}
+		max_dev = max64(max_dev, dev);
+	}
+	if (max_dev > (mean_interval / 2)) {
+		return 0U;
+	}
+
+	/* 0..40: tighter interval spread = more pendulum-like. */
+	regularity = 40 - (int)((max_dev * 40) / MAX(mean_interval, 1));
+	regularity = CLAMP(regularity, 0, 40);
+
+	/* 0..30: bounce amplitude in the plausible dangle band. */
+	avg_amp = (uint16_t)MIN(sum_amp / amp_count, 4000U);
+	amplitude = (int)score_band_u16(avg_amp, 30U, 140U, 600U) * 30 / 100;
+
+	score = 30 + regularity + amplitude;
+	return clamp_u8(score);
+}
+
+static void update_swing_confidence(int64_t now_ms, bool full_rate)
+{
+	if (!full_rate) {
+		/* Can't see the oscillation at low rate — fade slowly so the
+		 * worn stickiness in the detector does the holding. */
+		if (g_mc.swing_confidence > 0U) {
+			g_mc.swing_confidence--;
+		}
+		return;
+	}
+
+	uint8_t score = compute_swing_score(now_ms);
+
+	g_mc.swing_confidence =
+		(uint8_t)(((uint16_t)g_mc.swing_confidence * 3U + score) / 4U);
 }
 
 static void collect_recent_steps(int64_t now_ms, int64_t *steps, uint8_t *count)
@@ -1039,7 +1176,7 @@ static bool is_rough_motion(const struct imu_processed_frame *frame,
 
 static void check_shake(const struct imu_processed_frame *frame,
 			const struct imu_window_summary *short_win,
-			bool in_hand, uint8_t in_hand_conf)
+			bool in_hand, uint8_t in_hand_conf, bool worn)
 {
 	enum app_event_type type = APP_EVENT_COUNT;
 	int64_t cooldown = 0LL;
@@ -1049,30 +1186,41 @@ static void check_shake(const struct imu_processed_frame *frame,
 				 short_win->peak_jerk_mg_per_s);
 	uint32_t gyro_peak = MAX(frame->gyro_sum_mdps,
 				 short_win->peak_gyro_sum_mdps);
+	/* Dangling on jeans/backpack: gait bounce and bag drops produce
+	 * large transients constantly. Only real violence counts (~1.4x
+	 * thresholds), and playful shakes are not a thing while worn. */
+	uint16_t impact_lin = worn ? 2600U : 1900U;
+	uint16_t impact_jerk = worn ? 25000U : 18000U;
+	uint32_t impact_gyro = worn ? 170000U : 125000U;
+	uint16_t rough_lin = worn ? 1900U : 1300U;
+	uint16_t rough_jerk = worn ? 13000U : 9000U;
+	uint32_t rough_gyro = worn ? 135000U : 95000U;
 
-	if (linear_peak >= 1900U || jerk_peak >= 18000U ||
-	    (gyro_peak >= 125000U &&
+	if (linear_peak >= impact_lin || jerk_peak >= impact_jerk ||
+	    (gyro_peak >= impact_gyro &&
 	     (linear_peak >= 1000U || jerk_peak >= 8000U))) {
 		type = APP_EVENT_IMPACT;
 		cooldown = SHAKE_COOLDOWN_IMPACT_MS;
 		g_mc.suppress_look_until_ms =
 			max64(g_mc.suppress_look_until_ms,
 			      frame->now_ms + LOOK_SUPPRESS_AFTER_ROUGH_MS);
-	} else if ((linear_peak >= 1300U && jerk_peak >= 9000U) ||
-		   (gyro_peak >= 95000U &&
+	} else if ((linear_peak >= rough_lin && jerk_peak >= rough_jerk) ||
+		   (gyro_peak >= rough_gyro &&
 		    linear_peak >= 900U && jerk_peak >= 5500U)) {
 		type = APP_EVENT_SHAKE_ROUGH;
 		cooldown = SHAKE_COOLDOWN_ROUGH_MS;
 		g_mc.suppress_look_until_ms =
 			max64(g_mc.suppress_look_until_ms,
 			      frame->now_ms + LOOK_SUPPRESS_AFTER_ROUGH_MS);
-	} else if ((linear_peak >= 900U && jerk_peak >= 6500U &&
-		    short_win->chaos_score >= 48U) ||
-		   (gyro_peak >= 76000U &&
-		    linear_peak >= 650U && jerk_peak >= 4500U)) {
+	} else if (!worn &&
+		   ((linear_peak >= 900U && jerk_peak >= 6500U &&
+		     short_win->chaos_score >= 48U) ||
+		    (gyro_peak >= 76000U &&
+		     linear_peak >= 650U && jerk_peak >= 4500U))) {
 		type = APP_EVENT_SHAKE_PLAY;
 		cooldown = SHAKE_COOLDOWN_PLAY_MS;
-	} else if (linear_peak >= 680U && jerk_peak >= 5200U &&
+	} else if (!worn &&
+		   linear_peak >= 680U && jerk_peak >= 5200U &&
 		   short_win->chaos_score >= 40U) {
 		type = APP_EVENT_SHAKE_LIGHT;
 		cooldown = SHAKE_COOLDOWN_LIGHT_MS;
@@ -1306,30 +1454,71 @@ static void update_look_target(const struct in_hand_detector_output *det,
 	}
 }
 
+/* Map detector truth onto the shared carry-context vocabulary. */
+static enum pet_carry_context resolve_carry_context(uint8_t *confidence)
+{
+	if (g_mc.in_hand) {
+		*confidence = g_mc.in_hand_confidence;
+		return PET_CARRY_IN_HAND;
+	}
+	if (g_mc.in_hand_det.worn) {
+		*confidence = g_mc.in_hand_det.worn_confidence;
+		return PET_CARRY_WORN;
+	}
+	if (g_mc.in_hand_det.state == IN_HAND_DETECTOR_SURFACE_STILL) {
+		*confidence = g_mc.surface_still_confidence;
+		return PET_CARRY_ON_SURFACE;
+	}
+	if ((g_mc.in_hand_det.state == IN_HAND_DETECTOR_MAYBE_PICKED_UP) ||
+	    (g_mc.in_hand_det.state == IN_HAND_DETECTOR_SHAKE_EVENT)) {
+		*confidence = g_mc.pickup_confidence;
+		return PET_CARRY_TRANSITION;
+	}
+
+	*confidence = 0U;
+	return PET_CARRY_UNKNOWN;
+}
+
 static void publish_carry(int64_t now_ms, bool force)
 {
+	struct app_event_carry_state carry;
+	uint8_t ctx_conf = 0U;
+	enum pet_carry_context ctx = resolve_carry_context(&ctx_conf);
+	bool context_changed = (uint8_t)ctx != g_mc.pub_carry_ctx;
 	bool state_changed = g_mc.pub_in_hand != g_mc.in_hand;
 	bool confidence_changed =
 		abs_i32((int)g_mc.pub_pickup_conf - (int)g_mc.pickup_confidence) >= 4 ||
 		abs_i32((int)g_mc.pub_in_hand_conf - (int)g_mc.in_hand_confidence) >= 4 ||
 		abs_i32((int)g_mc.pub_walk_conf - (int)g_mc.walking_confidence) >= 5;
 
-	if (!force && !state_changed && !confidence_changed) {
+	if (!force && !state_changed && !confidence_changed && !context_changed) {
 		return;
 	}
-	if (!force && (now_ms - g_mc.last_carry_publish_ms) < 250LL) {
+	if (!force && !context_changed &&
+	    (now_ms - g_mc.last_carry_publish_ms) < 250LL) {
 		return;
 	}
 
-	(void)app_event_publish_carry_state_with_timestamp(
-		g_mc.in_hand, g_mc.pickup_confidence,
-		g_mc.in_hand_confidence, g_mc.walking_confidence, now_ms);
+	carry.in_hand = g_mc.in_hand;
+	carry.pickup_confidence = g_mc.pickup_confidence;
+	carry.in_hand_confidence = g_mc.in_hand_confidence;
+	carry.walking_confidence = g_mc.walking_confidence;
+	carry.carry_context = (uint8_t)ctx;
+	carry.carry_context_confidence = ctx_conf;
+
+	(void)app_event_publish_carry_with_timestamp(APP_EVENT_CARRY_STATE_UPDATE,
+						     &carry, now_ms);
+	if (context_changed) {
+		(void)app_event_publish_carry_with_timestamp(
+			APP_EVENT_CARRY_CONTEXT_CHANGED, &carry, now_ms);
+	}
 
 	g_mc.last_carry_publish_ms = now_ms;
 	g_mc.pub_in_hand = g_mc.in_hand;
 	g_mc.pub_pickup_conf = g_mc.pickup_confidence;
 	g_mc.pub_in_hand_conf = g_mc.in_hand_confidence;
 	g_mc.pub_walk_conf = g_mc.walking_confidence;
+	g_mc.pub_carry_ctx = (uint8_t)ctx;
 }
 
 static void publish_look(int64_t now_ms, bool force)
@@ -1452,6 +1641,11 @@ static void switch_mode(enum motion_classifier_mode mode, int64_t now_ms)
 	case MODE_IN_HAND_TRACK:
 		sensor_mode = MOTION_SENSOR_MODE_IN_HAND_TRACK;
 		break;
+	case MODE_WORN_WATCH:
+		/* Walk-maintain keeps the hw step counter alive at a modest
+		 * ODR; the slow heartbeat comes from the work cadence. */
+		sensor_mode = MOTION_SENSOR_MODE_WALK_MAINTAIN;
+		break;
 	default:
 		return;
 	}
@@ -1470,8 +1664,8 @@ static void debug_log(const struct imu_processed_frame *frame,
 	}
 
 	LOG_INF("MC mode=%d a=%d,%d,%d g=%d/%d,%d,%d lin=%u sm=%u "
-		"jerk=%u gyro=%u/%u surf=%u/%u walk=%u/%d cad=%u "
-		"pickup=%u hand=%u/%d rot=%u look=%u/%d,%d chaos=%u det=%d",
+		"jerk=%u gyro=%u/%u surf=%u/%u walk=%u/%d cad=%u swing=%u "
+		"worn=%u/%d pickup=%u hand=%u/%d rot=%u look=%u/%d,%d chaos=%u det=%d",
 		g_mc.mode,
 		frame->accel_x_mg, frame->accel_y_mg, frame->accel_z_mg,
 		frame->gravity_valid ? 1 : 0,
@@ -1481,7 +1675,9 @@ static void debug_log(const struct imu_processed_frame *frame,
 		frame->smooth_gyro_sum_mdps,
 		frame->surface_still_score, long_win->surface_still_score,
 		g_mc.walking_confidence, g_mc.walking_active ? 1 : 0,
-		g_mc.cadence_confidence, g_mc.pickup_confidence,
+		g_mc.cadence_confidence, g_mc.swing_confidence,
+		det->worn_confidence, det->worn ? 1 : 0,
+		g_mc.pickup_confidence,
 		g_mc.in_hand_confidence, g_mc.in_hand ? 1 : 0,
 		g_mc.rotation_confidence,
 		g_mc.look_confidence, g_mc.look_target_x, g_mc.look_target_y,
@@ -1614,6 +1810,7 @@ static void sample_work_run(void)
 	short_win.cadence_score = g_mc.cadence_confidence;
 	long_win.cadence_score = g_mc.cadence_confidence;
 	update_walking(sw_step || (hw_steps > 0U), &frame, &short_win);
+	update_swing_confidence(frame.now_ms, g_mc.mode != MODE_WORN_WATCH);
 
 	g_mc.stability_confidence =
 		(uint8_t)(((uint16_t)short_win.stability_score +
@@ -1650,6 +1847,7 @@ static void sample_work_run(void)
 	det_in.surface_still_confidence = g_mc.surface_still_confidence;
 	det_in.hand_motion_confidence = g_mc.hand_motion_confidence;
 	det_in.rotation_confidence = g_mc.rotation_confidence;
+	det_in.swing_confidence = g_mc.swing_confidence;
 	det_in.walking_active = g_mc.walking_active;
 	det_in.rough_motion = rough;
 	det_in.motion_wake =
@@ -1665,7 +1863,7 @@ static void sample_work_run(void)
 	}
 
 	check_shake(&frame, &short_win, det_out.in_hand,
-		    det_out.in_hand_confidence);
+		    det_out.in_hand_confidence, det_out.worn);
 	emit_detector_events(&det_out, frame.now_ms);
 	update_look_reference(&det_out, frame.now_ms);
 	update_look_target(&det_out, &frame, &short_win);
@@ -1699,6 +1897,15 @@ static void sample_work_run(void)
 			MAX(g_mc.active_until_ms,
 			    frame.now_ms + CONFIG_KERFUR_MOTION_ACTIVE_WINDOW_MS);
 		switch_mode(MODE_IN_HAND_TRACK, frame.now_ms);
+	} else if (det_out.worn) {
+		/* Worn but not walking: short full-rate bursts only while a
+		 * possible grab is being evaluated; otherwise a slow
+		 * heartbeat. Body jostle must not hold us at full rate. */
+		if (frame.now_ms < g_mc.active_until_ms) {
+			switch_mode(MODE_ACTIVE_WINDOW, frame.now_ms);
+		} else {
+			switch_mode(MODE_WORN_WATCH, frame.now_ms);
+		}
 	} else if (frame.now_ms < g_mc.active_until_ms) {
 		switch_mode(MODE_ACTIVE_WINDOW, frame.now_ms);
 	} else if (g_mc.surface_still_confidence >= SURFACE_STILL_SCORE &&
@@ -1714,7 +1921,9 @@ static void sample_work_run(void)
 		return;
 	}
 
-	(void)k_work_reschedule(&g_mc.sample_work, K_MSEC(sample_period_ms()));
+	(void)k_work_reschedule(&g_mc.sample_work,
+				K_MSEC((g_mc.mode == MODE_WORN_WATCH) ?
+				       WORN_POLL_MS : sample_period_ms()));
 }
 
 static void sample_work_handler(struct k_work *work)
@@ -1734,6 +1943,21 @@ static void sensor_event_handler(uint32_t events, void *user_data)
 
 	k_mutex_lock(&g_mc_lock, K_FOREVER);
 	if (!g_mc.enabled || g_mc.battery_critical) {
+		k_mutex_unlock(&g_mc_lock);
+		return;
+	}
+
+	if (g_mc.in_hand_det.worn) {
+		/* Worn: every jostle fires the wake line. Don't spam the app
+		 * with MOTION_WAKE (the pet shouldn't startle in the pocket),
+		 * but keep the timestamp fresh — it feeds the grab-capture
+		 * gate — and run a short full-rate burst to evaluate whether
+		 * this transient was a hand closing around us. */
+		g_mc.last_motion_wake_ms = now_ms;
+		g_mc.active_until_ms = MAX(g_mc.active_until_ms,
+					   now_ms + WORN_ACTIVE_BURST_MS);
+		switch_mode(MODE_ACTIVE_WINDOW, now_ms);
+		schedule_now();
 		k_mutex_unlock(&g_mc_lock);
 		return;
 	}

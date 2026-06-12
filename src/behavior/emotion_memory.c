@@ -27,13 +27,17 @@ LOG_MODULE_REGISTER(emotion_memory, CONFIG_LOG_DEFAULT_LEVEL);
 #define SETTINGS_SUBTREE        "kerfur/emo"
 #define SETTINGS_KEY_TRAITS     "traits"
 
+/* flags bit assignments (records written before a bit existed read as 0). */
+#define EMOTION_MEMORY_FLAG_WORN_EXPRESSIVE BIT(0)
+
 struct emotion_memory_record {
 	uint8_t version;
 	uint8_t personality;
 	int8_t attachment;
 	int8_t trust;
 	int8_t mood;
-	uint8_t reserved[3];
+	uint8_t flags;
+	uint8_t reserved[2];
 	uint32_t lifetime_pets;
 } __packed;
 
@@ -82,6 +86,8 @@ static int settings_set_handler(const char *name, size_t len, settings_read_cb r
 		g_loaded.trust = clamp_trait(rec.trust);
 		g_loaded.mood = clamp_trait(rec.mood);
 		g_loaded.lifetime_pets = rec.lifetime_pets;
+		g_loaded.worn_expressive =
+			(rec.flags & EMOTION_MEMORY_FLAG_WORN_EXPRESSIVE) != 0U;
 		g_loaded_valid = true;
 		return 0;
 	}
@@ -139,6 +145,7 @@ int emotion_memory_store(const struct emotion_memory *in)
 	rec.attachment = (int8_t)clamp_trait(in->attachment);
 	rec.trust = (int8_t)clamp_trait(in->trust);
 	rec.mood = (int8_t)clamp_trait(in->mood);
+	rec.flags = in->worn_expressive ? EMOTION_MEMORY_FLAG_WORN_EXPRESSIVE : 0U;
 	rec.lifetime_pets = in->lifetime_pets;
 
 	err = settings_save_one(SETTINGS_SUBTREE "/" SETTINGS_KEY_TRAITS,
@@ -155,6 +162,8 @@ int emotion_memory_store(const struct emotion_memory *in)
 	g_loaded.trust = rec.trust;
 	g_loaded.mood = rec.mood;
 	g_loaded.lifetime_pets = rec.lifetime_pets;
+	g_loaded.worn_expressive =
+		(rec.flags & EMOTION_MEMORY_FLAG_WORN_EXPRESSIVE) != 0U;
 	g_loaded_valid = true;
 
 	LOG_INF("Emotional memory saved (att=%d trust=%d mood=%d pets=%u pers=%u)",

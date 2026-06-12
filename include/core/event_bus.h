@@ -25,6 +25,10 @@ int app_event_publish_carry_state_with_timestamp(bool in_hand, uint8_t pickup_co
 						 uint8_t in_hand_confidence,
 						 uint8_t walking_confidence,
 						 int64_t timestamp_ms);
+/* Full-payload carry publish for CARRY_STATE_UPDATE / CARRY_CONTEXT_CHANGED. */
+int app_event_publish_carry_with_timestamp(enum app_event_type type,
+					   const struct app_event_carry_state *carry,
+					   int64_t timestamp_ms);
 int app_event_publish_battery_percent(int8_t percent, bool known);
 int app_event_publish_battery_percent_with_timestamp(int8_t percent, bool known,
 						     int64_t timestamp_ms);

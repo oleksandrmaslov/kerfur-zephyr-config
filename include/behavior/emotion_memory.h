@@ -20,6 +20,7 @@ struct emotion_memory {
 	int16_t trust;         /* 0..100 */
 	int16_t mood;          /* 0..100 */
 	uint32_t lifetime_pets;
+	bool worn_expressive;  /* owner's worn-style choice */
 };
 
 #if defined(CONFIG_KERFUR_EMOTION_MEMORY)

@@ -50,6 +50,12 @@ enum app_event_type {
 	APP_EVENT_DISPLAY_AMBIENT_TIMEOUT,
 	APP_EVENT_LOOK_TARGET_UPDATE,
 	APP_EVENT_CARRY_STATE_UPDATE,
+	/* Carry context edge (param = new enum pet_carry_context value;
+	 * payload.carry_state carries the full snapshot). Emitted by the
+	 * motion stack when ON_SURFACE / IN_HAND / WORN resolution changes. */
+	APP_EVENT_CARRY_CONTEXT_CHANGED,
+	/* Worn style config/debug (param: 0 = quiet companion, 1 = expressive). */
+	APP_EVENT_WORN_STYLE_SET,
 	APP_EVENT_BATTERY_PERCENT_UPDATE,
 	APP_EVENT_FACE_FORCE_EXPRESSION,
 	APP_EVENT_FACE_CLEAR_FORCED_EXPRESSION,
@@ -81,6 +87,8 @@ struct app_event_carry_state {
 	uint8_t pickup_confidence;
 	uint8_t in_hand_confidence;
 	uint8_t walking_confidence;
+	uint8_t carry_context;            /* enum pet_carry_context */
+	uint8_t carry_context_confidence; /* 0..100 */
 };
 
 struct app_event_step_batch {

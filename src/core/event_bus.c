@@ -63,6 +63,8 @@ static const char *const g_event_names[APP_EVENT_COUNT] = {
 	[APP_EVENT_DISPLAY_AMBIENT_TIMEOUT] = "DISPLAY_AMBIENT_TIMEOUT",
 	[APP_EVENT_LOOK_TARGET_UPDATE] = "LOOK_TARGET_UPDATE",
 	[APP_EVENT_CARRY_STATE_UPDATE] = "CARRY_STATE_UPDATE",
+	[APP_EVENT_CARRY_CONTEXT_CHANGED] = "CARRY_CONTEXT_CHANGED",
+	[APP_EVENT_WORN_STYLE_SET] = "WORN_STYLE_SET",
 	[APP_EVENT_BATTERY_PERCENT_UPDATE] = "BATTERY_PERCENT_UPDATE",
 	[APP_EVENT_FACE_FORCE_EXPRESSION] = "FACE_FORCE_EXPRESSION",
 	[APP_EVENT_FACE_CLEAR_FORCED_EXPRESSION] = "FACE_CLEAR_FORCED_EXPRESSION",
@@ -212,26 +214,41 @@ int app_event_publish_look_target(int16_t x, int16_t y, uint8_t confidence)
 	return app_event_publish_look_target_with_timestamp(x, y, confidence, k_uptime_get());
 }
 
+int app_event_publish_carry_with_timestamp(enum app_event_type type,
+					   const struct app_event_carry_state *carry,
+					   int64_t timestamp_ms)
+{
+	struct app_event event = {
+		.type = type,
+		.timestamp_ms = timestamp_ms,
+	};
+
+	if (carry != NULL) {
+		event.payload.carry_state = *carry;
+		event.param = (type == APP_EVENT_CARRY_CONTEXT_CHANGED) ?
+			      (int32_t)carry->carry_context :
+			      (carry->in_hand ? 1 : 0);
+	}
+
+	return publish_event(&event);
+}
+
 int app_event_publish_carry_state_with_timestamp(bool in_hand, uint8_t pickup_confidence,
 						 uint8_t in_hand_confidence,
 						 uint8_t walking_confidence,
 						 int64_t timestamp_ms)
 {
-	struct app_event event = {
-		.type = APP_EVENT_CARRY_STATE_UPDATE,
-		.timestamp_ms = timestamp_ms,
-		.param = in_hand ? 1 : 0,
-		.payload = {
-			.carry_state = {
-				.in_hand = in_hand,
-				.pickup_confidence = pickup_confidence,
-				.in_hand_confidence = in_hand_confidence,
-				.walking_confidence = walking_confidence,
-			},
-		},
+	struct app_event_carry_state carry = {
+		.in_hand = in_hand,
+		.pickup_confidence = pickup_confidence,
+		.in_hand_confidence = in_hand_confidence,
+		.walking_confidence = walking_confidence,
+		.carry_context = 0U,            /* PET_CARRY_UNKNOWN */
+		.carry_context_confidence = 0U,
 	};
 
-	return publish_event(&event);
+	return app_event_publish_carry_with_timestamp(APP_EVENT_CARRY_STATE_UPDATE,
+						      &carry, timestamp_ms);
 }
 
 int app_event_publish_carry_state(bool in_hand, uint8_t pickup_confidence,

@@ -60,6 +60,7 @@ target_sources(app PRIVATE
     src/main.c
     src/app/app.c
     src/core/event_bus.c
+    src/behavior/appraisal.c
     src/behavior/behavior_engine.c
     src/behavior/micro_reaction.c
     src/display/display_policy.c

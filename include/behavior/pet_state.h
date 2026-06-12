@@ -6,6 +6,7 @@
 
 #include "behavior/micro_reaction.h"
 
+/* Values are broadcast in the nearby beacon (4 bits) — append only. */
 enum pet_mode {
 	PET_MODE_ASLEEP = 0,
 	PET_MODE_DROWSY,
@@ -15,7 +16,22 @@ enum pet_mode {
 	PET_MODE_TASK_ALERT,
 	PET_MODE_CHARGING,
 	PET_MODE_LOW_POWER,
-	PET_MODE_OVERLOADED
+	PET_MODE_OVERLOADED,
+	PET_MODE_WORN          /* dangling on jeans/backpack, along for the ride */
+};
+
+/* Where the device physically is right now — resolved by the motion stack,
+ * consumed by the behavior situation layer, display policy and diagnostics.
+ *
+ * For a keychain this is the primary context: ON_SURFACE (desk/dock),
+ * IN_HAND (deliberate interaction), WORN (attached to jeans/backpack and
+ * moving with the body), TRANSITION (evidence still ambiguous). */
+enum pet_carry_context {
+	PET_CARRY_UNKNOWN = 0,
+	PET_CARRY_ON_SURFACE,
+	PET_CARRY_IN_HAND,
+	PET_CARRY_WORN,
+	PET_CARRY_TRANSITION,
 };
 
 enum pet_expression {
@@ -38,6 +54,20 @@ enum pet_display_state {
 	DISPLAY_FOREGROUND = 0,
 	DISPLAY_AMBIENT,
 	DISPLAY_OFF,
+};
+
+/* The deterministic situation layer: where/how the pet is living right
+ * now. Resolved by the behavior engine from carry context + power +
+ * social state; selects the appraisal policy (allowed expressions,
+ * per-situation biases) and gates autonomous behaviors. */
+enum pet_situation {
+	PET_SITUATION_RESTING = 0,   /* on a surface, world is calm */
+	PET_SITUATION_ENGAGED,       /* in the owner's hand */
+	PET_SITUATION_WORN_QUIET,    /* dangling on jeans/backpack, resting */
+	PET_SITUATION_WORN_LIVELY,   /* worn but configured to stay expressive */
+	PET_SITUATION_CHARGING,
+	PET_SITUATION_SOCIAL,        /* active Kerfur-to-Kerfur encounter */
+	PET_SITUATION_COUNT
 };
 
 /* Personality biases drive gains/decays in the behavior engine.
@@ -104,6 +134,11 @@ struct pet_state {
 	enum pet_expression current_expression;
 	enum micro_reaction_type current_reaction;
 	enum pet_display_state current_display_state;
+	enum pet_carry_context carry_context;
+	uint8_t carry_context_confidence;
+	/* Worn style: false = quiet companion (display rests, no fidgeting
+	 * while dangling), true = stay expressive while worn. Persisted. */
+	bool worn_expressive;
 	int16_t current_indicator;
 	int16_t current_overlay;
 	int16_t look_target_x;

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
 
 #include "ble/ble_manager.h"
@@ -402,14 +403,14 @@ static int cmd_face_look(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_face_carry(const struct shell *shell, size_t argc, char **argv)
 {
+	struct app_event_carry_state carry = {0};
 	bool in_hand;
-	uint8_t pickup_confidence;
-	uint8_t in_hand_confidence;
-	uint8_t walking_confidence;
 	int err;
 
-	if (argc != 5U) {
-		shell_error(shell, "usage: kerfur face carry <in_hand> <pickup_conf> <in_hand_conf> <walking_conf>");
+	if ((argc < 5U) || (argc > 6U)) {
+		shell_error(shell,
+			    "usage: kerfur face carry <in_hand> <pickup_conf> "
+			    "<in_hand_conf> <walking_conf> [ctx 0-4]");
 		return -EINVAL;
 	}
 
@@ -418,31 +419,46 @@ static int cmd_face_carry(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "invalid in_hand: %s", argv[1]);
 		return err;
 	}
-	err = parse_u8_arg(argv[2], &pickup_confidence);
+	err = parse_u8_arg(argv[2], &carry.pickup_confidence);
 	if (err != 0) {
 		shell_error(shell, "invalid pickup_conf: %s", argv[2]);
 		return err;
 	}
-	err = parse_u8_arg(argv[3], &in_hand_confidence);
+	err = parse_u8_arg(argv[3], &carry.in_hand_confidence);
 	if (err != 0) {
 		shell_error(shell, "invalid in_hand_conf: %s", argv[3]);
 		return err;
 	}
-	err = parse_u8_arg(argv[4], &walking_confidence);
+	err = parse_u8_arg(argv[4], &carry.walking_confidence);
 	if (err != 0) {
 		shell_error(shell, "invalid walking_conf: %s", argv[4]);
 		return err;
 	}
+	carry.in_hand = in_hand;
+	if (argc == 6U) {
+		/* 0 unknown / 1 surface / 2 in_hand / 3 worn / 4 transition */
+		err = parse_u8_arg(argv[5], &carry.carry_context);
+		if ((err != 0) || (carry.carry_context > (uint8_t)PET_CARRY_TRANSITION)) {
+			shell_error(shell, "invalid ctx: %s (0..4)", argv[5]);
+			return -EINVAL;
+		}
+		carry.carry_context_confidence = 80U;
+	}
 
-	err = app_event_publish_carry_state(in_hand, pickup_confidence, in_hand_confidence,
-					    walking_confidence);
+	err = app_event_publish_carry_with_timestamp(APP_EVENT_CARRY_STATE_UPDATE,
+						     &carry, k_uptime_get());
+	if ((err == 0) && (argc == 6U)) {
+		err = app_event_publish_carry_with_timestamp(
+			APP_EVENT_CARRY_CONTEXT_CHANGED, &carry, k_uptime_get());
+	}
 	if (err != 0) {
 		shell_error(shell, "carry publish failed (%d)", err);
 		return err;
 	}
 
-	shell_print(shell, "carry state queued in_hand=%d pickup=%u in_hand_conf=%u walk_conf=%u",
-		    in_hand ? 1 : 0, pickup_confidence, in_hand_confidence, walking_confidence);
+	shell_print(shell, "carry state queued in_hand=%d pickup=%u in_hand_conf=%u walk_conf=%u ctx=%u",
+		    in_hand ? 1 : 0, carry.pickup_confidence, carry.in_hand_confidence,
+		    carry.walking_confidence, carry.carry_context);
 	return 0;
 }
 
@@ -1164,9 +1180,39 @@ static int cmd_emotion_personality(const struct shell *shell, size_t argc, char 
 	return 0;
 }
 
+static int cmd_emotion_worn(const struct shell *shell, size_t argc, char **argv)
+{
+	int32_t style;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur emotion worn <quiet|expressive>");
+		return -EINVAL;
+	}
+
+	if (strcmp(argv[1], "quiet") == 0) {
+		style = 0;
+	} else if (strcmp(argv[1], "expressive") == 0) {
+		style = 1;
+	} else {
+		shell_error(shell, "invalid style: %s (quiet|expressive)", argv[1]);
+		return -EINVAL;
+	}
+
+	err = app_event_publish(APP_EVENT_WORN_STYLE_SET, style);
+	if (err != 0) {
+		shell_error(shell, "worn style publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "worn style -> %s (persisted)", argv[1]);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_emotion,
 	SHELL_CMD(dump, NULL, "Print emotional state to log", cmd_emotion_dump),
 	SHELL_CMD(personality, NULL, "Set personality <id>", cmd_emotion_personality),
+	SHELL_CMD(worn, NULL, "Set worn style <quiet|expressive>", cmd_emotion_worn),
 	SHELL_SUBCMD_SET_END
 );
 

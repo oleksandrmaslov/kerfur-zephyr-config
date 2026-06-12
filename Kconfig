@@ -284,6 +284,18 @@ config KERFUR_TOUCH_IQS7222A_CHANNELS
 
 endif
 
+config KERFUR_WORN_EXPRESSIVE
+	bool "Stay expressive while worn on jeans/backpack"
+	default n
+	help
+	  Default worn style. When disabled (quiet companion, recommended),
+	  a Kerfur detected as WORN lets its screen rest, suppresses motion/
+	  notification display wake-ups and idle fidgeting, keeps counting
+	  steps and stays socially awake (other Kerfurs still light it up).
+	  When enabled, the face stays ambient and reactive while dangling.
+	  The owner's runtime choice (`kerfur emotion worn ...`, future app)
+	  is persisted in emotional memory and overrides this default.
+
 config KERFUR_EMOTION_MEMORY
 	bool "Persist slow emotional traits across reboots"
 	default y

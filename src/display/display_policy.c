@@ -71,11 +71,20 @@ static int32_t jitter_range_ms(int32_t min_ms, int32_t max_ms)
 	return min_ms + (int32_t)rnd;
 }
 
+/* Quiet companion: worn on jeans/backpack with the expressive style off —
+ * the screen rests in the pocket and only moments that matter wake it
+ * (grabs, deliberate touch, charger, other Kerfurs). */
+static bool worn_quiet(const struct pet_state *state)
+{
+	return (state->carry_context == PET_CARRY_WORN) && !state->worn_expressive;
+}
+
 static void schedule_self_wake(const struct pet_state *state, int64_t now_ms)
 {
 	int32_t wake_delay_ms;
 
-	if (!state->ambient_wake_enabled || state->battery_critical) {
+	if (!state->ambient_wake_enabled || state->battery_critical ||
+	    worn_quiet(state)) {
 		g_policy.next_self_wake_ms = INT64_MAX;
 		return;
 	}
@@ -181,9 +190,15 @@ void display_policy_on_event(struct pet_state *state, const struct app_event *ev
 
 	switch (event->type) {
 	case APP_EVENT_PHONE_CONNECTED:
+		if (worn_quiet(state)) {
+			break;
+		}
 		set_foreground_window(state, now_ms, 10 * MSEC_PER_SEC, 45 * MSEC_PER_SEC);
 		break;
 	case APP_EVENT_PHONE_DISCONNECTED:
+		if (worn_quiet(state)) {
+			break;
+		}
 		set_foreground_window(state, now_ms, 8 * MSEC_PER_SEC, 25 * MSEC_PER_SEC);
 		break;
 	case APP_EVENT_USER_TAP:
@@ -197,6 +212,10 @@ void display_policy_on_event(struct pet_state *state, const struct app_event *ev
 		set_foreground_window(state, now_ms, 30 * MSEC_PER_SEC, 120 * MSEC_PER_SEC);
 		break;
 	case APP_EVENT_PHONE_NOTIFICATION_SINGLE:
+		if (worn_quiet(state)) {
+			/* Pocket: feel it emotionally, don't light the screen. */
+			break;
+		}
 		if (asleep_path) {
 			set_foreground_window(state, now_ms, 6 * MSEC_PER_SEC, 25 * MSEC_PER_SEC);
 		} else {
@@ -204,18 +223,30 @@ void display_policy_on_event(struct pet_state *state, const struct app_event *ev
 		}
 		break;
 	case APP_EVENT_PHONE_NOTIFICATION_BURST:
+		if (worn_quiet(state)) {
+			break;
+		}
 		set_foreground_window(state, now_ms, 16 * MSEC_PER_SEC, 45 * MSEC_PER_SEC);
 		break;
 	case APP_EVENT_CHARGER_CONNECTED:
 		set_foreground_window(state, now_ms, 30 * MSEC_PER_SEC, 600 * MSEC_PER_SEC);
 		break;
 	case APP_EVENT_WALKING_START:
+		if (worn_quiet(state)) {
+			break;
+		}
 		set_foreground_window(state, now_ms, 20 * MSEC_PER_SEC, 180 * MSEC_PER_SEC);
 		break;
 	case APP_EVENT_MOTION_WAKE:
+		if (worn_quiet(state)) {
+			break;
+		}
 		set_foreground_window(state, now_ms, 6 * MSEC_PER_SEC, 20 * MSEC_PER_SEC);
 		break;
 	case APP_EVENT_PICKUP_CANDIDATE:
+		if (worn_quiet(state)) {
+			break;
+		}
 		set_foreground_window(state, now_ms, 8 * MSEC_PER_SEC, 25 * MSEC_PER_SEC);
 		break;
 	case APP_EVENT_PICKED_UP:
@@ -267,6 +298,39 @@ void display_policy_on_event(struct pet_state *state, const struct app_event *ev
 		break;
 	case APP_EVENT_ENCOUNTER_START:
 		set_foreground_window(state, now_ms, 20 * MSEC_PER_SEC, 120 * MSEC_PER_SEC);
+		break;
+	case APP_EVENT_CARRY_CONTEXT_CHANGED:
+		/* The behavior engine updates pet_state.carry_context before
+		 * this handler runs (behavior precedes display in app.c). */
+		if (worn_quiet(state)) {
+			/* Settling onto the bag strap: let the screen rest
+			 * soon, and stop self-waking into a pocket. */
+			if (state->current_display_state == DISPLAY_FOREGROUND) {
+				g_policy.foreground_deadline_ms =
+					MIN(g_policy.foreground_deadline_ms,
+					    now_ms + (4 * MSEC_PER_SEC));
+				g_policy.ambient_deadline_ms =
+					MIN(g_policy.ambient_deadline_ms,
+					    g_policy.foreground_deadline_ms +
+						    (10 * MSEC_PER_SEC));
+			} else if (state->current_display_state == DISPLAY_AMBIENT) {
+				g_policy.ambient_deadline_ms =
+					MIN(g_policy.ambient_deadline_ms,
+					    now_ms + (6 * MSEC_PER_SEC));
+			}
+			g_policy.next_self_wake_ms = INT64_MAX;
+		} else if (state->carry_context == PET_CARRY_IN_HAND) {
+			/* Grabbed: be present immediately. */
+			set_foreground_window(state, now_ms, 18 * MSEC_PER_SEC,
+					      90 * MSEC_PER_SEC);
+			schedule_self_wake(state, now_ms);
+		} else if (state->carry_context == PET_CARRY_WORN) {
+			/* Worn but expressive: ambient companionship. */
+			set_foreground_window(state, now_ms, 8 * MSEC_PER_SEC,
+					      120 * MSEC_PER_SEC);
+		} else {
+			schedule_self_wake(state, now_ms);
+		}
 		break;
 	case APP_EVENT_SELF_WAKE_TIMER:
 		if (state->battery_critical) {
