@@ -116,6 +116,28 @@ def trunc_div(a, b):
     return q if (a >= 0) == (b >= 0) else -q
 
 
+# Transition affinity (mirror transition_affinity in behavior_engine.c):
+# small bonus for expressions adjacent to the current one.
+AFFINITY = {
+    "SLEEPY": {"CALM": 5, "CURIOUS": 3},
+    "CALM": {"CURIOUS": 4, "CONTENT": 4, "SLEEPY": 3},
+    "CURIOUS": {"PLAYFUL": 4, "CALM": 3, "HAPPY": 3},
+    "PLAYFUL": {"HAPPY": 5, "CURIOUS": 3, "OVERSTIMULATED": 3},
+    "HAPPY": {"CONTENT": 5, "PLAYFUL": 3},
+    "CONTENT": {"CALM": 4, "HAPPY": 3},
+    "ANNOYED": {"CALM": 4, "OVERSTIMULATED": 3},
+    "OVERSTIMULATED": {"ANNOYED": 4, "CALM": 3},
+    "NEEDY": {"LONELY": 4, "CALM": 3},
+    "LONELY": {"NEEDY": 3, "CALM": 4},
+    "COZY": {"SLEEPY": 4, "CONTENT": 3},
+    "DRAINED": {"SLEEPY": 5, "COZY": 3},
+}
+
+# Incumbency: the current expression's stickiness against affinity pull
+# (mirror EXPR_INCUMBENCY_BONUS in behavior_engine.c).
+INCUMBENCY = 3
+
+
 def score(expr, situation, feats, intent=None, intent_strength=0):
     acc = 0
     for f, w in WEIGHTS[expr].items():
@@ -132,14 +154,36 @@ def allowed(expr, situation):
     return expr in ALLOWED.get(situation, set(EXPRS))
 
 
-def rank(situation, feats, intent=None, intent_strength=0):
+def rank(situation, feats, intent=None, intent_strength=0, current=None):
+    """Full engine model. With `current`, adds transition affinity and
+    the incumbency bonus exactly like update_expression()."""
     rows = []
     for e in EXPRS:
-        s = score(e, situation, feats, intent, intent_strength) \
-            if allowed(e, situation) else -1000
+        if not allowed(e, situation):
+            rows.append((-1000, e))
+            continue
+        s = score(e, situation, feats, intent, intent_strength)
+        if current is not None:
+            s += AFFINITY.get(current, {}).get(e, 0)
+            if e == current:
+                s += INCUMBENCY
         rows.append((s, e))
     rows.sort(reverse=True)
     return rows
+
+
+def margin_to_switch(situation, feats, current, intent=None, strength=0,
+                     hysteresis_margin=4):
+    """How far the best challenger is from actually displacing `current`,
+    including the engine's post-hold margin (margin - 2 floor check)."""
+    rows = rank(situation, feats, intent, strength, current=current)
+    cur = next(s for s, e in rows if e == current)
+    challenger_score, challenger = next(
+        (s, e) for s, e in rows if e != current)
+    # The engine switches only if best >= curr + (margin - 2) after the
+    # hold window (and >= curr + margin inside it).
+    needed = cur + (hysteresis_margin - 2)
+    return challenger, challenger_score - needed
 
 
 # ── Scenario suite ────────────────────────────────────────────────────
@@ -256,6 +300,79 @@ SCENARIOS = [
 ]
 
 
+# ── Stability suite: "is Kerfus too easy to shift?" ─────────────────
+#
+# Each entry: (name, situation, base feats, current expr, perturbation
+# dict, hysteresis margin for that arousal band, expect_flip).
+# A perturbation models one typical event's drive/afterglow deltas.
+
+STABILITY = [
+    # A single tap on a calm pet must not flip the face (the BLINK
+    # micro-reaction is the acknowledgement).
+    ("calm + one tap", "RESTING", F(), "CALM",
+     dict(AROUSAL=32, BOREDOM=19, CURIOSITY=47, STIMULATION=5,
+          COMFORT=3, RECENT_MOTION=100), 8, False),
+
+    # One quiet notification: interest may show, but it must not flip
+    # CALM instantly (NOTIF_PING covers the moment).
+    ("calm + one notification", "RESTING", F(), "CALM",
+     dict(CURIOSITY=51, AROUSAL=34, SOCIAL_LOAD=15, STIMULATION=8,
+          RECENT_NOTIF=100), 8, False),
+
+    # ...but after a burst-driven stretch the shift is legitimate.
+    ("calm + burst storm flips", "RESTING", F(), "CALM",
+     dict(SOCIAL_LOAD=55, BURST=48, AROUSAL=55, STIMULATION=60,
+          RECENT_NOTIF=100, STRESS=35), 8, True),
+
+    # Mid-play wiggle: arousal dipping 70->60 with fading stimulation
+    # must not bounce PLAYFUL away (margin 4 band = high arousal).
+    ("playful survives a wiggle", "ENGAGED",
+     F(AROUSAL=60, TRUST=62, STIMULATION=22, ENERGY=70, CURIOSITY=55,
+       RECENT_MOTION=70, MOOD_HIGH=16), "PLAYFUL",
+     dict(), 4, False),
+
+    # Drowsy boundary: at sleepiness 60 a CALM pet stays CALM...
+    ("calm holds at sleepiness 60", "RESTING",
+     F(SLEEPINESS=60, AROUSAL=22, NEGLECT=30), "CALM",
+     dict(), 8, False),
+
+    # ...and by 75 it genuinely gets sleepy (shift must stay possible).
+    ("sleepy wins by sleepiness 75", "RESTING",
+     F(SLEEPINESS=75, AROUSAL=18, NEGLECT=50), "CALM",
+     dict(), 8, True),
+
+    # Recovery: 35 s after the single notification (recency gone,
+    # afterglow decayed), CURIOUS must hand the face back to CALM.
+    ("curious returns to calm", "RESTING",
+     F(CURIOSITY=49, AROUSAL=28, SOCIAL_LOAD=12), "CURIOUS",
+     dict(), 8, True),
+]
+
+
+def run_stability(verbose=False):
+    failures = 0
+    print("--- stability (single events must not flip the face) ---")
+    for (name, sit, base, current, pert, hyst, expect_flip) in STABILITY:
+        feats = dict(base)
+        feats.update(pert)
+        challenger, gap = margin_to_switch(sit, feats, current,
+                                           hysteresis_margin=hyst)
+        flips = gap >= 0
+        ok = flips == expect_flip
+        status = "ok  " if ok else "FAIL"
+        if not ok:
+            failures += 1
+        verdict = "flips" if flips else "holds"
+        print(f"[{status}] {name:34s} {current} {verdict} "
+              f"(challenger {challenger}, gap {gap:+d}, "
+              f"want {'flip' if expect_flip else 'hold'})")
+        if verbose or not ok:
+            rows = rank(sit, feats, current=current)
+            top = ", ".join(f"{e}={s}" for s, e in rows[:5])
+            print(f"        {top}")
+    return failures
+
+
 def run_suite(verbose=False):
     failures = 0
     for (name, sit, feats, intent, strength, want, margin, near_ok) \
@@ -277,10 +394,13 @@ def run_suite(verbose=False):
             top = ", ".join(f"{e}={s}" for s, e in rows[:5])
             print(f"        {top}")
     print()
+    failures += run_stability(verbose)
+    print()
     if failures:
-        print(f"{failures} scenario(s) FAILED")
+        print(f"{failures} check(s) FAILED")
         return 1
-    print(f"all {len(SCENARIOS)} scenarios pass")
+    print(f"all {len(SCENARIOS)} scenarios + {len(STABILITY)} "
+          f"stability checks pass")
     return 0
 
 

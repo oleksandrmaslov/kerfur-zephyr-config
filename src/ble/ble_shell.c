@@ -139,6 +139,15 @@ static int parse_i32_arg(const char *arg, int32_t *value)
 }
 
 #if defined(CONFIG_KERFUR_ENABLE_NEARBY)
+#include "nearby/kerfur_nearby.h"
+#include "nearby/encounter_log.h"
+
+/* Static buffers for shell dump commands — shell commands run single-threaded
+ * so a single shared buffer per type is safe.  Stack allocation of these would
+ * overflow at CONFIG_KERFUR_NEARBY_MAX_FRIENDS = 64 (≈4 KB per frame). */
+static struct kerfur_friend_record s_shell_friend_buf[CONFIG_KERFUR_NEARBY_MAX_FRIENDS];
+static struct kerfur_peer s_shell_peer_buf[CONFIG_KERFUR_NEARBY_PEER_TABLE_SIZE];
+
 static int parse_u32_arg(const char *arg, uint32_t *value)
 {
 	char *endptr;
@@ -1090,6 +1099,254 @@ static int cmd_nearby_end(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "ENCOUNTER_END queued id=0x%08x duration=%ds", id, duration_s);
 	return 0;
 }
+
+static int cmd_nearby_peers_dump(const struct shell *shell, size_t argc, char **argv)
+{
+	size_t count;
+	size_t i;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	count = kerfur_nearby_dump_peers(s_shell_peer_buf, ARRAY_SIZE(s_shell_peer_buf));
+	if (count == 0U) {
+		shell_print(shell, "(no peers in table)");
+		return 0;
+	}
+
+	shell_print(shell, "%-10s  %-12s  %-7s  %-5s  %-4s  friend  session",
+		    "id", "state", "rssi_avg", "seen", "eid");
+	for (i = 0U; i < count; i++) {
+		const struct kerfur_peer *p = &s_shell_peer_buf[i];
+		const char *state_str;
+
+		switch (p->state) {
+		case KERFUR_PEER_STATE_NONE:       state_str = "NONE";       break;
+		case KERFUR_PEER_STATE_SEEN:       state_str = "SEEN";       break;
+		case KERFUR_PEER_STATE_NEAR:       state_str = "NEAR";       break;
+		case KERFUR_PEER_STATE_INTERACTING:state_str = "INTERACT";   break;
+		case KERFUR_PEER_STATE_COOLDOWN:   state_str = "COOLDOWN";   break;
+		default:                           state_str = "?";          break;
+		}
+
+		shell_print(shell, "0x%08x  %-12s  %7d  %5u  %4u  %s(%d)  %u",
+			    p->ephemeral_id, state_str,
+			    (int)(p->rssi_avg_x16 / 16),
+			    p->seen_count, p->encounter_id,
+			    p->is_friend ? "YES " : "no  ", (int)p->friend_index,
+			    p->session_encounters);
+	}
+	return 0;
+}
+
+static int cmd_nearby_friends_dump(const struct shell *shell, size_t argc, char **argv)
+{
+	size_t count;
+	size_t i;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	count = kerfur_nearby_dump_friends(s_shell_friend_buf, ARRAY_SIZE(s_shell_friend_buf));
+	if (count == 0U) {
+		shell_print(shell, "(no confirmed friends stored)");
+		return 0;
+	}
+
+	shell_print(shell, "%-4s  %-15s  %-9s  expected_id",
+		    "slot", "nickname", "encounters");
+	for (i = 0U; i < count; i++) {
+		const struct kerfur_friend_record *f = &s_shell_friend_buf[i];
+		uint32_t expected = kerfur_nearby_friend_expected_id((uint8_t)f->friend_index);
+
+		shell_print(shell, "%-4d  %-15s  %-9u  0x%08x",
+			    (int)f->friend_index,
+			    f->nickname[0] ? f->nickname : "(unnamed)",
+			    f->encounter_count,
+			    expected);
+	}
+	return 0;
+}
+
+static int cmd_nearby_friends_resolve(const struct shell *shell, size_t argc, char **argv)
+{
+	uint32_t ephemeral_id;
+	int8_t slot;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby friends resolve <ephemeral_id>");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &ephemeral_id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+
+	slot = kerfur_nearby_resolve_ephemeral_id(ephemeral_id);
+	if (slot >= 0) {
+		size_t count = kerfur_nearby_dump_friends(s_shell_friend_buf,
+							  ARRAY_SIZE(s_shell_friend_buf));
+		const char *name = "(unknown)";
+		size_t i;
+
+		for (i = 0U; i < count; i++) {
+			if (s_shell_friend_buf[i].friend_index == slot) {
+				name = s_shell_friend_buf[i].nickname[0]
+					? s_shell_friend_buf[i].nickname : "(unnamed)";
+				break;
+			}
+		}
+		shell_print(shell, "0x%08x -> friend slot %d (%s)", ephemeral_id, (int)slot, name);
+	} else {
+		shell_print(shell, "0x%08x -> unknown (not a confirmed friend)", ephemeral_id);
+	}
+	return 0;
+}
+
+/* Test-only add_friend command: accepts a hex key string (64 hex chars = 32 bytes).
+ * In production, friends are added by the companion app via BLE characteristic. */
+static int cmd_nearby_friends_add(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t key[KERFUR_FRIEND_KEY_LEN];
+	const char *hex;
+	const char *nick;
+	size_t nick_len;
+	size_t i;
+	int slot;
+
+	if ((argc < 2U) || (argc > 3U)) {
+		shell_error(shell,
+			    "usage: kerfur nearby friends add <64-hex-chars> [nickname]\n"
+			    "  (this is a dev/test command; production friends come from the app)");
+		return -EINVAL;
+	}
+
+	hex = argv[1];
+	if (strlen(hex) != (KERFUR_FRIEND_KEY_LEN * 2U)) {
+		shell_error(shell, "key must be exactly 64 hex characters");
+		return -EINVAL;
+	}
+
+	for (i = 0U; i < KERFUR_FRIEND_KEY_LEN; i++) {
+		char byte_str[3] = {hex[i * 2U], hex[i * 2U + 1U], '\0'};
+		char *endptr;
+		unsigned long val;
+
+		val = strtoul(byte_str, &endptr, 16);
+		if (*endptr != '\0') {
+			shell_error(shell, "invalid hex at position %u", (unsigned)(i * 2U));
+			return -EINVAL;
+		}
+		key[i] = (uint8_t)val;
+	}
+
+	nick = (argc == 3U) ? argv[2] : NULL;
+	nick_len = (nick != NULL) ? strlen(nick) : 0U;
+
+	slot = kerfur_nearby_add_friend(key, nick, nick_len);
+	if (slot == -ENOMEM) {
+		shell_error(shell, "friend table full");
+		return -ENOMEM;
+	}
+	if (slot < 0) {
+		shell_error(shell, "add_friend failed (%d)", slot);
+		return slot;
+	}
+
+	shell_print(shell, "Friend added: slot=%d nick=%s", slot,
+		    (nick != NULL) ? nick : "(none)");
+	return 0;
+}
+
+static int cmd_nearby_friends_remove(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t idx;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby friends remove <slot>");
+		return -EINVAL;
+	}
+
+	err = parse_u8_arg(argv[1], &idx);
+	if (err != 0) {
+		shell_error(shell, "invalid slot: %s", argv[1]);
+		return err;
+	}
+
+	err = kerfur_nearby_remove_friend(idx);
+	if (err == -ENOENT) {
+		shell_warn(shell, "slot %u is not in use", idx);
+		return 0;
+	}
+	if (err == -EINVAL) {
+		shell_error(shell, "slot %u out of range", idx);
+		return -EINVAL;
+	}
+	if (err != 0) {
+		shell_error(shell, "remove_friend failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "Friend slot %u removed (NVS tombstoned)", idx);
+	return 0;
+}
+
+/* Simulates an ephemeral ID rotation for the current active friend (slot 0
+ * by default) so the rotation-continuity logic can be exercised on the bench. */
+static int cmd_nearby_friends_test_rotate(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t slot = 0U;
+	size_t count;
+	uint32_t old_id;
+	uint32_t new_id;
+	int err;
+
+	if (argc > 2U) {
+		shell_error(shell, "usage: kerfur nearby friends test_rotate [slot]");
+		return -EINVAL;
+	}
+	if (argc == 2U) {
+		err = parse_u8_arg(argv[1], &slot);
+		if (err != 0) {
+			shell_error(shell, "invalid slot: %s", argv[1]);
+			return err;
+		}
+	}
+
+	count = kerfur_nearby_dump_friends(s_shell_friend_buf, ARRAY_SIZE(s_shell_friend_buf));
+	if (count == 0U) {
+		shell_warn(shell, "no confirmed friends stored — add one first");
+		return 0;
+	}
+
+	old_id = kerfur_nearby_friend_expected_id(slot);
+	if (old_id == 0U) {
+		shell_warn(shell, "slot %u: cannot predict ID (wall clock not synced?)", slot);
+		return 0;
+	}
+
+	/* Inject the current expected ID as a scan candidate so the peer table
+	 * picks it up as a friend; then demonstrate that resolve still works. */
+	{
+		struct kerfur_scan_candidate cand = {0};
+
+		cand.ephemeral_id = old_id;
+		cand.rssi = -60;
+		cand.character_id = 0U;
+		cand.timestamp_ms = k_uptime_get();
+		kerfur_nearby_ingest_candidate(&cand);
+	}
+
+	new_id = kerfur_nearby_friend_expected_id(slot);
+	shell_print(shell, "slot %u: injected id=0x%08x  current_expected=0x%08x  resolve=%d",
+		    slot, old_id, new_id,
+		    (int)kerfur_nearby_resolve_ephemeral_id(old_id));
+	return 0;
+}
 #endif /* CONFIG_KERFUR_ENABLE_NEARBY */
 
 static int cmd_ble_gb_test(const struct shell *shell, size_t argc, char **argv)
@@ -1239,9 +1496,20 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_nearby_inject,
 	SHELL_SUBCMD_SET_END
 );
 
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_nearby_friends,
+	SHELL_CMD(dump, NULL, "List all stored confirmed friends", cmd_nearby_friends_dump),
+	SHELL_CMD(resolve, NULL, "Resolve ephemeral ID to friend slot", cmd_nearby_friends_resolve),
+	SHELL_CMD(add, NULL, "Add friend <64-hex-key> [nickname] (dev/test)", cmd_nearby_friends_add),
+	SHELL_CMD(remove, NULL, "Remove friend by slot index", cmd_nearby_friends_remove),
+	SHELL_CMD(test_rotate, NULL, "Simulate ID rotation for slot [0]", cmd_nearby_friends_test_rotate),
+	SHELL_SUBCMD_SET_END
+);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_nearby,
 	SHELL_CMD(inject, &sub_kerfur_nearby_inject, "Inject nearby/encounter events", NULL),
 	SHELL_CMD(end, NULL, "Force ENCOUNTER_END <id> [duration_s]", cmd_nearby_end),
+	SHELL_CMD(peers, NULL, "Dump live peer table", cmd_nearby_peers_dump),
+	SHELL_CMD(friends, &sub_kerfur_nearby_friends, "Confirmed friend management", NULL),
 	SHELL_SUBCMD_SET_END
 );
 #endif /* CONFIG_KERFUR_ENABLE_NEARBY */

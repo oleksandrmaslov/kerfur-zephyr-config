@@ -107,6 +107,16 @@ struct app_event_peer {
 	uint32_t encounter_id;       /* 0 if not applicable */
 	int8_t   rssi;
 	bool     is_friend;
+	/* Stable relationship identity across ephemeral ID rotation.
+	 * -1 = not a confirmed friend; >=0 = index in the persistent friend
+	 * table.  The behavior engine uses this (not ephemeral_id) to track
+	 * the current active peer so a mid-encounter rotation is transparent. */
+	int8_t   friend_index;
+	/* Completed encounters with this peer in the current power cycle.
+	 * 0 = first meeting ever (stranger); ≥1 = met before this session
+	 * ("familiar").  Used by the behavior engine to graduate recognition
+	 * warmth without requiring explicit app pairing. */
+	uint8_t  session_encounters;
 	uint8_t  character_id;
 	uint8_t  mode_summary;
 	uint8_t  expression_summary;

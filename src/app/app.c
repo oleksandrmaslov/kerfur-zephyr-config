@@ -52,7 +52,14 @@ static void app_handle_event(struct pet_state *pet, const struct app_event *even
 	if (event->type == APP_EVENT_TICK_1S) {
 		kerfur_nearby_on_pet_tick(pet);
 		kerfur_nearby_tick(event->timestamp_ms);
-		pet->social_overload = (kerfur_nearby_active_peer_count() > 3U);
+		/* social_overload is now driven by the emotion engine's social_load
+		 * accumulating over time — not a raw headcount snapshot here. */
+	}
+	/* Provide a wall-clock reference so friend ID slots align across devices.
+	 * The companion app sets APP_EVENT_TIME_SYNC once connected; after that
+	 * both Kerfus units predict each other's ephemeral IDs from the same slot. */
+	if ((event->type == APP_EVENT_TIME_SYNC) && (event->param >= 946684800)) {
+		kerfur_nearby_set_wall_clock((int64_t)event->param, event->timestamp_ms);
 	}
 #endif
 

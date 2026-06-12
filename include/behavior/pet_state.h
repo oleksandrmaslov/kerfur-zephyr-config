@@ -169,6 +169,10 @@ struct pet_state {
 	bool social_overload;
 	bool encounter_sync_pending;
 	uint32_t current_active_peer_id;
+	/* Stable friend identity for the current active peer.  -1 = not a
+	 * confirmed friend.  Used instead of ephemeral_id in PEER_LOST /
+	 * ENCOUNTER_END comparisons so mid-encounter ID rotation is transparent. */
+	int8_t current_active_friend_index;
 	int16_t social_indicator;             /* enum kerfur_face_indicator_id; 0 = none */
 	int64_t social_indicator_until_ms;
 	int64_t last_social_glance_ms;

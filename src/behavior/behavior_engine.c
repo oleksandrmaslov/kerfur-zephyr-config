@@ -812,6 +812,13 @@ static void apply_tick_1s(struct pet_state *state, int64_t now_ms)
 	/* Context afterglow decay */
 	decay_context();
 
+	/* Social overload: emerges from social_load accumulating over time, not
+	 * from a raw peer headcount.  Multiple simultaneous encounters drive
+	 * social_load up via ENCOUNTER_START (+4 each); it decays in the 10 s
+	 * tick.  The flag propagates to the beacon so nearby peers know we are
+	 * saturated and can choose not to initiate new encounters. */
+	state->social_overload = (state->social_load > 55) && (state->stress > 30);
+
 	/* Autonomous idle micro-life */
 	maybe_idle_quirk(state, now_ms);
 
@@ -1617,10 +1624,13 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 
 	case APP_EVENT_PEER_NEAR: {
 		const bool is_friend = event->payload.peer.is_friend;
+		const bool is_familiar = !is_friend &&
+					 (event->payload.peer.session_encounters > 0U);
 		const enum peer_vibe vibe = peer_vibe_from_payload(&event->payload.peer);
 
 		state->peer_nearby = true;
 		state->current_active_peer_id = event->payload.peer.ephemeral_id;
+		state->current_active_friend_index = event->payload.peer.friend_index;
 		state->peer_known_friend = is_friend;
 		state->social_load += 1;
 
@@ -1630,7 +1640,17 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 			state->curiosity += scale_pct(5, personality()->social_pct);
 			state->attachment += 2;
 			nudge_mood(3);
+		} else if (is_familiar) {
+			/* Met this peer earlier in the session — warmer than a
+			 * stranger, less novel than a friend.  More comfort, less
+			 * raw stimulation. */
+			g_runtime.ctx.social_warmth += scale_pct(18, personality()->social_pct);
+			g_runtime.ctx.comfort += 4;
+			state->curiosity += scale_pct(3, personality()->social_pct);
+			state->attachment += 1;
+			nudge_mood(2);
 		} else {
+			/* Fresh stranger — curious, stimulating. */
 			g_runtime.ctx.social_warmth += scale_pct(15, personality()->social_pct);
 			g_runtime.ctx.stimulation += 5;
 			state->curiosity += scale_pct(6, personality()->social_pct);
@@ -1670,13 +1690,23 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		break;
 	}
 
-	case APP_EVENT_PEER_LOST:
+	case APP_EVENT_PEER_LOST: {
+		/* Use friend_index (stable across ID rotation) when available;
+		 * fall back to ephemeral_id for unknown peers. */
+		const int8_t lost_fidx = event->payload.peer.friend_index;
+		const bool is_active_peer =
+			(lost_fidx >= 0)
+				? (state->current_active_friend_index == lost_fidx)
+				: (state->current_active_peer_id ==
+				   event->payload.peer.ephemeral_id);
+
 		g_runtime.ctx.social_warmth -= 10;
 
-		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
+		if (is_active_peer) {
 			state->peer_nearby = false;
 			state->peer_known_friend = false;
 			state->current_active_peer_id = 0U;
+			state->current_active_friend_index = -1;
 		}
 		if (state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE ||
 		    state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_FILLED) {
@@ -1684,15 +1714,24 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 			state->social_indicator_until_ms = 0;
 		}
 		break;
+	}
 
 	case APP_EVENT_ENCOUNTER_START: {
 		const bool is_friend = event->payload.peer.is_friend;
+		const bool is_familiar = !is_friend &&
+					 (event->payload.peer.session_encounters > 0U);
 		const enum peer_vibe vibe = peer_vibe_from_payload(&event->payload.peer);
 		enum micro_reaction_type hello;
 
 		state->peer_nearby = true;
 		state->current_active_peer_id = event->payload.peer.ephemeral_id;
+		state->current_active_friend_index = event->payload.peer.friend_index;
 		state->peer_known_friend = is_friend;
+
+		/* Social load accumulates per-encounter so sustained multi-device
+		 * presence eventually produces genuine emotional saturation.
+		 * Friends tax less — they energize rather than drain. */
+		state->social_load += is_friend ? 2 : 4;
 
 		if (is_friend) {
 			g_runtime.ctx.social_warmth += scale_pct(30, personality()->social_pct);
@@ -1704,7 +1743,7 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 			state->stress -= 2;
 			nudge_mood(8);
 
-			/* Reuniting when bored is extra warm */
+			/* Reuniting when bored is extra warm. */
 			if (state->boredom > 40) {
 				state->boredom -= 8;
 				state->attachment += 3;
@@ -1713,21 +1752,17 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 			hello = REACTION_HAPPY_BOUNCE;
 			switch (vibe) {
 			case PEER_VIBE_RESTING:
-				/* Settle in next to a resting friend instead
-				 * of bouncing at it. */
 				state->sleepiness += 2;
 				state->arousal -= 1;
 				g_runtime.ctx.stimulation -= 6;
 				hello = REACTION_PET_BOW;
 				break;
 			case PEER_VIBE_STRAINED:
-				/* Worry for the friend: gentle and alert. */
 				state->stress += scale_pct(2, personality()->stress_pct);
 				state->curiosity += 4;
 				hello = REACTION_GLANCE_LEFT;
 				break;
 			case PEER_VIBE_BRIGHT:
-				/* Joy is contagious. */
 				state->arousal += scale_pct(4, personality()->play_pct);
 				nudge_mood(4);
 				break;
@@ -1738,7 +1773,49 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_FILLED,
 					      now, 3000);
 			trigger_reaction(state, hello, now);
+
+		} else if (is_familiar) {
+			/* Already met this Kerfur earlier this session: recognition
+			 * warmth — comfortable, a little less novel than the first
+			 * meeting, more trust than a total stranger. */
+			g_runtime.ctx.social_warmth += scale_pct(24, personality()->social_pct);
+			g_runtime.ctx.comfort += 8;
+			g_runtime.ctx.stimulation += 6;
+
+			state->attachment += 3;
+			state->trust += 2;
+			state->curiosity += scale_pct(3, personality()->social_pct);
+			nudge_mood(5);
+
+			hello = REACTION_PET_BOW;
+			switch (vibe) {
+			case PEER_VIBE_RESTING:
+				state->arousal -= 1;
+				g_runtime.ctx.stimulation -= 4;
+				hello = REACTION_GLANCE_LEFT;
+				break;
+			case PEER_VIBE_BRIGHT:
+				state->arousal += scale_pct(2, personality()->play_pct);
+				nudge_mood(2);
+				if (g_runtime.intent == PET_INTENT_PLAY) {
+					hello = REACTION_HAPPY_BOUNCE;
+				}
+				break;
+			case PEER_VIBE_STRAINED:
+				state->stress += scale_pct(1, personality()->stress_pct);
+				state->curiosity += 2;
+				break;
+			default:
+				break;
+			}
+
+			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+					      now, 2500);
+			trigger_reaction(state, hello, now);
+
 		} else {
+			/* First encounter with this peer — curious, stimulating,
+			 * cautiously open. */
 			g_runtime.ctx.social_warmth += scale_pct(20, personality()->social_pct);
 			g_runtime.ctx.stimulation += 10;
 
@@ -1746,7 +1823,6 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 			state->attachment += 2;
 			nudge_mood(3);
 
-			/* Observing intent amplifies curiosity */
 			if (g_runtime.intent == PET_INTENT_OBSERVE) {
 				state->curiosity += 3;
 			}
@@ -1754,7 +1830,6 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 			hello = REACTION_PET_BOW;
 			switch (vibe) {
 			case PEER_VIBE_RESTING:
-				/* A quiet once-over of the sleepy stranger. */
 				state->arousal -= 1;
 				g_runtime.ctx.stimulation -= 5;
 				hello = REACTION_GLANCE_RIGHT;
@@ -1786,25 +1861,48 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		break;
 	}
 
-	case APP_EVENT_ENCOUNTER_END:
-		g_runtime.ctx.social_warmth -= 15;
+	case APP_EVENT_ENCOUNTER_END: {
+		const int8_t end_fidx = event->payload.peer.friend_index;
+		const bool is_friend_enc = event->payload.peer.is_friend;
+		const bool is_active_enc =
+			(end_fidx >= 0)
+				? (state->current_active_friend_index == end_fidx)
+				: (state->current_active_peer_id ==
+				   event->payload.peer.ephemeral_id);
 
-		if (event->payload.peer.duration_s >= 30) {
-			state->boredom += 4;
+		if (is_friend_enc) {
+			/* Friend is leaving: warm afterglow lingers.  Social
+			 * warmth drops less, no boredom spike — saying goodbye
+			 * to a friend is not the same as being left alone. */
+			g_runtime.ctx.social_warmth -= 8;
+			if (event->payload.peer.duration_s >= 60) {
+				nudge_mood(4);  /* real visit */
+			} else if (event->payload.peer.duration_s >= 20) {
+				nudge_mood(2);
+			}
+			trigger_reaction(state, REACTION_GLANCE_LEFT, now);
+		} else {
+			/* Unknown / familiar peer departed. */
+			g_runtime.ctx.social_warmth -= 15;
+			if (event->payload.peer.duration_s >= 30) {
+				state->boredom += 3;
+			}
+			if (event->payload.peer.duration_s >= 60) {
+				nudge_mood(2);
+			}
+			trigger_reaction(state, REACTION_GLANCE_RIGHT, now);
 		}
-		/* A proper visit leaves a warm afterglow even once it ends. */
-		if (event->payload.peer.duration_s >= 60) {
-			nudge_mood(2);
-		}
-		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
+
+		if (is_active_enc) {
 			state->peer_nearby = false;
 			state->peer_known_friend = false;
 			state->current_active_peer_id = 0U;
+			state->current_active_friend_index = -1;
 		}
 		state->social_indicator = 0;
 		state->social_indicator_until_ms = 0;
-		trigger_reaction(state, REACTION_GLANCE_RIGHT, now);
 		break;
+	}
 
 	case APP_EVENT_PEER_PLAY_INVITE:
 		g_runtime.ctx.stimulation += 10;
@@ -2405,6 +2503,15 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 				       transition_affinity(curr_expr,
 							   (enum pet_expression)expr);
 		}
+
+		/* Incumbency: transition affinity hands neighbors up to +5
+		 * while the incumbent gets 0, which at the tight hold margin
+		 * would make adjacent flips cheaper than no hysteresis at
+		 * all. This stickiness restores the balance; genuine shifts
+		 * (validated in tools/appraisal_calibrate.py) still win. */
+		if (scores[curr_expr] > -1000) {
+			scores[curr_expr] += 3;
+		}
 	}
 
 	best_expr = PET_EXPR_CALM;
@@ -2444,6 +2551,11 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 
 	(void)memset(state, 0, sizeof(*state));
 	(void)memset(&g_runtime, 0, sizeof(g_runtime));
+
+	/* int8_t -1 is all-bits-one; memset(0) above would leave this as 0 which
+	 * is a valid friend slot index.  Force the sentinel explicitly. */
+	state->current_active_friend_index = -1;
+
 	g_runtime.forced_expression = PET_EXPR_CALM;
 	g_runtime.forced_expression_active = false;
 

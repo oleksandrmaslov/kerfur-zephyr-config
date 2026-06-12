@@ -51,7 +51,8 @@ static int find_slot_locked(uint32_t encounter_id)
 	return -1;
 }
 
-uint32_t encounter_log_begin(uint32_t ephemeral_id, uint8_t character_id, int64_t now_ms)
+uint32_t encounter_log_begin(uint32_t ephemeral_id, uint8_t character_id,
+			     int8_t friend_index, int64_t now_ms)
 {
 	struct encounter_record *rec;
 	uint32_t id;
@@ -71,6 +72,7 @@ uint32_t encounter_log_begin(uint32_t ephemeral_id, uint8_t character_id, int64_
 	rec->encounter_id = id;
 	rec->ephemeral_id = ephemeral_id;
 	rec->character_id = character_id;
+	rec->friend_index = friend_index;
 	rec->start_uptime_ms = now_ms;
 	rec->end_uptime_ms = 0;
 	rec->encounter_type = (uint8_t)KERFUR_ENCOUNTER_FIRST_CONTACT;

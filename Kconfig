@@ -103,6 +103,20 @@ config KERFUR_NEARBY_ID_ROTATE_S
 	range 60 86400
 	default 900
 
+config KERFUR_NEARBY_MAX_FRIENDS
+	int "Maximum confirmed-friend slots (persisted in NVS)"
+	range 0 128
+	default 64
+	help
+	  Number of confirmed-friend relationships that survive reboots and
+	  ephemeral ID rotation.  Friends are stored in settings/NVS and
+	  recognized by IRK-style cryptographic ID resolution — requires
+	  wall-clock sync via the companion app.  Set to 0 to disable
+	  persistent friend recognition entirely.
+	  64 is enough for years of carrying Kerfur to meetups and events.
+	  RAM cost: ~64 bytes per slot.  CPU cost: 3 CRC32 calls per friend
+	  per received beacon (~2 µs each on nRF52840).
+
 endif
 
 config KERFUR_ENABLE_SHELL_CMDS

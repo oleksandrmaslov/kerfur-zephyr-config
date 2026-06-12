@@ -56,6 +56,27 @@ switch. They were replaced by a hybrid **context + table** design:
 
 `appraisal.c` is pure (no globals, no time reads) — unit-test it off-target.
 
+**Calibration is executable.** `tools/appraisal_calibrate.py` mirrors the
+integer scoring exactly (C truncation included) and asserts 20 canonical
+scenarios (winner + margin) plus 7 stability checks. The table in
+`appraisal.c` is baked from it; edit the script first, make it pass, then
+copy the numbers over.
+
+**Why moods don't flap.** Stability is layered, and measured:
+- *Mood* is rate-limited by construction (±2/min through the accumulator,
+  hours-scale baseline pull) — no event can swing it.
+- *Drives* move by small event deltas, and the weights map them at ≤0.85:1
+  (the legacy formulas used 1.0:1 for their dominant terms), so per-event
+  score movement shrank.
+- *Expressions* are guarded by hold windows (4–12 s), switch margins
+  (4–10), and an **incumbency bonus** (+3 to the current expression) that
+  offsets the transition-affinity pull toward neighbors (up to +5), which
+  previously made adjacent flips cheaper than no hysteresis at all.
+- Measured headroom (stability suite): one tap is 16 points short of
+  flipping CALM, one notification 8 short, a mid-play arousal wiggle 19
+  short — while a burst storm (+54), genuine drowsiness at sleepiness ≈75
+  (+7), and post-stimulus recovery to CALM (+15) all still shift cleanly.
+
 ## 1b. Carry context: ON_SURFACE / IN_HAND / WORN (keychain reality)
 
 The motion stack resolves `pet_state.carry_context` — see §11 of
@@ -245,7 +266,8 @@ reactions, expression transitions, blinking (for gaze), battery-low/critical
 
 | What | Where |
 |------|-------|
-| **Expression weights / situation biases / masks** | `g_appraisal[]`, `g_situations[]` in `src/behavior/appraisal.c` (the one place for scoring tuning) |
+| **Expression weights / situation biases / masks** | `g_appraisal[]`, `g_situations[]` in `src/behavior/appraisal.c` — tune via `tools/appraisal_calibrate.py` first, then bake |
+| Expression stickiness | incumbency bonus (+3) in `update_expression`, hold/margin table above it, `transition_affinity` |
 | Mood rate limit / accumulator bound | `MOOD_ACCUM_LIMIT`, transfer code in `apply_tick_60s` |
 | Mood event nudges | `nudge_mood(...)` calls in `apply_event` |
 | Personality table | `g_personalities[]` |
@@ -259,6 +281,94 @@ reactions, expression transitions, blinking (for gaze), battery-low/critical
 | Swing periodicity band | `SWING_*` in `motion_classifier.c` |
 | Worn heartbeat / burst length | `WORN_POLL_MS`, `WORN_ACTIVE_BURST_MS` |
 | Worn shake thresholds | worn-scaled constants in `check_shake` |
+
+## 11. Nearby social architecture: friend recognition + privacy model
+
+(2026-06-12; detailed rationale in `KERFUS_AGENT_HANDOFF.md` §5b.)
+
+### Why the old system broke
+
+The old friend table stored session-only ephemeral IDs.  After any ID rotation
+(~15 min) or reboot, friends looked like strangers — `PEER_NEAR` with
+`is_friend = false`, no warm greeting, encounter count stuck at zero.  The
+emotion engine received incoherent context.
+
+### How the new system works
+
+**Over-the-air ID (unchanged):** `ephemeral_id` = `crc32(device_secret || slot)`,
+rotates every `KERFUR_NEARBY_ID_ROTATE_S` seconds.  Nothing persistent is
+ever broadcast.
+
+**Friend-layer (new):**
+
+1. Confirmed friends share their `device_secret` via the companion app (stored
+   in NVS, never retransmitted).
+2. On every incoming beacon, `resolve_friend_id()` checks whether the ephemeral
+   ID matches any stored friend key for the current wall-clock slot (±1 for
+   boundary tolerance).
+3. A match sets `peer->friend_index` (stable slot 0..MAX_FRIENDS-1, -1 = unknown).
+4. `friend_index` propagates through: `kerfur_peer` → `app_event_peer` →
+   `encounter_record` → `pet_state.current_active_friend_index`.
+
+**Wall-clock dependency:** `resolve_friend_id()` returns -1 if `g_wallclock_valid`
+is false.  Clock becomes valid once the companion app sends `APP_EVENT_TIME_SYNC`
+(unix timestamp ≥ 946684800); `kerfur_nearby_set_wall_clock()` is called from
+`app.c` and immediately rotates the local ID to the wall-clock slot.
+
+**Mid-encounter rotation continuity:**
+
+```
+scan sees new ephemeral_id
+    ↓
+resolve_friend_id() → match → friend_index = F
+    ↓
+peer_find_friend_locked(F) → existing peer entry found
+    ↓
+peer->ephemeral_id updated silently (no eviction)
+    ↓
+emotion engine: no PEER_LOST, no encounter gap, friend_index unchanged
+```
+
+**Behavior engine stability:** identity comparisons in `PEER_LOST` and
+`ENCOUNTER_END` check `friend_index` first (stable), falling back to
+`ephemeral_id` only for non-confirmed peers.
+
+**NVS writes:** encounter-count increments are queued in a bitmask and flushed
+by `kerfur_nearby_tick()` *after* `g_peer_mutex` is released — no flash write
+while holding the peer lock.
+
+**Lock order:** `g_secret_mutex` → `g_friend_mutex` → `g_peer_mutex`
+(`resolve_friend_id` is called *before* peer lock is taken; never reverse this).
+
+### Privacy properties
+
+| Property | Guarantee |
+|----------|-----------|
+| Over-the-air ID | Ephemeral, rotates every ~15 min; never stable across rotations |
+| `device_secret` / `peer_key` | NVS only; never in any beacon or advertisement |
+| Recognizability without app | Zero — clock not valid → returns -1 → curious stranger |
+| Persistent recognition | Requires: (a) explicit companion-app pairing + (b) both devices clock-synced |
+| Retroactive tracking | Impossible — each slot's ID is independently random to any device without the key |
+
+### Diagnostics
+
+```
+kerfur nearby peers           -- live peer table (state, rssi, friend_index)
+kerfur nearby friends dump    -- stored friends (slot, nickname, encounters, expected_id)
+kerfur nearby friends resolve <id>  -- resolve an observed ID → friend slot
+kerfur nearby friends add <64hex> [nick]  -- dev/test: add a friend by key
+kerfur nearby friends remove <slot>       -- remove + NVS tombstone
+kerfur nearby friends test_rotate [slot]  -- inject expected ID, verify resolve works
+```
+
+### Limitations / known gaps
+
+- First-use: until both devices have ever connected the app, wall clock is
+  invalid and friends appear as curious strangers (correct privacy default).
+- Multiple devices with different boot times need the same wall-clock reference
+  to predict each other's IDs — companion app is the synchronization point.
+- `MAX_FRIENDS` = 8 (Kconfig default); the NVS record is 52 bytes per slot.
+  Increase if needed; each added slot adds one `crc32()` call per scanned beacon.
 
 ## 10. Invariants (do not break)
 

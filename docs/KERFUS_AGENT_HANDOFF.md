@@ -88,6 +88,74 @@ Face codegen needs Python `Pillow` + (`cairosvg` or local Chrome).
 **Run without hardware:** set `CONFIG_KERFUR_ENABLE_MOCK_INPUTS=y` and/or drive
 the `kerfur` shell (`face …`, `nearby inject …`, battery injection).
 
+## 5b. What changed 2026-06-12 — Kerfus-to-Kerfus social system rewrite
+
+Goal: the old nearby subsystem tied friend identity to the ephemeral ID in use right
+now, so every ID rotation (every ~15 min) silently broke friend recognition —
+same physical device appeared as a new stranger after each rotation or reboot.
+
+**Core change: IRK-style friend recognition across ID rotation.**
+
+Friends are now recognized cryptographically, not by ID matching.  On the bench:
+
+- Each device generates and persists a `device_secret` (32-byte random, NVS).
+- Confirmed friends share their `device_secret` via the companion app.
+- Ephemeral IDs are now `crc32(peer_key || wall_clock_slot)` — predictable by
+  any device that holds the `peer_key` for a given time slot.
+- Both devices must have wall-clock time synchronized (via `APP_EVENT_TIME_SYNC`
+  from the companion app) so their slot numbers match.  Without a clock,
+  recognition degrades gracefully to "curious stranger" — not an error.
+
+**Files changed:**
+
+| File | What changed |
+|------|--------------|
+| `Kconfig` | `KERFUR_NEARBY_MAX_FRIENDS` (0–8, default 8) |
+| `include/nearby/kerfur_nearby.h` | `struct kerfur_friend_record`, new friend API, `friend_index` in `kerfur_peer`, `kerfur_nearby_set_wall_clock()` |
+| `include/core/app_event.h` | `int8_t friend_index` added to `struct app_event_peer` |
+| `include/behavior/pet_state.h` | `int8_t current_active_friend_index` in `pet_state` |
+| `include/nearby/encounter_log.h` | `int8_t friend_index` in `encounter_record`; updated `encounter_log_begin()` sig |
+| `src/nearby/encounter_log.c` | `encounter_log_begin()` stores `friend_index` |
+| `src/nearby/kerfur_nearby.c` | Full rewrite: NVS friend persistence, IRK resolution, wall-clock slots, rotation continuity, deferred NVS writes |
+| `src/behavior/behavior_engine.c` | `current_active_friend_index = -1` in init; PEER_NEAR/PEER_LOST/ENCOUNTER_START/ENCOUNTER_END use `friend_index` for stable identity |
+| `src/app/app.c` | `APP_EVENT_TIME_SYNC` → `kerfur_nearby_set_wall_clock()` |
+| `src/ble/ble_shell.c` | `kerfur nearby friends {dump,resolve,add,remove,test_rotate}` and `kerfur nearby peers` |
+
+**What now happens when a confirmed friend rotates ephemeral ID mid-encounter:**
+
+1. BLE scan sees new ephemeral ID.
+2. `resolve_friend_id()` tests the new ID against ±1 wall-clock slots for each
+   stored friend key.
+3. Match found → `peer_find_friend_locked(friend_index)` locates the existing
+   peer table entry.
+4. `peer->ephemeral_id` updated silently to the new ID.
+5. No `PEER_LOST` or `ENCOUNTER_END` fires.  The emotion engine sees no break.
+
+**Behavior engine stability across rotation:**
+
+`state->current_active_friend_index` (int8_t, `-1` = none) is the stable
+identity.  `PEER_LOST` / `ENCOUNTER_END` compare `friend_index` first, falling
+back to `ephemeral_id` only for non-friend peers.
+
+**Privacy model (unchanged at the wire level):**
+
+- Only ephemeral IDs are ever broadcast over-the-air.
+- `device_secret` / `peer_key` are stored only in NVS, never transmitted in
+  beacons.
+- Without wall-clock sync a device cannot predict anyone's ID → acts as an
+  anonymous stranger (same as before this change).
+- Persistent friend recognition requires: (a) explicit companion-app pairing,
+  (b) wall-clock sync on both devices.  No hidden tracking is possible.
+
+**Known limitation:**  If neither device has ever connected the companion app,
+`g_wallclock_valid` remains false and friends appear as curious strangers.
+This is the correct privacy-safe degradation.  First time-sync after app
+connection triggers an immediate ID rotation to the wall-clock slot and enables
+recognition within one slot period.
+
+**Not built in this session** (owner builds manually).  Code was traced
+line-by-line.  Build commands unchanged.
+
 ## 5a. What changed 2026-06-12 — scoring + motion production rework
 
 Owner direction: the old expression scoring had production-grade flaws
@@ -127,6 +195,13 @@ Both were reworked (clean-break approved; built nothing — owner builds):
   New `PET_MODE_WORN` (beacon value 9, append-only).
 - Display policy worn handling; `kerfur face carry … [ctx]` injection;
   emotion dump now prints carry context + situation + worn style.
+- **Weights are calibrated, not guessed**: `tools/appraisal_calibrate.py`
+  mirrors the integer scoring exactly and asserts 20 canonical scenarios
+  + 7 anti-flapping stability checks (all green). The baked table fixes a
+  spec violation (friend encounter now greets HAPPY, not PLAYFUL) and an
+  old volatility hole (transition affinity made adjacent flips cheaper
+  than no hysteresis; a +3 incumbency bonus in `update_expression`
+  restores the balance). Tune the script first, then bake.
 - Docs: `KERFUS_EMOTION_RUNTIME.md` §1a/§1b (situation/appraisal + carry),
   README updated. All new code line-by-line traced, not compiled.
 - **Known limitations for the next agent**: grab-while-walking is detected
