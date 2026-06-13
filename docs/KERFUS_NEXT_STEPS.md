@@ -10,6 +10,48 @@ affected files, priority, and status.
 
 ---
 
+## Session progress (updated 2026-06-10)
+
+**Done this session (compiles clean per owner; OOM during one build was just a
+parallel-jobs RAM ceiling, not a code issue):**
+- IMU/behavior bug fixes: `g_mc` mutex (race), classifier no longer eats its own
+  events, battery-critical strand recovery, night-detection guard.
+- Battery/charger scaffold: `battery_monitor.c` (stub backend = zero behavior
+  change) + real `bq25630.c` (BQ25630 charger + MAX17048 gauge) gated by
+  `CONFIG_KERFUR_CHARGER_BQ2563X`. Builds verified (FLASH ~72%).
+- **Touch system rebuilt** (was a single-GPIO stub):
+  - `touch_gestures.c` — hardware-agnostic gesture engine (tap/double-tap/
+    long-press/hold/stroke/repeated-stroke), pure + testable.
+  - `touch_input.c` — GPIO front-end now feeds the gesture engine.
+  - `iqs7222a.c` — full Azoteq IQS7222A driver: I2C + active-low RDY, datasheet
+    bring-up (verify 840 → SW-reset → push config → ACK reset → re-ATI → wait
+    ATI → event mode), reads 0x10..0x17 (touch bitmask + reset detect), reset
+    recovery, dedicated workqueue for blocking steps. Gated by
+    `CONFIG_KERFUR_TOUCH_IQS7222A`; feeds the same gesture engine.
+
+### Touch system — remaining (hardware-gated) — IN PROGRESS
+- **Config export (BLOCKED on flex tuning):** replace `kerfur_iqs7222a_config.c`
+  with the Azoteq IQS7222A Configuration Tool export for the petting flex.
+  Until then the chip runs power-up defaults (untuned).
+- **Board overlay (BLOCKED on pin map; schematic is unwired):** add a
+  `touch_iqs0` node so the driver binds. Template:
+  ```dts
+  &i2c0 {
+      iqs7222a: iqs7222a@44 {
+          compatible = "i2c-device";   /* app-level driver; no DT binding needed */
+          reg = <0x44>;
+          rdy-gpios = <&gpio0 PIN (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; /* TODO: real RDY pin */
+      };
+  };
+  / { aliases { touch-iqs0 = &iqs7222a; }; };
+  ```
+  Then build with `-DCONFIG_KERFUR_TOUCH_IQS7222A=y`.
+- **Nice-to-have:** dedicated `APP_EVENT_USER_DOUBLE_TAP` (currently mapped to
+  TAP); stroke *direction* from channel ordering once the zone layout is known;
+  a `kerfur touch ...` shell debug command; ztest for the gesture engine.
+
+---
+
 ## Immediate tasks (stabilize)
 
 ### I1. Decide canonical name (Kerfus vs Kerfur)
