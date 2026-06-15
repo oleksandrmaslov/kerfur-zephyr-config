@@ -10,6 +10,40 @@ affected files, priority, and status.
 
 ---
 
+## Session progress (updated 2026-06-15 — BLE connect/pairing rework)
+
+Focus: fix the phone-connect bug (BT icon then freeze, no pairing prompt, ANCS
+only after several resets). Root-caused from the code; **not on-device-verified**
+(owner builds + flashes manually). All in `src/ble/ble_manager.c` + `prj.conf`.
+
+- **Pairing now "Just Works":** the auth callbacks registered `passkey_display`
+  + `passkey_confirm`, which gave the device IO capability **DisplayYesNo** and
+  let iOS pick a numeric/MITM flow a no-display device can't complete — so the
+  "Pair" prompt often never appeared. Dropped those callbacks (kept
+  `pairing_confirm`/`cancel`) → IO cap **NoInputNoOutput** → iOS shows the simple
+  "Bluetooth Pairing Request → Pair" dialog and auto-pairs (no MITM).
+- **Stale-bond self-heal:** `security_changed_cb` now `bt_unpair()`s + disconnects
+  on `BT_SECURITY_ERR_PIN_OR_KEY_MISSING` (the definitive key-mismatch signal),
+  so a dead bond from a UF2 reflash / phone-forget recovers on its own instead of
+  needing the "reset a few times" dance. (Two-sided: the user may still need to
+  forget the device on the phone once.)
+- **Directed advertising dropped:** every disconnect used to switch to low-duty
+  *directed* advertising at the single stored bond, which silently blocked a
+  *fresh* phone (and stalled completely on a stale bond). Now always
+  connectable-undirected (fast→slow). Removed `g_prefer_directed_reconnect`, the
+  directed adv param/phase, and the bond-snapshot helper.
+- **UF2 reflash hardening:** `prj.conf` now sets `CONFIG_BT_GATT_SERVICE_CHANGED`
+  + `CONFIG_BT_GATT_CACHING` explicitly so a bonded phone re-discovers the GATT
+  DB after the app image changes (handles point at the right ANCS attributes).
+- **Field bond reset:** shell `ble unpair_all` (existing) is the documented path;
+  no hardware gesture yet (deferred by owner choice).
+- **Also this session (engine):** broadened F1 expression-routing gradations —
+  added the `OVERSTIMULATED↔DRAINED` burnout-crash edge and locked 7 named
+  companion arcs in `tools/appraisal_calibrate.py` (all green).
+- **Verify on flash:** capture USB-CDC serial during a connect; expect the iOS
+  Pair prompt, `BLE pairing complete (bonded=yes)`, then ANCS discovery — no
+  resets. `ble status` / `ble unpair_all` available in the shell.
+
 ## Session progress (updated 2026-06-15 — face fixes + render test harness)
 
 Focus: fix the faces and perfect the face/engine runtime (owner has not flashed

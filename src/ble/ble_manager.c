@@ -63,7 +63,6 @@ LOG_MODULE_REGISTER(ble_manager, CONFIG_LOG_DEFAULT_LEVEL);
 #define KERFUR_GB_ERR_UNSUPPORTED_OPCODE 1U
 
 #define KERFUR_ADV_MAX_NAME_LEN 8U
-#define KERFUR_ADV_DIRECTED_TIMEOUT K_SECONDS(4)
 #define KERFUR_ADV_FAST_TIMEOUT K_SECONDS(45)
 #define KERFUR_CONN_PARAM_RETRY_DELAY K_SECONDS(2)
 #define KERFUR_ADV_RESTART_INITIAL_DELAY K_MSEC(120)
@@ -131,15 +130,8 @@ struct ans_client_state {
 
 enum ble_adv_phase {
 	BLE_ADV_PHASE_IDLE = 0,
-	BLE_ADV_PHASE_DIRECTED,
 	BLE_ADV_PHASE_FAST,
 	BLE_ADV_PHASE_SLOW,
-};
-
-struct bond_snapshot {
-	bt_addr_le_t first_addr;
-	size_t count;
-	bool has_any;
 };
 
 static struct bt_uuid_128 g_kerfur_debug_service_uuid = BT_UUID_INIT_128(BT_UUID_KERFUR_DEBUG_SERVICE_VAL);
@@ -167,10 +159,6 @@ static const struct bt_le_adv_param g_adv_param_fast =
 static const struct bt_le_adv_param g_adv_param_slow =
 	BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY,
 			     BT_GAP_ADV_SLOW_INT_MIN, BT_GAP_ADV_SLOW_INT_MAX, NULL);
-static const struct bt_le_adv_param g_adv_param_directed_template =
-	BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY |
-			     BT_LE_ADV_OPT_DIR_MODE_LOW_DUTY,
-			     BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MAX_2, NULL);
 
 static const struct bt_le_conn_param *g_low_power_conn_param =
 	BT_LE_CONN_PARAM(36, 60, 6, 420);
@@ -191,7 +179,6 @@ static struct ans_client_state g_ans;
 static struct bt_conn *g_active_conn;
 
 static enum ble_adv_phase g_adv_phase = BLE_ADV_PHASE_IDLE;
-static bool g_prefer_directed_reconnect;
 static struct k_work_delayable g_adv_phase_work;
 static struct k_work_delayable g_conn_param_work;
 static struct k_work_delayable g_notify_discovery_work;
@@ -250,34 +237,10 @@ static int ble_set_advertising_phase(enum ble_adv_phase phase, bool restart);
 static int companion_send_packet(const uint8_t *payload, uint8_t len);
 #endif
 
-static void snapshot_bonds_cb(const struct bt_bond_info *info, void *user_data)
-{
-	struct bond_snapshot *snapshot = user_data;
-
-	snapshot->count++;
-	if (!snapshot->has_any) {
-		bt_addr_le_copy(&snapshot->first_addr, &info->addr);
-		snapshot->has_any = true;
-	}
-}
-
-static bool snapshot_bonds(struct bond_snapshot *snapshot)
-{
-	if (snapshot == NULL) {
-		return false;
-	}
-
-	(void)memset(snapshot, 0, sizeof(*snapshot));
-	bt_foreach_bond(BT_ID_DEFAULT, snapshot_bonds_cb, snapshot);
-	return snapshot->has_any;
-}
-
 static void reset_adv_timers(void)
 {
 	(void)k_work_cancel_delayable(&g_adv_phase_work);
-	if (g_adv_phase == BLE_ADV_PHASE_DIRECTED) {
-		(void)k_work_schedule(&g_adv_phase_work, KERFUR_ADV_DIRECTED_TIMEOUT);
-	} else if (g_adv_phase == BLE_ADV_PHASE_FAST) {
+	if (g_adv_phase == BLE_ADV_PHASE_FAST) {
 		(void)k_work_schedule(&g_adv_phase_work, KERFUR_ADV_FAST_TIMEOUT);
 	}
 }
@@ -494,7 +457,12 @@ static void ancs_clear_cached_state(void)
 	(void)memset(&g_ancs.service_disc_params, 0, sizeof(g_ancs.service_disc_params));
 	(void)memset(&g_ancs.char_disc_params, 0, sizeof(g_ancs.char_disc_params));
 	(void)memset(&g_ancs.ccc_disc_params, 0, sizeof(g_ancs.ccc_disc_params));
-	(void)memset(&g_ancs.notif_sub_params, 0, sizeof(g_ancs.notif_sub_params));
+	/* Do NOT memset notif_sub_params here. This also runs in the disconnect
+	 * path, and zeroing a bt_gatt_subscribe_params that Zephyr may still hold
+	 * linked in its internal subscription list corrupts that list and hangs the
+	 * next connect. Zephyr owns/unlinks it on disconnect (AUTO_RESUBSCRIBE=n);
+	 * we re-init it cleanly at subscribe time in
+	 * ancs_subscribe_notification_source(). */
 }
 
 static void ancs_release_conn(void)
@@ -519,8 +487,9 @@ static void ans_clear_cached_state(void)
 	(void)memset(&g_ans.char_disc_params, 0, sizeof(g_ans.char_disc_params));
 	(void)memset(&g_ans.new_alert_ccc_disc_params, 0, sizeof(g_ans.new_alert_ccc_disc_params));
 	(void)memset(&g_ans.unread_alert_ccc_disc_params, 0, sizeof(g_ans.unread_alert_ccc_disc_params));
-	(void)memset(&g_ans.new_alert_sub_params, 0, sizeof(g_ans.new_alert_sub_params));
-	(void)memset(&g_ans.unread_alert_sub_params, 0, sizeof(g_ans.unread_alert_sub_params));
+	/* Do NOT memset the *_sub_params here (see ancs_clear_cached_state): never
+	 * zero a bt_gatt_subscribe_params in the disconnect path while Zephyr may
+	 * still have it linked. They are re-initialised at subscribe time. */
 }
 
 static void ans_release_conn(void)
@@ -1425,16 +1394,6 @@ static void adv_phase_work_handler(struct k_work *work)
 		return;
 	}
 
-	if (g_adv_phase == BLE_ADV_PHASE_DIRECTED) {
-		err = ble_set_advertising_phase(BLE_ADV_PHASE_FAST, true);
-		if (err != 0) {
-			LOG_WRN("Failed switching directed->fast advertising (%d)", err);
-			(void)k_work_reschedule(&g_adv_restart_work,
-						KERFUR_ADV_RESTART_RETRY_DELAY);
-		}
-		return;
-	}
-
 	if (g_adv_phase == BLE_ADV_PHASE_FAST) {
 		err = ble_set_advertising_phase(BLE_ADV_PHASE_SLOW, true);
 		if (err != 0) {
@@ -1471,8 +1430,6 @@ static int ble_set_advertising_phase(enum ble_adv_phase phase, bool restart)
 {
 	int err;
 	const struct bt_le_adv_param *adv_param;
-	struct bt_le_adv_param directed_param;
-	struct bond_snapshot bonds;
 
 	if (restart) {
 		err = bt_le_adv_stop();
@@ -1482,35 +1439,6 @@ static int ble_set_advertising_phase(enum ble_adv_phase phase, bool restart)
 	}
 
 	switch (phase) {
-	case BLE_ADV_PHASE_DIRECTED:
-		if (!g_prefer_directed_reconnect) {
-			return -EAGAIN;
-		}
-
-		if (!snapshot_bonds(&bonds)) {
-			return -ENOENT;
-		}
-		if (bonds.count != 1U) {
-			LOG_INF("Directed reconnect skipped: bonded peers=%u", (unsigned)bonds.count);
-			return -EAGAIN;
-		}
-
-		directed_param = g_adv_param_directed_template;
-		directed_param.peer = &bonds.first_addr;
-		adv_param = &directed_param;
-
-		err = bt_le_adv_start(adv_param, NULL, 0, NULL, 0);
-		if (err == -EALREADY) {
-			err = 0;
-		}
-		if (err != 0) {
-			return err;
-		}
-
-		g_adv_phase = BLE_ADV_PHASE_DIRECTED;
-		LOG_INF("Advertising phase: directed (bonded peers=%u)", (unsigned)bonds.count);
-		break;
-
 	case BLE_ADV_PHASE_FAST:
 		adv_param = &g_adv_param_fast;
 		err = ble_adv_start_with_payload(adv_param, g_adv_data, g_adv_data_len,
@@ -1565,7 +1493,6 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 	g_notify_discovery_retries = 0U;
 	g_adv_restart_retries = 0U;
 	g_adv_phase = BLE_ADV_PHASE_IDLE;
-	g_prefer_directed_reconnect = false;
 
 	ancs_release_conn();
 	ans_release_conn();
@@ -1618,7 +1545,6 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 		bt_conn_unref(g_active_conn);
 		g_active_conn = NULL;
 	}
-	g_prefer_directed_reconnect = true;
 
 #if defined(CONFIG_KERFUR_ENABLE_COMPANION) && CONFIG_KERFUR_ENABLE_COMPANION
 	g_companion_notify_enabled = false;
@@ -1639,13 +1565,14 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 	if (err != BT_SECURITY_ERR_SUCCESS) {
 		LOG_WRN("BLE security changed with error (%d: %s)", err, bt_security_err_to_str(err));
 
-		/* A stale or mismatched bond — common after a UF2 reflash, or when
-		 * the phone has forgotten us — makes every reconnect fail to
-		 * encrypt, so ANCS never subscribes (the "reset a few times" symptom).
-		 * Drop the dead bond and the link so the next connection re-pairs
-		 * cleanly on its own instead of needing a manual reset. */
-		if ((err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) ||
-		    (err == BT_SECURITY_ERR_AUTH_FAIL)) {
+		/* PIN_OR_KEY_MISSING is the unambiguous "our stored key no longer
+		 * matches the peer" signal — common after a UF2 reflash, or when the
+		 * phone has forgotten us. It makes every reconnect fail to encrypt, so
+		 * ANCS never subscribes (the "reset a few times" symptom). Drop the
+		 * dead bond and the link so the next connection re-pairs cleanly on
+		 * its own. (We don't wipe on the broader AUTH_FAIL, which can be a
+		 * transient glitch on an otherwise-valid bond.) */
+		if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) {
 			const bt_addr_le_t *peer = bt_conn_get_dst(conn);
 
 			if (peer != NULL) {
@@ -1856,19 +1783,10 @@ static int ble_start_advertising(void)
 		LOG_WRN("bt_le_adv_stop before restart failed (%d)", stop_err);
 	}
 
-	if (g_prefer_directed_reconnect) {
-		err = ble_set_advertising_phase(BLE_ADV_PHASE_DIRECTED, false);
-		if ((err != 0) && (err != -ENOENT) && (err != -EAGAIN)) {
-			LOG_WRN("Directed advertising unavailable (%d), falling back to fast", err);
-		}
-	} else {
-		err = -EAGAIN;
-	}
-
-	if (err != 0) {
-		err = ble_set_advertising_phase(BLE_ADV_PHASE_FAST, false);
-	}
-
+	/* Always connectable-undirected. Directed reconnect was dropped: it could
+	 * only be answered by one specific bonded peer, which silently blocked a
+	 * fresh phone from connecting (and stalled entirely on a stale bond). */
+	err = ble_set_advertising_phase(BLE_ADV_PHASE_FAST, false);
 	if (err != 0) {
 		return err;
 	}
@@ -1925,7 +1843,6 @@ int ble_manager_disconnect_current(void)
 
 int ble_manager_unpair_all(void)
 {
-	g_prefer_directed_reconnect = false;
 	return bt_unpair(BT_ID_DEFAULT, BT_ADDR_LE_ANY);
 }
 
@@ -2199,7 +2116,6 @@ int ble_manager_init(void)
 	k_work_init(&g_kerfur_scan_drain_work, kerfur_scan_drain_work_handler);
 	g_kerfur_scan_active = false;
 #endif
-	g_prefer_directed_reconnect = false;
 	g_notify_discovery_retries = 0U;
 	g_adv_restart_retries = 0U;
 #if defined(CONFIG_KERFUR_ENABLE_KEYRING_PROFILE) && CONFIG_KERFUR_ENABLE_KEYRING_PROFILE
@@ -2246,8 +2162,7 @@ int ble_manager_init(void)
 	(void)k_work_reschedule(&g_kerfur_scan_start_work, K_MSEC(500));
 #endif
 
-	LOG_INF("BLE manager ready");
-	LOG_INF("BLE peripheral cannot initiate links directly; directed advertising is used as short bonded reconnect hint");
+	LOG_INF("BLE manager ready (connectable-undirected advertising)");
 
 	return 0;
 }

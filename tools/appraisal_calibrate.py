@@ -126,7 +126,10 @@ AFFINITY = {
     "HAPPY": {"CONTENT": 5, "PLAYFUL": 3},
     "CONTENT": {"CALM": 4, "HAPPY": 3},
     "ANNOYED": {"CALM": 4, "OVERSTIMULATED": 3},
-    "OVERSTIMULATED": {"ANNOYED": 4, "CALM": 3},
+    # DRAINED edge = the burnout crash (see transition_affinity in
+    # behavior_engine.c): overstimulation slumps into exhaustion directly
+    # rather than detouring through serene CALM.
+    "OVERSTIMULATED": {"ANNOYED": 4, "CALM": 3, "DRAINED": 3},
     "NEEDY": {"LONELY": 4, "CALM": 3},
     "LONELY": {"NEEDY": 3, "CALM": 4},
     "COZY": {"SLEEPY": 4, "CONTENT": 3},
@@ -454,6 +457,33 @@ def run_paths(verbose=False):
          lambda p: p[1] == "SLEEPY" and p[-1] == "HAPPY"),
         ("overstimulated -> content via calm", "OVERSTIMULATED", "CONTENT",
          lambda p: p[1] == "CALM" and p[-1] == "CONTENT"),
+
+        # ── more designed companion arcs (each a real context) ──
+        # Burnout: an overstimulated pet that runs out of energy slumps
+        # straight into exhaustion (the new DRAINED edge) instead of
+        # passing through serene CALM mid-meltdown.
+        ("burnout crash to drained", "OVERSTIMULATED", "DRAINED",
+         lambda p: p == ["OVERSTIMULATED", "DRAINED"]),
+        # Exhausted pet drifts to sleep through drooping (SLEEPY) eyes.
+        ("exhausted drifts to sleep", "DRAINED", "ASLEEP",
+         lambda p: p == ["DRAINED", "SLEEPY", "ASLEEP"]),
+        # Same origin, opposite context: soothed while still energetic, an
+        # overstimulated pet recovers up through play rather than crashing.
+        ("overstimulated recovers via play", "OVERSTIMULATED", "HAPPY",
+         lambda p: p[1] == "PLAYFUL" and p[-1] == "HAPPY"),
+        # Loneliness lifts when company arrives: settles, notices, brightens.
+        ("lonely brightens via calm", "LONELY", "HAPPY",
+         lambda p: p[1] == "CALM" and p[-1] == "HAPPY"),
+        # Left alone after contentment, warmth fades toward neediness.
+        ("contentment fades to neglect", "CONTENT", "NEEDY",
+         lambda p: p[1] == "CALM" and p[-1] == "NEEDY"),
+        # Winding down from alert into a cozy nap goes through drowsiness.
+        ("winds down to cozy via sleepy", "CURIOUS", "COZY",
+         lambda p: p == ["CURIOUS", "SLEEPY", "COZY"]),
+        # Drowsing off at night always lands on sleep through SLEEPY.
+        ("drowses off through sleepy", "CONTENT", "ASLEEP",
+         lambda p: p[-2] == "SLEEPY" and p[-1] == "ASLEEP"),
+
         ("adjacent stays a single hop", "CALM", "CURIOUS",
          lambda p: p == ["CALM", "CURIOUS"]),
         ("same target is a no-op", "HAPPY", "HAPPY",

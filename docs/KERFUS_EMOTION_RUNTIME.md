@@ -129,17 +129,35 @@ bag = warmth + wake blink; set down = settle.
    the 100 ms tick). Emotionally-distant changes ease through intermediates
    instead of snapping.
 
-Examples: waking `ASLEEP → SLEEPY → …` (ASLEEP is graph-adjacent only to
-SLEEPY); soothing an angry pet `ANNOYED → CALM → … → HAPPY` (petting sets the
-target and the face *eases* there, replacing the old instant flip that then
-snapped back when the pet window closed); `OVERSTIMULATED → CALM → CONTENT`.
+**Designed companion arcs** (each a real context; locked as named eases in
+`tools/appraisal_calibrate.py` so they can't silently regress):
+
+| Context | Gradation |
+| --- | --- |
+| Wake from sleep | `ASLEEP → SLEEPY → CALM` (ASLEEP is graph-adjacent only to SLEEPY) |
+| Soothe an irritated pet | `ANNOYED → CALM → CURIOUS → HAPPY` (petting sets the target and the face *eases* there, replacing the old instant flip that snapped back when the pet window closed) |
+| Overstimulation runs out of energy | `OVERSTIMULATED → DRAINED` — the **burnout crash**; the `OVERSTIMULATED↔DRAINED` edge keeps it out of serene CALM mid-meltdown |
+| Exhausted pet drifts off | `DRAINED → SLEEPY → ASLEEP` |
+| Overstimulation soothed *while energetic* | `OVERSTIMULATED → PLAYFUL → HAPPY` (same origin as the crash, opposite outcome by context) |
+| Loneliness lifts when company arrives | `LONELY → CALM → CURIOUS → HAPPY` |
+| Left alone after contentment | `CONTENT → CALM → NEEDY` |
+| Winds down into a cozy nap | `CURIOUS → SLEEPY → COZY` |
+| Drowses off at night | `CONTENT → … → SLEEPY → ASLEEP` |
 
 Overrides: forced/debug and asleep **snap**; petting and the normal election
 **ease**. The micro-reaction layer still overlays instantly (a startle is
 immediate; only the underlying expression eases). Validated by
 `tools/appraisal_calibrate.py` routing checks (all 169 routes converge in ≤4
 hops + named eases). Tuning knobs: `EXPR_ROUTE_HOP_MS`, and the
-`transition_affinity` graph (the adjacency edges, incl. `ASLEEP↔SLEEPY`).
+`transition_affinity` graph (the adjacency edges, incl. `ASLEEP↔SLEEPY` and
+the `OVERSTIMULATED↔DRAINED` burnout edge).
+
+Graph-shape note: adjacency is **symmetric** (an edge in either direction makes
+two feelings neighbours), and CALM is the hub, so any distant `→ X` route tends
+to pass through CALM unless a more specific edge exists. Add edges sparingly —
+each one shortens paths and *reduces* easing. The burnout edge is one direction
+in scoring (`OVERSTIMULATED → DRAINED` only) so a drained pet is never pulled
+back up toward overstimulation; symmetric adjacency is enough for routing.
 
 ## 2. Mood (slow valence)
 

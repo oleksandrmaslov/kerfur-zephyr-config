@@ -2375,6 +2375,13 @@ static int transition_affinity(enum pet_expression current, enum pet_expression 
 		if (candidate == PET_EXPR_CALM) {
 			return 3;
 		}
+		/* Burnout crash: an overstimulated pet that runs out of energy
+		 * slumps straight into exhaustion instead of detouring through
+		 * serene CALM (which read wrong mid-meltdown). One direction only
+		 * — a drained pet is never pulled back up toward overstimulation. */
+		if (candidate == PET_EXPR_DRAINED) {
+			return 3;
+		}
 		break;
 	case PET_EXPR_NEEDY:
 		if (candidate == PET_EXPR_LONELY) {

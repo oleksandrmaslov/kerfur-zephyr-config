@@ -1619,12 +1619,18 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	state->look_render_x = runtime->look_render_x;
 	state->look_render_y = runtime->look_render_y;
 
+	/* Log only DISCRETE face changes by default. Do NOT log while
+	 * transition_active: a transition animates every frame (~8 fps), so that
+	 * dumped 5 INF lines/frame to both log backends during every ease/blink/
+	 * connect animation. The flood starved BLE callback timing (pairing
+	 * "timed out", connect/disconnect cycling) and exhausted the log buffers
+	 * into a hard freeze. Per-frame logging is still available on demand via
+	 * CONFIG_KERFUR_FACE_DEBUG_VERBOSE. */
 	should_log = IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG_VERBOSE) || debug_dump_requested ||
 		     (previous_recipe_id != runtime->plan.recipe_id) ||
 		     (previous_reaction_id != runtime->plan.reaction_id) ||
 		     (previous_indicator_id != runtime->plan.indicator_id) ||
-		     (previous_overlay_id != runtime->plan.overlay_id) ||
-		     runtime->transition_active;
+		     (previous_overlay_id != runtime->plan.overlay_id);
 
 	if (IS_ENABLED(CONFIG_KERFUR_FACE_DEBUG) && should_log) {
 		log_plan(&runtime->plan);
