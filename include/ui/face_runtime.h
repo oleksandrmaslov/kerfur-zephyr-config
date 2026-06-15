@@ -79,6 +79,13 @@ struct face_runtime_plan {
 	int16_t mouth_dy;
 	int16_t left_whisker_dy;
 	int16_t right_whisker_dy;
+	/* Transition easing offsets for the eye-white (and the pupils that
+	 * ride on it): non-zero only mid-transition, eased to 0 so the eyes
+	 * glide into a new expression instead of teleporting. */
+	int16_t left_eye_dx;
+	int16_t left_eye_dy;
+	int16_t right_eye_dx;
+	int16_t right_eye_dy;
 	uint8_t eye_openness;
 	uint8_t left_eye_openness;
 	uint8_t right_eye_openness;
@@ -121,6 +128,11 @@ struct face_runtime_state {
 	int16_t ch_left_whisker_dy;
 	int16_t ch_right_whisker_dy;
 	int16_t ch_eye_openness; /* 0..100 */
+	/* Eye-white position easing channels (target is always 0). */
+	int16_t ch_left_eye_dx;
+	int16_t ch_left_eye_dy;
+	int16_t ch_right_eye_dx;
+	int16_t ch_right_eye_dy;
 
 	/* Channel targets */
 	int16_t tgt_left_brow_dy;

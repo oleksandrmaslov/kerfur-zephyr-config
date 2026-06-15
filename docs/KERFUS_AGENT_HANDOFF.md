@@ -121,9 +121,40 @@ Owner had **not flashed**; all changes traced + host-tested, not on-device.
   all 13 expressions × transitions × reactions.
 - Docs updated: `KERFUS_EMOTION_RUNTIME.md` §7/§7a, `README.md`
   (Stage 5 + new Tests section), `KERFUS_NEXT_STEPS.md` (M3 + session note).
-- **Open for next session (needs owner flash):** per-expression visual polish
-  (layout, look targets, whisker edge framing at x=0/x=119); then deeper
-  engine/behavior tuning. Owner builds manually.
+After flashing the above, the owner reported a one-frame pupil glitch after a
+reaction blink and that faces changed *roughly* (sleep → normal with no easing;
+angry → happy → back). Both fixed in the same dated work, owner chose **full
+adjacency routing** and **glitch (F2) before election (F1)**:
+
+- **F2 — eye-white position glide.** The host harness (extended to ~2.25M
+  checks, incl. a blink landing mid-transition) proved the pupil *offset* path
+  is clean; the bad frame was the eye whites **teleporting** to the new
+  expression layout (only brows/mouth/openness eased). Now the eye whites (and
+  the pupils riding on them) ease via four transition channels
+  (`ch_*_eye_d{x,y}` in `face_runtime.c`, applied in `ui_renderer.c`
+  `eye_white_draw_position`). New harness checks: pupil non-snap/asymmetry
+  across blink+transition boundaries, eye-glide settles.
+- **F1 — expression transition routing (full adjacency).** `update_expression`
+  is now two layers: appraisal+hysteresis pick a stable *target*; the face
+  walks toward it one adjacency hop at a time (`expr_first_hop` BFS over the
+  `transition_affinity` graph, CALM = hub, new `ASLEEP↔SLEEPY` edge) at
+  `EXPR_ROUTE_HOP_MS` (600 ms, paced by the always-on 100 ms tick). Petting
+  eases (`ANNOYED→CALM→…→HAPPY`, no more instant flip + snap-back); waking eases
+  (`ASLEEP→SLEEPY→…`); forced/asleep still snap; the micro-reaction layer still
+  overlays instantly. Mirrored + tested in `tools/appraisal_calibrate.py`
+  (routing checks: 169 routes converge + named eases). The existing 20
+  scenarios + 7 stability checks remain green (steady-state semantics
+  unchanged — affinity/incumbency anchored to the target, which equals the
+  displayed expression at rest).
+
+Neither F1 nor F2 is on-device-verified yet (owner builds manually). Both test
+suites green: `bash tests/face_host/run.sh`, `python tools/appraisal_calibrate.py`.
+
+- **Open for next session (needs owner flash):** confirm the glitch is gone and
+  transitions feel right on hardware; per-expression visual polish (layout,
+  look targets, whisker edge framing at x=0/x=119); optional routing-pace tuning
+  (`EXPR_ROUTE_HOP_MS`, arousal-scaled hops) and easing the pupil within-eye
+  offset (ANGRY's asymmetric `{16,17}`/`{17,16}`) if it still reads rough.
 
 ## 5b. What changed 2026-06-12 — Kerfus-to-Kerfus social system rewrite
 

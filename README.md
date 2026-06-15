@@ -130,6 +130,7 @@ If `motion0` is not present, the firmware still builds and the motion stack stay
 - Peer events carry the other Kerfur's mode/expression summary; the engine classifies the peer's "vibe" (resting / bright / strained) and greets accordingly: it doesn't bounce at a sleeping friend, lights up with a happy one, and shows concern for a strained or lonely one.
 - Sleep inertia: leaving deep sleep keeps the pet groggy (sleepy expression bias, no happy-bounce) for 45 s (90 s at night).
 - Idle micro-life: when nothing is happening and the screen is on, the pet occasionally glances around (curious), peeks up (wants attention), or slow-blinks (resting), every ~25–70 s.
+- Expression transition routing: appraisal + hysteresis pick a stable target feeling, then the face walks toward it one emotional-adjacency hop at a time (CALM is the hub) so distant changes ease through intermediates instead of snapping — waking eases `ASLEEP → SLEEPY → …`, petting an angry pet soothes `ANNOYED → CALM → … → HAPPY`.
 - See [docs/KERFUS_EMOTION_RUNTIME.md](docs/KERFUS_EMOTION_RUNTIME.md) for the full emotional architecture.
 
 3. Motion stack
@@ -142,6 +143,7 @@ If `motion0` is not present, the firmware still builds and the motion stack stay
 - [src/ui/ui_renderer.c](src/ui/ui_renderer.c) renders the face on an LVGL canvas and applies contrast / pixel shift policy.
 - [src/ui/face_runtime.c](src/ui/face_runtime.c) composes recipes, reactions, blink state, pupil movement, indicators, overlays, and effects.
 - Organic micro-life (Stage 5): emotion-aware randomized blink cadence with occasional double blinks and post-reaction settle blinks; an occasional slow wandering idle gaze (pupils ease to a random point, hold, return) when there is no real gaze input — the only idle pupil motion, the old constant cyclic drift was removed; a faint, slow breathing lift on mouth/whiskers that continues during sleep; mood/arousal/sleepiness bias eye openness, brows, and mouth.
+- Smooth expression changes: on a change the eye whites (and the pupils that ride on them) glide to their new position instead of teleporting — brows, mouth, whiskers, eye openness and eye position all ease together.
 - Face assets and recipes are generated during build from `assets/face/kerfur_faces.json` and the SVG sources in `assets/face/`.
 
 5. BLE and nearby

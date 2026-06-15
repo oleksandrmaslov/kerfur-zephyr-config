@@ -98,6 +98,15 @@ struct behavior_runtime {
 	int16_t intent_strength;       /* 0..100 */
 	int64_t intent_resolved_at_ms;
 
+	/* Expression transition routing: appraisal + hysteresis choose a
+	 * stable target feeling; the displayed expression then walks toward it
+	 * one adjacency hop at a time so emotionally-distant changes ease
+	 * through intermediates (e.g. ANGRY -> CALM -> HAPPY, ASLEEP ->
+	 * SLEEPY -> ...) instead of snapping. */
+	enum pet_expression expr_target;
+	int64_t last_target_change_ms;
+	int64_t last_expr_hop_ms;
+
 	/* Mood: experience lands here first; the 60 s tick converts it
 	 * into at most ±2 mood per minute (rate limit against spam). */
 	int16_t mood_accum;
@@ -2399,21 +2408,112 @@ static int transition_affinity(enum pet_expression current, enum pet_expression 
 			return 3;
 		}
 		break;
+	case PET_EXPR_ASLEEP:
+		/* Only used for transition routing (waking): ASLEEP eases out
+		 * through SLEEPY. While actually asleep the mode override owns
+		 * the expression, so this never biases live scoring. */
+		if (candidate == PET_EXPR_SLEEPY) {
+			return 5;
+		}
+		break;
 	default:
 		break;
 	}
 	return 0;
 }
 
+/* Two expressions are adjacent if either direction has transition affinity
+ * (the affinity table is the emotional-neighbour graph). CALM is the hub. */
+static bool expr_adjacent(enum pet_expression a, enum pet_expression b)
+{
+	return (a == b) || (transition_affinity(a, b) > 0) ||
+	       (transition_affinity(b, a) > 0);
+}
+
+/* BFS one hop from `from` toward `to` on the adjacency graph: returns the
+ * next expression to show on the way to `to` (== `to` when already adjacent).
+ * The graph is small and connected through CALM, so a path always exists;
+ * CALM is the guaranteed fallback. This is what makes the face *ease*
+ * between distant feelings instead of jumping. */
+static enum pet_expression expr_first_hop(enum pet_expression from,
+					  enum pet_expression to)
+{
+	enum pet_expression queue[PET_EXPR_COUNT];
+	enum pet_expression first_hop[PET_EXPR_COUNT];
+	bool seen[PET_EXPR_COUNT] = { false };
+	int head = 0;
+	int tail = 0;
+	int n;
+
+	if ((from == to) || expr_adjacent(from, to)) {
+		return to;
+	}
+
+	seen[from] = true;
+	for (n = 0; n < PET_EXPR_COUNT; n++) {
+		enum pet_expression e = (enum pet_expression)n;
+
+		if ((e != from) && expr_adjacent(from, e)) {
+			seen[e] = true;
+			first_hop[e] = e;
+			queue[tail++] = e;
+		}
+	}
+
+	while (head < tail) {
+		enum pet_expression cur = queue[head++];
+
+		if (cur == to) {
+			return first_hop[cur];
+		}
+		for (n = 0; n < PET_EXPR_COUNT; n++) {
+			enum pet_expression e = (enum pet_expression)n;
+
+			if (!seen[e] && expr_adjacent(cur, e)) {
+				seen[e] = true;
+				first_hop[e] = first_hop[cur];
+				queue[tail++] = e;
+			}
+		}
+	}
+
+	return PET_EXPR_CALM;
+}
+
 /* ── Expression resolution ───────────────────────────────────────── */
+
+/* One adjacency hop per this interval, so distant feelings ease through
+ * intermediates at a believable pace instead of snapping. The election runs
+ * on the 100 ms tick, so this paces the visible walk (~2 hops ≈ 1.2 s). */
+#define EXPR_ROUTE_HOP_MS 600
+
+/* Walk the displayed expression one adjacency hop toward `target`. The
+ * hysteresis layer owns *what* we want to feel; this owns *easing there*. */
+static void route_expression_toward(struct pet_state *state,
+				    enum pet_expression target, int64_t now_ms)
+{
+	g_runtime.expr_target = target;
+
+	if (state->current_expression == target) {
+		return;
+	}
+	if ((now_ms - g_runtime.last_expr_hop_ms) < EXPR_ROUTE_HOP_MS) {
+		return;
+	}
+
+	state->current_expression =
+		expr_first_hop(state->current_expression, target);
+	state->last_expression_change_timestamp_ms = now_ms;
+	g_runtime.last_expr_hop_ms = now_ms;
+}
 
 static void update_expression(struct pet_state *state, int64_t now_ms)
 {
 	int scores[PET_EXPR_COUNT];
 	enum pet_expression best_expr;
-	enum pet_expression curr_expr;
+	enum pet_expression target;
 	int best_score;
-	int curr_score;
+	int target_score;
 	int expr;
 	int32_t hold_ms;
 	int margin;
@@ -2424,7 +2524,9 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 	const int32_t pet_window_ms = drowsy_pet ? (8 * MSEC_PER_SEC) : (6 * MSEC_PER_SEC);
 	const bool pet_recent = (now_ms - state->last_pet_timestamp_ms) < pet_window_ms;
 
-	/* Dynamic hold: influenced by intent stability.
+	/* Dynamic hold: influenced by intent stability. Governs how readily the
+	 * *target* feeling is allowed to change (anti-flap); the routing layer
+	 * then eases the face toward whatever target wins.
 	 *   High arousal / just picked up  → short hold, fast reactions
 	 *   Strong intent                  → long hold, stable leaning
 	 *   Moderate arousal               → medium hold
@@ -2443,37 +2545,46 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 		margin = 8;
 	}
 
-	/* Forced expression override */
+	/* Forced expression override (debug): snap instantly. */
 	if (g_runtime.forced_expression_active) {
+		g_runtime.expr_target = g_runtime.forced_expression;
 		if (state->current_expression != g_runtime.forced_expression) {
 			state->current_expression = g_runtime.forced_expression;
 			state->last_expression_change_timestamp_ms = now_ms;
 		}
+		g_runtime.last_expr_hop_ms = now_ms;
 		return;
 	}
 
-	/* Asleep override */
+	/* Asleep override: snap to ASLEEP while truly asleep (the eyes are
+	 * shut). Waking then eases out, because the target switches to a live
+	 * feeling while the face is still ASLEEP — routing walks
+	 * ASLEEP → SLEEPY → … instead of jumping straight to awake. */
 	if (state->current_mode == PET_MODE_ASLEEP) {
+		g_runtime.expr_target = PET_EXPR_ASLEEP;
 		if (state->current_expression != PET_EXPR_ASLEEP) {
 			state->current_expression = PET_EXPR_ASLEEP;
 			state->last_expression_change_timestamp_ms = now_ms;
 		}
+		g_runtime.last_expr_hop_ms = now_ms;
 		return;
 	}
 
-	/* Recent petting override: contextual expression */
+	/* Recent petting: target the contextual pet expression, but EASE there.
+	 * Petting an angry pet now soothes ANGRY → CALM → HAPPY rather than
+	 * snapping straight to HAPPY (and back when the window ends). */
 	if (pet_recent) {
 		enum pet_expression pet_expr = drowsy_pet ? PET_EXPR_COZY : PET_EXPR_HAPPY;
 
-		if (state->current_expression != pet_expr) {
-			state->current_expression = pet_expr;
-			state->last_expression_change_timestamp_ms = now_ms;
+		if (g_runtime.expr_target != pet_expr) {
+			g_runtime.last_target_change_ms = now_ms;
 		}
+		route_expression_toward(state, pet_expr, now_ms);
 		return;
 	}
 
 	/* ── Score all expressions (situation + normalized appraisal) ── */
-	curr_expr = state->current_expression;
+	target = g_runtime.expr_target;
 
 	{
 		const enum pet_situation situation = resolve_situation(state);
@@ -2500,17 +2611,17 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 					       (enum pet_expression)expr,
 					       situation, features) +
 				       intent_alignment_bonus((enum pet_expression)expr) +
-				       transition_affinity(curr_expr,
+				       transition_affinity(target,
 							   (enum pet_expression)expr);
 		}
 
-		/* Incumbency: transition affinity hands neighbors up to +5
-		 * while the incumbent gets 0, which at the tight hold margin
-		 * would make adjacent flips cheaper than no hysteresis at
-		 * all. This stickiness restores the balance; genuine shifts
-		 * (validated in tools/appraisal_calibrate.py) still win. */
-		if (scores[curr_expr] > -1000) {
-			scores[curr_expr] += 3;
+		/* Incumbency on the committed target: affinity hands neighbours
+		 * up to +5 while the target gets 0, which at the tight hold
+		 * margin would make adjacent retargets cheaper than no
+		 * hysteresis at all. This stickiness restores the balance;
+		 * genuine shifts (tools/appraisal_calibrate.py) still win. */
+		if (scores[target] > -1000) {
+			scores[target] += 3;
 		}
 	}
 
@@ -2524,22 +2635,22 @@ static void update_expression(struct pet_state *state, int64_t now_ms)
 		}
 	}
 
-	curr_score = scores[curr_expr];
+	target_score = scores[target];
 
-	/* Hysteresis: require margin to switch */
-	if (best_expr != curr_expr) {
-		if ((now_ms - state->last_expression_change_timestamp_ms) < hold_ms &&
-		    best_score < (curr_score + margin)) {
-			return;
+	/* Hysteresis decides whether to re-target; routing eases the face there.
+	 * Inside the hold window a full margin is needed; after it, margin-2. */
+	if (best_expr != target) {
+		const bool held =
+			(now_ms - g_runtime.last_target_change_ms) >= hold_ms;
+
+		if (held ? (best_score >= (target_score + (margin - 2)))
+			 : (best_score >= (target_score + margin))) {
+			target = best_expr;
+			g_runtime.last_target_change_ms = now_ms;
 		}
-
-		if (best_score < (curr_score + (margin - 2))) {
-			return;
-		}
-
-		state->current_expression = best_expr;
-		state->last_expression_change_timestamp_ms = now_ms;
 	}
+
+	route_expression_toward(state, target, now_ms);
 }
 
 /* ── Init ────────────────────────────────────────────────────────── */
@@ -2568,6 +2679,11 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 	g_runtime.intent = PET_INTENT_NONE;
 	g_runtime.intent_strength = 0;
 	g_runtime.intent_resolved_at_ms = now_ms;
+
+	/* Expression routing starts settled on the boot face. */
+	g_runtime.expr_target = PET_EXPR_CALM;
+	g_runtime.last_target_change_ms = now_ms;
+	g_runtime.last_expr_hop_ms = now_ms;
 
 	/* Core emotional state */
 	state->energy = 72;

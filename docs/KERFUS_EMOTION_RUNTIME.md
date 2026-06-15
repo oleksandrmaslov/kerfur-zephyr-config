@@ -116,6 +116,31 @@ Context edges are events (`APP_EVENT_CARRY_CONTEXT_CHANGED`) with small
 emotional meaning: clipping on = a bit of adventure; being grabbed off the
 bag = warmth + wake blink; set down = settle.
 
+## 1c. Expression transition routing (easing between feelings)
+
+`update_expression` (`behavior_engine.c`) is two layers:
+
+1. **Target selection** — appraisal + hysteresis (§1a, the hold/margin table)
+   pick a *stable* target expression. Hysteresis governs only how readily the
+   target is allowed to change (anti-flap).
+2. **Routing** — the displayed face walks toward the target **one adjacency
+   hop at a time** (`expr_first_hop`, BFS over the `transition_affinity`
+   graph; CALM is the hub), one hop per `EXPR_ROUTE_HOP_MS` (600 ms, paced by
+   the 100 ms tick). Emotionally-distant changes ease through intermediates
+   instead of snapping.
+
+Examples: waking `ASLEEP → SLEEPY → …` (ASLEEP is graph-adjacent only to
+SLEEPY); soothing an angry pet `ANNOYED → CALM → … → HAPPY` (petting sets the
+target and the face *eases* there, replacing the old instant flip that then
+snapped back when the pet window closed); `OVERSTIMULATED → CALM → CONTENT`.
+
+Overrides: forced/debug and asleep **snap**; petting and the normal election
+**ease**. The micro-reaction layer still overlays instantly (a startle is
+immediate; only the underlying expression eases). Validated by
+`tools/appraisal_calibrate.py` routing checks (all 169 routes converge in ≤4
+hops + named eases). Tuning knobs: `EXPR_ROUTE_HOP_MS`, and the
+`transition_affinity` graph (the adjacency edges, incl. `ASLEEP↔SLEEPY`).
+
 ## 2. Mood (slow valence)
 
 - Events do **not** change mood directly. They call `nudge_mood(delta)`, which
@@ -262,11 +287,18 @@ reactions, expression transitions, blinking (for gaze), battery-low/critical
   you saw the previous expression's pupils behind overstimulated eye-whites.
   Fixed (2026-06-15): `ON_BLINK` falls back to `SETTLE` when the effective
   blink profile is disabled, so the swap always resolves (~400 ms).
+- **Eye-white position glide (2026-06-15):** on an expression change the eye
+  whites (and the pupils riding on them) used to *teleport* to the new layout
+  — only brows/mouth/openness eased — which looked rough and produced odd
+  frames when a blink landed on the jump. They now ease via four transition
+  channels (`ch_*_eye_d{x,y}` in `face_runtime.c`, applied in
+  `ui_renderer.c`'s `eye_white_draw_position`), like the other features.
 - **Host test** (`tests/face_host/`, `bash tests/face_host/run.sh`): compiles
   the real `face_runtime.c` + generated tables against small Zephyr shims and
-  drives every expression, transition and reaction, asserting plan validity
-  and that pupil swaps always complete — the permanent regression guard for
-  the bug above. Engine *selection* is covered separately by
+  drives every expression, transition and reaction (incl. a blink landing
+  mid-transition), asserting plan validity, that pupil swaps always complete,
+  that pupils never snap/asymmetry across a blink boundary, and that the eye
+  glide settles. Engine *selection/routing* is covered separately by
   `tools/appraisal_calibrate.py`; this covers face *rendering*.
 
 ## 8. Diagnostics

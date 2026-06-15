@@ -179,6 +179,62 @@ MVP items already work.
 
 ---
 
+## Face / expression quality (2026-06-15, owner-reported)
+
+### F1. Expression transition routing (smooth face election)
+- **Why:** the election in `update_expression` (`behavior_engine.c`) jumps
+  **directly** to the best-scoring expression and several overrides set it
+  **instantly with no easing**, so emotionally-distant changes look rough:
+  - waking from sleep can jump `ASLEEP → CALM` instead of easing
+    `ASLEEP → SLEEPY → (COZY/CALM)` (the grogginess bias often loses to a
+    pickup arousal spike, and nothing forces the first post-wake step to be
+    SLEEPY);
+  - petting an angry pet hits the `pet_recent` override which forces
+    `ANGRY → HAPPY` instantly (bypasses all hysteresis), then snaps back when
+    the pet window ends.
+- **Root causes (with refs):** instant overrides
+  ([behavior_engine.c:2455-2473](../src/behavior/behavior_engine.c#L2455-L2473))
+  bypass hysteresis; the main election commits the best expression directly
+  ([behavior_engine.c:2530-2542](../src/behavior/behavior_engine.c#L2530-L2542));
+  `transition_affinity` only *biases* toward neighbours (≤5), it does not
+  *constrain* the path.
+- **How (clean rework):** add an emotional-adjacency transition policy — when
+  the elected target is not adjacent to the current expression, step through a
+  shared neighbour (usually CALM) instead of jumping; route the petting and
+  wake overrides the same way (soothe `ANGRY → CALM → HAPPY`; always wake
+  `ASLEEP → SLEEPY` first for the grogginess window). Keep destinations
+  unchanged (appraisal suite stays green); add transition-path tests.
+- **Affected:** `behavior_engine.c` (`update_expression`, overrides,
+  `transition_affinity` graph), `tools/appraisal_calibrate.py` (path tests),
+  possibly a behavior-engine host harness.
+- **Priority:** P1 · **Status:** DONE (2026-06-15, owner chose *full adjacency
+  routing*). Two-layer election: appraisal+hysteresis pick a stable target;
+  `expr_first_hop` (BFS over the affinity graph, +`ASLEEP↔SLEEPY` edge) walks
+  the face there one hop per `EXPR_ROUTE_HOP_MS` (600 ms). Petting eases
+  (soothes ANGRY→CALM→…→HAPPY), waking eases (ASLEEP→SLEEPY→…), forced/asleep
+  still snap. Validated by `appraisal_calibrate.py` routing checks (169 routes
+  + named eases, green). Not on-device-verified yet (owner builds). Possible
+  follow-up: scale `EXPR_ROUTE_HOP_MS` with arousal; situation-aware routing
+  so worn-quiet transit avoids disallowed intermediates.
+
+### F2. One-frame pupil glitch after a reaction blink
+- **Why:** owner saw a single frame on blink-reopen with the left pupil missing
+  and the right pupil shoved to the top-left — likely an asymmetric base
+  expression (e.g. ANGRY's `{16,17}`/`{17,16}` pupil layout) caught mid-jump,
+  and/or pupil offsets reading as zero for the reopen frame while a reaction is
+  still active (offsets are only recomputed when `dynamic_allowed || idle_pupils`).
+- **How:** extend `tests/face_host` with per-frame blink-boundary checks
+  (pupil presence symmetry + offset continuity across reopen) to reproduce
+  deterministically, then fix (align the `blink_active` threshold with the
+  renderer open/close hysteresis, and hold the last pupil offset through the
+  closed→open boundary). Likely reduced further by F1.
+- **Affected:** `src/ui/face_runtime.c`, `tests/face_host/`.
+- **Priority:** P1 · **Status:** DONE (2026-06-15). The host harness (now
+  ~2.25M checks incl. blink-during-transition) showed the pupil *offset* path
+  is clean — the bad frame was the eye-white **teleport** on an expression
+  change (only brows/mouth/openness eased). Fixed by easing eye-white position
+  via four transition channels (pupils ride along). Not on-device-verified yet.
+
 ## Later tasks (app integration, OTA, social, advanced)
 
 ### L1. Finish Android companion / Gadgetbridge payloads

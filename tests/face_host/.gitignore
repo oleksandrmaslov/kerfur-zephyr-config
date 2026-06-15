@@ -1,0 +1,5 @@
+# Host test build artifacts
+face_test
+face_test.exe
+*.exe
+*.o

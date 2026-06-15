@@ -131,7 +131,56 @@ AFFINITY = {
     "LONELY": {"NEEDY": 3, "CALM": 4},
     "COZY": {"SLEEPY": 4, "CONTENT": 3},
     "DRAINED": {"SLEEPY": 5, "COZY": 3},
+    # Only used for transition routing (waking eases ASLEEP -> SLEEPY -> …);
+    # while truly asleep the mode override owns the expression.
+    "ASLEEP": {"SLEEPY": 5},
 }
+
+
+# ── Expression transition routing (mirror behavior_engine.c) ─────────
+#
+# The appraisal + hysteresis layer picks a stable *target* feeling; the
+# displayed expression then walks toward it one adjacency hop at a time, so
+# emotionally-distant changes ease through intermediates (CALM is the hub)
+# instead of snapping. This mirrors expr_adjacent()/expr_first_hop().
+
+def expr_adjacent(a, b):
+    return (a == b) or (AFFINITY.get(a, {}).get(b, 0) > 0) or \
+        (AFFINITY.get(b, {}).get(a, 0) > 0)
+
+
+def expr_first_hop(frm, to):
+    """BFS one hop from `frm` toward `to` (== `to` when adjacent)."""
+    if frm == to or expr_adjacent(frm, to):
+        return to
+    seen = {frm}
+    queue = []  # (node, first_hop_that_reached_it)
+    for e in EXPRS:
+        if e != frm and expr_adjacent(frm, e):
+            seen.add(e)
+            queue.append((e, e))
+    head = 0
+    while head < len(queue):
+        cur, fh = queue[head]
+        head += 1
+        if cur == to:
+            return fh
+        for e in EXPRS:
+            if e not in seen and expr_adjacent(cur, e):
+                seen.add(e)
+                queue.append((e, fh))
+    return "CALM"  # guaranteed fallback (graph is connected)
+
+
+def route_path(frm, to, limit=20):
+    """The full sequence of displayed expressions from `frm` to `to`."""
+    path = [frm]
+    while path[-1] != to and len(path) < limit:
+        nxt = expr_first_hop(path[-1], to)
+        if nxt == path[-1]:
+            break
+        path.append(nxt)
+    return path
 
 # Incumbency: the current expression's stickiness against affinity pull
 # (mirror EXPR_INCUMBENCY_BONUS in behavior_engine.c).
@@ -373,6 +422,52 @@ def run_stability(verbose=False):
     return failures
 
 
+def run_paths(verbose=False):
+    failures = 0
+    print("--- transition routing (faces ease between distant feelings) ---")
+
+    # 1. Every from->to pair must converge on `to` within a few hops
+    #    (proves the adjacency graph is connected and routes terminate).
+    unreachable = 0
+    longest = 0
+    for frm in EXPRS:
+        for to in EXPRS:
+            path = route_path(frm, to)
+            longest = max(longest, len(path))
+            if path[-1] != to or len(path) > 5:
+                unreachable += 1
+                failures += 1
+                print(f"[FAIL] route {frm}->{to}: {path}")
+    print(f"[{'ok  ' if unreachable == 0 else 'FAIL'}] all "
+          f"{len(EXPRS) * len(EXPRS)} routes converge (longest {longest} nodes)")
+
+    # 2. Named eases — the owner-reported rough cases must now step through
+    #    an intermediate instead of snapping.
+    named = [
+        ("soothe angry -> happy via calm", "ANNOYED", "HAPPY",
+         lambda p: p[1] == "CALM" and p[-1] == "HAPPY" and len(p) >= 3),
+        ("wake eases out of sleep", "ASLEEP", "CALM",
+         lambda p: p == ["ASLEEP", "SLEEPY", "CALM"]),
+        ("wake-to-curious still via sleepy", "ASLEEP", "CURIOUS",
+         lambda p: p[1] == "SLEEPY" and p[-1] == "CURIOUS"),
+        ("drained warms up via sleepy", "DRAINED", "HAPPY",
+         lambda p: p[1] == "SLEEPY" and p[-1] == "HAPPY"),
+        ("overstimulated -> content via calm", "OVERSTIMULATED", "CONTENT",
+         lambda p: p[1] == "CALM" and p[-1] == "CONTENT"),
+        ("adjacent stays a single hop", "CALM", "CURIOUS",
+         lambda p: p == ["CALM", "CURIOUS"]),
+        ("same target is a no-op", "HAPPY", "HAPPY",
+         lambda p: p == ["HAPPY"]),
+    ]
+    for name, frm, to, pred in named:
+        path = route_path(frm, to)
+        ok = pred(path)
+        if not ok:
+            failures += 1
+        print(f"[{'ok  ' if ok else 'FAIL'}] {name:38s} {' -> '.join(path)}")
+    return failures
+
+
 def run_suite(verbose=False):
     failures = 0
     for (name, sit, feats, intent, strength, want, margin, near_ok) \
@@ -396,11 +491,13 @@ def run_suite(verbose=False):
     print()
     failures += run_stability(verbose)
     print()
+    failures += run_paths(verbose)
+    print()
     if failures:
         print(f"{failures} check(s) FAILED")
         return 1
     print(f"all {len(SCENARIOS)} scenarios + {len(STABILITY)} "
-          f"stability checks pass")
+          f"stability checks + routing pass")
     return 0
 
 

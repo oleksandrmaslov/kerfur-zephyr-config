@@ -162,8 +162,16 @@ static struct kerfur_face_point eye_white_draw_position(const struct face_runtim
 							const struct kerfur_face_recipe *recipe,
 							bool left_eye)
 {
-	return remap_eye_slot_position(left_eye ? plan->layout.left_eye_white :
-						      plan->layout.right_eye_white,
+	struct kerfur_face_point base = left_eye ? plan->layout.left_eye_white :
+						   plan->layout.right_eye_white;
+
+	/* Transition easing: glide the eye into its new expression position
+	 * instead of teleporting. Pupils derive from this point, so they
+	 * follow the same glide. */
+	base.x += left_eye ? plan->left_eye_dx : plan->right_eye_dx;
+	base.y += left_eye ? plan->left_eye_dy : plan->right_eye_dy;
+
+	return remap_eye_slot_position(base,
 				       left_eye ? recipe->left_eye_white : recipe->right_eye_white,
 				       left_eye ? plan->left_eye_white : plan->right_eye_white);
 }

@@ -888,6 +888,19 @@ static void detect_expression_transition(struct face_runtime_state *runtime,
 	runtime->ch_right_whisker_dy =
 		(int16_t)(old_recipe->layout.right_whisker.y - new_recipe->layout.right_whisker.y);
 
+	/* Eye-white position glide: start at the old eye position and ease to
+	 * the new one (the eyes used to teleport on an expression change,
+	 * which looked rough and produced odd frames when a blink landed on
+	 * the jump). Pupils ride on the eye-white position, so they glide too. */
+	runtime->ch_left_eye_dx =
+		(int16_t)(old_recipe->layout.left_eye_white.x - new_recipe->layout.left_eye_white.x);
+	runtime->ch_left_eye_dy =
+		(int16_t)(old_recipe->layout.left_eye_white.y - new_recipe->layout.left_eye_white.y);
+	runtime->ch_right_eye_dx =
+		(int16_t)(old_recipe->layout.right_eye_white.x - new_recipe->layout.right_eye_white.x);
+	runtime->ch_right_eye_dy =
+		(int16_t)(old_recipe->layout.right_eye_white.y - new_recipe->layout.right_eye_white.y);
+
 	runtime->tgt_left_brow_dy = 0;
 	runtime->tgt_right_brow_dy = 0;
 	runtime->tgt_mouth_dy = 0;
@@ -932,6 +945,12 @@ static void step_channels(struct face_runtime_state *runtime,
 	runtime->ch_right_whisker_dy =
 		smooth_axis(runtime->ch_right_whisker_dy, runtime->tgt_right_whisker_dy, speed);
 
+	/* Eye-white position glide (target always 0). */
+	runtime->ch_left_eye_dx = smooth_axis(runtime->ch_left_eye_dx, 0, speed);
+	runtime->ch_left_eye_dy = smooth_axis(runtime->ch_left_eye_dy, 0, speed);
+	runtime->ch_right_eye_dx = smooth_axis(runtime->ch_right_eye_dx, 0, speed);
+	runtime->ch_right_eye_dy = smooth_axis(runtime->ch_right_eye_dy, 0, speed);
+
 	if (runtime->blink_descending) {
 		eye_speed = (recipe->blink_profile == KERFUR_FACE_BLINK_PROFILE_BLINK_LEGACY_SLEEPY)
 				? FACE_BLINK_CLOSE_SPEED_SLEEPY : FACE_BLINK_CLOSE_SPEED;
@@ -947,6 +966,8 @@ static void step_channels(struct face_runtime_state *runtime,
 		      (runtime->ch_mouth_dy == mouth_target) &&
 		      (runtime->ch_left_whisker_dy == runtime->tgt_left_whisker_dy) &&
 		      (runtime->ch_right_whisker_dy == runtime->tgt_right_whisker_dy) &&
+		      (runtime->ch_left_eye_dx == 0) && (runtime->ch_left_eye_dy == 0) &&
+		      (runtime->ch_right_eye_dx == 0) && (runtime->ch_right_eye_dy == 0) &&
 		      (runtime->ch_eye_openness == runtime->tgt_eye_openness);
 
 	if (all_settled && runtime->transition_active) {
@@ -1551,6 +1572,10 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	plan.mouth_dy = runtime->ch_mouth_dy;
 	plan.left_whisker_dy = runtime->ch_left_whisker_dy;
 	plan.right_whisker_dy = runtime->ch_right_whisker_dy;
+	plan.left_eye_dx = runtime->ch_left_eye_dx;
+	plan.left_eye_dy = runtime->ch_left_eye_dy;
+	plan.right_eye_dx = runtime->ch_right_eye_dx;
+	plan.right_eye_dy = runtime->ch_right_eye_dy;
 	plan.eye_openness = (uint8_t)clamp_s16(runtime->ch_eye_openness, 0, 100);
 	plan.left_eye_openness = plan.eye_openness;
 	plan.right_eye_openness = plan.eye_openness;

@@ -112,6 +112,12 @@ static void validate_plan(const struct face_runtime_plan *plan, const char *tag)
 	CHECK(abs(plan->right_pupil_offset_x) <= 48 && abs(plan->right_pupil_offset_y) <= 48,
 	      "%s: right pupil offset wild (%d,%d)", tag,
 	      plan->right_pupil_offset_x, plan->right_pupil_offset_y);
+
+	/* Eye-white glide offsets are transient: bounded, and must converge. */
+	CHECK(abs(plan->left_eye_dx) <= 64 && abs(plan->left_eye_dy) <= 64 &&
+		      abs(plan->right_eye_dx) <= 64 && abs(plan->right_eye_dy) <= 64,
+	      "%s: eye glide offset wild L(%d,%d) R(%d,%d)", tag, plan->left_eye_dx,
+	      plan->left_eye_dy, plan->right_eye_dx, plan->right_eye_dy);
 }
 
 static const struct face_runtime_plan *run_frames(struct face_runtime_state *rt,
@@ -148,6 +154,11 @@ static void test_expression_identity(void)
 		CHECK(plan->recipe_id == (enum kerfur_face_recipe_id)e,
 		      "%s: rendered recipe %s instead", tag,
 		      kerfur_face_recipe_name(plan->recipe_id));
+		CHECK(plan->left_eye_dx == 0 && plan->left_eye_dy == 0 &&
+			      plan->right_eye_dx == 0 && plan->right_eye_dy == 0,
+		      "%s: eye glide did not settle L(%d,%d) R(%d,%d)", tag,
+		      plan->left_eye_dx, plan->left_eye_dy, plan->right_eye_dx,
+		      plan->right_eye_dy);
 	}
 }
 
@@ -213,6 +224,189 @@ static void test_reactions_valid(void)
 	}
 }
 
+static bool pupil_real(enum kerfur_face_asset_id id)
+{
+	return id != KERFUR_FACE_ASSET_NONE && id != KERFUR_FACE_ASSET_PUPIL_NONE;
+}
+
+/* Test 4 (F2 repro): a visible pupil must not jump or go asymmetric across a
+ * blink/reaction boundary. For each expression we trigger a blink-ish
+ * reaction, let it run and clear, and every frame where a real pupil is
+ * clearly visible we assert: (a) the applied offset does not snap by a big
+ * step between consecutive visible frames with the same pupil asset, and
+ * (b) for recipes whose left/right pupils sit symmetrically, the two offsets
+ * stay mirror-equal. */
+#define PUPIL_JUMP_MAX 10
+#define PUPIL_ASYM_MAX 3
+
+static void test_blink_pupil_consistency(void)
+{
+	static const enum micro_reaction_type blinkish[] = {
+		REACTION_BLINK,	      REACTION_WAKE_BLINK, REACTION_NOTIF_PING,
+		REACTION_NOTIF_BURST, REACTION_STARTLE,	   REACTION_HAPPY_BOUNCE,
+	};
+
+	for (int e = PET_EXPR_CALM; e <= PET_EXPR_ASLEEP; e++) {
+		const struct kerfur_face_recipe *rec =
+			kerfur_face_recipe_get((enum kerfur_face_recipe_id)e);
+		const bool symmetric =
+			(rec->layout.left_eyeball.x == rec->layout.right_eyeball.x) &&
+			(rec->layout.left_eyeball.y == rec->layout.right_eyeball.y);
+
+		for (size_t ri = 0; ri < ARRAY_SIZE(blinkish); ri++) {
+			struct face_runtime_state rt;
+			struct pet_state st;
+			int64_t now = 1000;
+			int prev_lx = 0, prev_ly = 0;
+			enum kerfur_face_asset_id prev_eyeball = KERFUR_FACE_ASSET_NONE;
+			bool have_prev = false;
+			char tag[96];
+
+			snprintf(tag, sizeof(tag), "blinkpupil:%s/%s",
+				 kerfur_face_recipe_name((enum kerfur_face_recipe_id)e),
+				 kerfur_face_reaction_name(
+					 (enum kerfur_face_reaction_id)blinkish[ri]));
+
+			init_state(&st);
+			st.current_expression = (enum pet_expression)e;
+			face_runtime_init(&rt);
+			run_frames(&rt, &st, &now, 120, tag);
+
+			for (int phase = 0; phase < 3; phase++) {
+				/* phase 0: idle, 1: reaction active, 2: cleared */
+				st.current_reaction = (phase == 1)
+					? blinkish[ri]
+					: REACTION_NONE;
+				for (int f = 0; f < 80; f++) {
+					const struct face_runtime_plan *p;
+
+					now += FRAME_MS;
+					p = face_runtime_step(&rt, &st, now, false, false);
+					validate_plan(p, tag);
+
+					/* Mirror the renderer: a per-eye wink can close
+					 * one eye while the other stays open. */
+					uint8_t lop = p->per_eye_openness
+							      ? p->left_eye_openness
+							      : p->eye_openness;
+					uint8_t rop = p->per_eye_openness
+							      ? p->right_eye_openness
+							      : p->eye_openness;
+					bool lvis = pupil_real(p->left_eyeball) && lop >= 40;
+					bool rvis = pupil_real(p->right_eyeball) && rop >= 40;
+
+					if (lvis && rvis && symmetric) {
+						CHECK(abs(p->left_pupil_offset_x -
+							  p->right_pupil_offset_x) <= PUPIL_ASYM_MAX &&
+						      abs(p->left_pupil_offset_y -
+							  p->right_pupil_offset_y) <= PUPIL_ASYM_MAX,
+						      "%s: L/R pupil asymmetry L(%d,%d) R(%d,%d)",
+						      tag, p->left_pupil_offset_x,
+						      p->left_pupil_offset_y,
+						      p->right_pupil_offset_x,
+						      p->right_pupil_offset_y);
+					}
+
+					if (lvis && have_prev &&
+					    p->left_eyeball == prev_eyeball) {
+						CHECK(abs(p->left_pupil_offset_x - prev_lx) <=
+							      PUPIL_JUMP_MAX &&
+						      abs(p->left_pupil_offset_y - prev_ly) <=
+							      PUPIL_JUMP_MAX,
+						      "%s: left pupil snapped (%d,%d)->(%d,%d)",
+						      tag, prev_lx, prev_ly,
+						      p->left_pupil_offset_x,
+						      p->left_pupil_offset_y);
+					}
+
+					if (lvis) {
+						prev_lx = p->left_pupil_offset_x;
+						prev_ly = p->left_pupil_offset_y;
+						prev_eyeball = p->left_eyeball;
+						have_prev = true;
+					} else {
+						have_prev = false;
+					}
+				}
+			}
+		}
+	}
+}
+
+/* Test 5 (F2 repro): a blink landing *during* an expression change. This is
+ * the scenario the owner hit — a reaction blink right as the face was
+ * jumping between expressions. We change expression and fire a blink a few
+ * frames later, asserting the visible pupil never snaps. */
+static void test_transition_blink(void)
+{
+	for (int from = PET_EXPR_CALM; from <= PET_EXPR_ASLEEP; from++) {
+		for (int to = PET_EXPR_CALM; to <= PET_EXPR_ASLEEP; to++) {
+			struct face_runtime_state rt;
+			struct pet_state st;
+			int64_t now = 1000;
+			int prev_lx = 0, prev_ly = 0, prev_rx = 0, prev_ry = 0;
+			enum kerfur_face_asset_id prev_l = KERFUR_FACE_ASSET_NONE;
+			enum kerfur_face_asset_id prev_r = KERFUR_FACE_ASSET_NONE;
+			bool have_prev = false;
+			char tag[96];
+
+			snprintf(tag, sizeof(tag), "transblink:%s->%s",
+				 kerfur_face_recipe_name((enum kerfur_face_recipe_id)from),
+				 kerfur_face_recipe_name((enum kerfur_face_recipe_id)to));
+
+			init_state(&st);
+			st.current_expression = (enum pet_expression)from;
+			face_runtime_init(&rt);
+			run_frames(&rt, &st, &now, 120, tag);
+
+			/* Jump expression, then blink 3 frames into the change. */
+			st.current_expression = (enum pet_expression)to;
+			for (int f = 0; f < 140; f++) {
+				const struct face_runtime_plan *p;
+
+				if (f == 3) {
+					st.current_reaction = REACTION_BLINK;
+				} else if (f == 12) {
+					st.current_reaction = REACTION_NONE;
+				}
+				now += FRAME_MS;
+				p = face_runtime_step(&rt, &st, now, false, false);
+				validate_plan(p, tag);
+
+				uint8_t lop = p->per_eye_openness ? p->left_eye_openness
+								  : p->eye_openness;
+				uint8_t rop = p->per_eye_openness ? p->right_eye_openness
+								  : p->eye_openness;
+				bool lvis = pupil_real(p->left_eyeball) && lop >= 40;
+				bool rvis = pupil_real(p->right_eyeball) && rop >= 40;
+
+				if (lvis && have_prev && p->left_eyeball == prev_l) {
+					CHECK(abs(p->left_pupil_offset_x - prev_lx) <= PUPIL_JUMP_MAX &&
+					      abs(p->left_pupil_offset_y - prev_ly) <= PUPIL_JUMP_MAX,
+					      "%s: left pupil snapped (%d,%d)->(%d,%d)", tag,
+					      prev_lx, prev_ly, p->left_pupil_offset_x,
+					      p->left_pupil_offset_y);
+				}
+				if (rvis && have_prev && p->right_eyeball == prev_r) {
+					CHECK(abs(p->right_pupil_offset_x - prev_rx) <= PUPIL_JUMP_MAX &&
+					      abs(p->right_pupil_offset_y - prev_ry) <= PUPIL_JUMP_MAX,
+					      "%s: right pupil snapped (%d,%d)->(%d,%d)", tag,
+					      prev_rx, prev_ry, p->right_pupil_offset_x,
+					      p->right_pupil_offset_y);
+				}
+
+				have_prev = lvis || rvis;
+				prev_lx = p->left_pupil_offset_x;
+				prev_ly = p->left_pupil_offset_y;
+				prev_rx = p->right_pupil_offset_x;
+				prev_ry = p->right_pupil_offset_y;
+				prev_l = p->left_eyeball;
+				prev_r = p->right_eyeball;
+			}
+		}
+	}
+}
+
 int main(void)
 {
 	srand(1);
@@ -220,6 +414,8 @@ int main(void)
 	test_expression_identity();
 	test_pupil_swap_completes();
 	test_reactions_valid();
+	test_blink_pupil_consistency();
+	test_transition_blink();
 
 	printf("\nface_runtime host test: %d checks, %d failure(s)\n",
 	       g_checks, g_failures);
