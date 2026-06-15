@@ -71,6 +71,14 @@ LOG_MODULE_REGISTER(ble_manager, CONFIG_LOG_DEFAULT_LEVEL);
 #define KERFUR_NOTIFY_DISCOVERY_RETRY_DELAY K_SECONDS(2)
 #define KERFUR_NOTIFY_DISCOVERY_MAX_RETRIES 5U
 
+/* Re-pair backoff: when a phone keeps a bond we no longer have, it auto-
+ * reconnects and re-encrypts with a key we reject, looping ~1/s. Escalate the
+ * re-advertise delay after each key-missing failure to break the loop and save
+ * power until the user forgets+re-pairs; a successful pairing resets it. */
+#define KERFUR_REPAIR_BACKOFF_STEP_MS 4000
+#define KERFUR_REPAIR_BACKOFF_MAX_MS 30000
+#define KERFUR_REPAIR_STREAK_RESET_MS 60000
+
 #define KERFUR_COMPANION_MAX_PACKET_LEN 20U
 #define KERFUR_ADV_UUID16_MAX_LEN 14U
 
@@ -185,6 +193,13 @@ static struct k_work_delayable g_notify_discovery_work;
 static struct k_work_delayable g_adv_restart_work;
 static uint8_t g_notify_discovery_retries;
 static uint8_t g_adv_restart_retries;
+#if defined(CONFIG_BT_SMP)
+static uint8_t g_repair_fail_streak;
+static int64_t g_repair_last_fail_ms;
+#endif
+/* One-shot: re-advertise delay (ms) applied by the next disconnect; 0 = normal.
+ * Set by the security-failure path to space out re-pair attempts. */
+static int64_t g_repair_adv_delay_ms;
 
 static struct bt_data g_adv_data[3];
 #if defined(CONFIG_KERFUR_ENABLE_NEARBY)
@@ -1556,7 +1571,17 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 	g_notify_discovery_retries = 0U;
 	g_adv_restart_retries = 0U;
 
-	(void)k_work_reschedule(&g_adv_restart_work, KERFUR_ADV_RESTART_INITIAL_DELAY);
+	{
+		/* Normally re-advertise almost immediately so the phone can
+		 * reconnect. After a stale-bond security failure, honour the
+		 * escalating backoff so we don't loop. One-shot: consume it. */
+		const k_timeout_t adv_delay = (g_repair_adv_delay_ms > 0)
+			? K_MSEC(g_repair_adv_delay_ms)
+			: KERFUR_ADV_RESTART_INITIAL_DELAY;
+
+		g_repair_adv_delay_ms = 0;
+		(void)k_work_reschedule(&g_adv_restart_work, adv_delay);
+	}
 }
 
 #if defined(CONFIG_BT_SMP)
@@ -1574,6 +1599,7 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 		 * transient glitch on an otherwise-valid bond.) */
 		if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) {
 			const bt_addr_le_t *peer = bt_conn_get_dst(conn);
+			const int64_t now = k_uptime_get();
 
 			if (peer != NULL) {
 				int unpair_err = bt_unpair(BT_ID_DEFAULT, peer);
@@ -1584,6 +1610,24 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 					LOG_WRN("bt_unpair failed (%d)", unpair_err);
 				}
 			}
+
+			/* The phone keeps a bond we lost and will instantly reconnect
+			 * and fail again. Escalate the re-advertise delay so we stop
+			 * looping ~1/s; the disconnect below consumes this delay. */
+			if ((now - g_repair_last_fail_ms) > KERFUR_REPAIR_STREAK_RESET_MS) {
+				g_repair_fail_streak = 0U;
+			}
+			g_repair_last_fail_ms = now;
+			if (g_repair_fail_streak < 255U) {
+				g_repair_fail_streak++;
+			}
+			g_repair_adv_delay_ms =
+				(int64_t)g_repair_fail_streak * KERFUR_REPAIR_BACKOFF_STEP_MS;
+			if (g_repair_adv_delay_ms > KERFUR_REPAIR_BACKOFF_MAX_MS) {
+				g_repair_adv_delay_ms = KERFUR_REPAIR_BACKOFF_MAX_MS;
+			}
+			LOG_WRN("Re-pair backoff: advertising paused %lld ms (streak %u)",
+				(long long)g_repair_adv_delay_ms, g_repair_fail_streak);
 
 			(void)bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
 			return;
@@ -1600,6 +1644,11 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 	}
 
 	LOG_INF("BLE security level now %u", level);
+
+	/* A successful secure link means the bond is good again — clear the
+	 * re-pair backoff so normal reconnects stay snappy. */
+	g_repair_fail_streak = 0U;
+	g_repair_adv_delay_ms = 0;
 
 	if ((level >= BT_SECURITY_L2) || !IS_ENABLED(CONFIG_KERFUR_ENABLE_ANCS)) {
 		request_phone_notification_discovery(conn);
