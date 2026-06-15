@@ -1638,6 +1638,30 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 {
 	if (err != BT_SECURITY_ERR_SUCCESS) {
 		LOG_WRN("BLE security changed with error (%d: %s)", err, bt_security_err_to_str(err));
+
+		/* A stale or mismatched bond — common after a UF2 reflash, or when
+		 * the phone has forgotten us — makes every reconnect fail to
+		 * encrypt, so ANCS never subscribes (the "reset a few times" symptom).
+		 * Drop the dead bond and the link so the next connection re-pairs
+		 * cleanly on its own instead of needing a manual reset. */
+		if ((err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) ||
+		    (err == BT_SECURITY_ERR_AUTH_FAIL)) {
+			const bt_addr_le_t *peer = bt_conn_get_dst(conn);
+
+			if (peer != NULL) {
+				int unpair_err = bt_unpair(BT_ID_DEFAULT, peer);
+
+				if (unpair_err == 0) {
+					LOG_WRN("Cleared stale bond after security failure; re-pair from the phone");
+				} else if (unpair_err != -ENOENT) {
+					LOG_WRN("bt_unpair failed (%d)", unpair_err);
+				}
+			}
+
+			(void)bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+			return;
+		}
+
 		if (err == BT_SECURITY_ERR_AUTH_REQUIREMENT) {
 			LOG_WRN("ANCS requires successful pairing; retry after re-pairing from iOS");
 			return;
