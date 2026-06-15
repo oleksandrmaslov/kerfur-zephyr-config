@@ -366,42 +366,6 @@ static int16_t smooth_axis(int16_t current, int16_t target, uint8_t speed)
 	return current + (int16_t)step;
 }
 
-static void resolve_ambient_pupil_drift(const struct kerfur_face_recipe *recipe,
-					int64_t now_ms,
-					int16_t *dx,
-					int16_t *dy)
-{
-	uint8_t index;
-
-	*dx = 0;
-	*dy = 0;
-
-	for (index = 0U; index < recipe->ambient_motion_count; index++) {
-		const struct kerfur_face_micro_animation *anim =
-			kerfur_face_micro_anim_get(recipe->ambient_motion[index]);
-		int64_t phase;
-		int64_t quarter;
-
-		if (anim->kind != KERFUR_FACE_MICRO_ANIM_KIND_PUPIL_MOTION ||
-		    anim->duration_ms == 0U) {
-			continue;
-		}
-
-		phase = now_ms % anim->duration_ms;
-		quarter = MAX(1, anim->duration_ms / 4);
-
-		if (phase < quarter) {
-			*dx += anim->radius_x;
-		} else if (phase < (2 * quarter)) {
-			*dy += anim->radius_y;
-		} else if (phase < (3 * quarter)) {
-			*dx -= anim->radius_x;
-		} else {
-			*dy -= anim->radius_y;
-		}
-	}
-}
-
 static bool zone_is_available(const struct kerfur_face_asset_metadata *eye_asset)
 {
 	return (eye_asset != NULL) &&
@@ -439,8 +403,6 @@ static void resolve_pupil_offsets(const struct kerfur_face_asset_metadata *eye_a
 				  int16_t look_y,
 				  uint8_t scale_x,
 				  uint8_t scale_y,
-				  int16_t ambient_dx,
-				  int16_t ambient_dy,
 				  int16_t *out_dx,
 				  int16_t *out_dy)
 {
@@ -451,9 +413,6 @@ static void resolve_pupil_offsets(const struct kerfur_face_asset_metadata *eye_a
 	int16_t scaled_y = clamp_s16((look_y * scale_y) / 100, -100, 100);
 	int16_t dx = percent_to_offset(scaled_x, max_x);
 	int16_t dy = percent_to_offset(scaled_y, max_y);
-
-	dx += ambient_dx;
-	dy += ambient_dy;
 
 	clamp_eye_offset_to_zone(zone, &dx, &dy);
 	*out_dx = dx;
@@ -890,16 +849,19 @@ static void update_wander(struct face_runtime_state *runtime,
 	runtime->wander_hold_until_ms = now_ms + 1200LL + (int64_t)face_rand(1600U);
 }
 
-/* Slow breathing bob: a 1 px mouth/whisker rise-and-fall. Sleepier =
- * slower and it keeps going while asleep — a sleeping pet that still
- * breathes reads as alive, not switched off. */
+/* Slow breathing bob: a single 1 px mouth/whisker lift that appears only
+ * briefly near the top of a long, slow cycle. Most of the time the mouth
+ * and whiskers rest perfectly still, so the motion reads as a faint breath
+ * rather than the constant bob it used to be. Sleepier = slower; it keeps
+ * going while asleep — a sleeping pet that still breathes reads as alive. */
 static int16_t breathing_offset(const struct pet_state *state, int64_t now_ms)
 {
-	const int64_t period_ms = (state->sleepiness > 65) ? 5200LL :
-				  (state->arousal > 55) ? 2800LL : 3800LL;
+	const int64_t period_ms = (state->sleepiness > 65) ? 9000LL :
+				  (state->arousal > 55) ? 5500LL : 7000LL;
 	const int64_t phase = now_ms % period_ms;
 
-	return (phase < (period_ms / 2)) ? 0 : 1;
+	/* Lifted for only the last ~18% of each cycle. */
+	return (phase < ((period_ms * 82) / 100)) ? 0 : 1;
 }
 
 static void detect_expression_transition(struct face_runtime_state *runtime,
@@ -1008,6 +970,15 @@ static void resolve_pupil_swap(struct face_runtime_state *runtime,
 		style = (enum face_pupil_swap_style)reaction->pupil_swap_override;
 	} else {
 		style = (enum face_pupil_swap_style)recipe->pupil_swap_style;
+	}
+
+	/* ON_BLINK hides the pupil change behind a blink — but a face whose
+	 * blink profile is disabled (e.g. OVERSTIMULATED's spiral eyes) never
+	 * closes, so the swap would wait forever and the new pupil would never
+	 * appear. Fall back to a time-based settle so the swap always resolves. */
+	if ((style == FACE_PUPIL_SWAP_ON_BLINK) &&
+	    blink_profile_is_disabled(resolve_blink_profile(recipe, reaction))) {
+		style = FACE_PUPIL_SWAP_SETTLE;
 	}
 
 	eyeball_changed =
@@ -1304,8 +1275,6 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	struct face_runtime_plan plan;
 	int16_t target_x;
 	int16_t target_y;
-	int16_t ambient_dx = 0;
-	int16_t ambient_dy = 0;
 	bool special_eye_mode_active;
 	bool blink_active;
 	bool has_zone;
@@ -1435,9 +1404,10 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 	dynamic_allowed = dynamic_reason == FACE_RUNTIME_DYNAMIC_ALLOWED;
 
 	/* Stage 5: wandering idle gaze. When the pupils sit idle (no tilt
-	 * gaze, not in hand), the eyes occasionally drift to a random spot
-	 * and back — combined with the recipe's ambient drift this keeps
-	 * the pupils alive instead of frozen at center. */
+	 * gaze, not in hand), the eyes occasionally ease to a random spot and
+	 * back. This is now the *only* idle pupil motion (the constant cyclic
+	 * ambient drift was removed), so a resting face holds still between
+	 * these rare, deliberate glances. */
 	update_wander(runtime, state, reaction_id, blink_profile_id, ambient, now_ms);
 
 	const bool idle_pupils =
@@ -1538,24 +1508,21 @@ const struct face_runtime_plan *face_runtime_step(struct face_runtime_state *run
 		runtime->look_render_y = smooth_axis(runtime->look_render_y, target_y, motion_speed);
 	}
 
-	/* Only use idle drift when dynamic pupils are NOT active. */
-	if (!dynamic_allowed) {
-		resolve_ambient_pupil_drift(recipe, now_ms, &ambient_dx, &ambient_dy);
-	}
-
 	if (dynamic_allowed || idle_pupils) {
-		/* idle_pupils also folds in the recipe's ambient drift, so a
-		 * resting face keeps a slow, breathing-pace pupil motion. */
+		/* Pupils follow look_render only. The old cyclic ambient drift
+		 * (the up-right-down-left idle wobble) was removed; a resting
+		 * face stays still and only the occasional wander glance moves
+		 * the eyes. */
 		if (zone_is_available(left_eye_asset)) {
 			resolve_pupil_offsets(left_eye_asset, runtime->look_render_x, runtime->look_render_y,
 					      recipe->dynamic_pupil_scale_x,
-					      recipe->dynamic_pupil_scale_y, ambient_dx, ambient_dy,
+					      recipe->dynamic_pupil_scale_y,
 					      &plan.left_pupil_offset_x, &plan.left_pupil_offset_y);
 		}
 		if (zone_is_available(right_eye_asset)) {
 			resolve_pupil_offsets(right_eye_asset, runtime->look_render_x, runtime->look_render_y,
 					      recipe->dynamic_pupil_scale_x,
-					      recipe->dynamic_pupil_scale_y, ambient_dx, ambient_dy,
+					      recipe->dynamic_pupil_scale_y,
 					      &plan.right_pupil_offset_x, &plan.right_pupil_offset_y);
 		}
 	}

@@ -88,6 +88,43 @@ Face codegen needs Python `Pillow` + (`cairosvg` or local Chrome).
 **Run without hardware:** set `CONFIG_KERFUR_ENABLE_MOCK_INPUTS=y` and/or drive
 the `kerfur` shell (`face …`, `nearby inject …`, battery injection).
 
+## 5c. What changed 2026-06-15 — face render fixes + host test harness
+
+Owner direction: "fix the faces and perfect the runtime of the faces/engine."
+Owner had **not flashed**; all changes traced + host-tested, not on-device.
+
+- **Bug fix — OVERSTIMULATED never rendered its spiral.** Its recipe pairs
+  `pupil_swap_style = ON_BLINK` with `blink_profile = BLINK_DISABLED`, so the
+  deferred pupil swap waited forever for a blink that never happens; the
+  previous expression's pupils stayed on screen. Fix in
+  `resolve_pupil_swap()` (`src/ui/face_runtime.c`): `ON_BLINK` falls back to
+  `SETTLE` when the effective blink profile is disabled. General invariant —
+  a pupil swap always resolves. (Data left as-is; the runtime guard makes any
+  such recipe safe.)
+- **Idle micro-life reworked (owner request):** removed the constant cyclic
+  up-right-down-left ambient pupil drift — `resolve_ambient_pupil_drift()`
+  deleted and the `ambient_dx/dy` plumbing dropped from `resolve_pupil_offsets`.
+  The occasional slow wander glance (`update_wander`) is kept and is now the
+  only idle pupil motion. Breathing (`breathing_offset`) made much subtler
+  (brief ~18 % lift over a 5.5–9 s cycle). Reaction whisker-wiggles and
+  blinking are untouched. (The JSON still defines `PUPIL_IDLE_DRIFT` ambient
+  motion on CALM/CURIOUS/CONTENT — now inert; optional cleanup is to strip it
+  from `kerfur_faces.json` and regen.)
+- **New off-target render test:** `tests/face_host/` compiles the real
+  `face_runtime.c` + generated tables against `tests/face_host/shim/` (tiny
+  Zephyr log/random/util headers) and drives every expression, transition and
+  reaction through `face_runtime_step()`, asserting plan validity + pupil-swap
+  completion. `bash tests/face_host/run.sh` — ~1.03M checks, all green; goes
+  red on the deadlock if the fix is removed. Counterpart to
+  `tools/appraisal_calibrate.py` (engine selection, also green).
+- **Audit result:** OVERSTIMULATED was the only structural render defect across
+  all 13 expressions × transitions × reactions.
+- Docs updated: `KERFUS_EMOTION_RUNTIME.md` §7/§7a, `README.md`
+  (Stage 5 + new Tests section), `KERFUS_NEXT_STEPS.md` (M3 + session note).
+- **Open for next session (needs owner flash):** per-expression visual polish
+  (layout, look targets, whisker edge framing at x=0/x=119); then deeper
+  engine/behavior tuning. Owner builds manually.
+
 ## 5b. What changed 2026-06-12 — Kerfus-to-Kerfus social system rewrite
 
 Goal: the old nearby subsystem tied friend identity to the ephemeral ID in use right

@@ -231,12 +231,18 @@ glance left/right when curious/observing, slow blink when resting.
 - **Wandering idle gaze** — when there is no real gaze input (not in hand,
   look confidence ≈ 0) and no reaction, the pupils occasionally ease to a
   random nearby point, hold ~1.2–2.8 s, and return; every 6–16 s in
-  foreground, 12–26 s in ambient; sleepy faces usually skip their turn. This
-  path also finally feeds the recipes' configured **ambient pupil drift**
-  into the rendered pupils (previously computed but never applied).
-- **Breathing** — a slow 1 px mouth/whisker bob (period 2.8–5.2 s, slower
-  when sleepy) that continues while asleep; suppressed during reactions,
-  transitions, and critical battery.
+  foreground, 12–26 s in ambient; sleepy faces usually skip their turn.
+  This is now the **only** idle pupil motion: the old constant cyclic
+  ambient drift (the up-right-down-left wobble that ran on CALM/CURIOUS/
+  CONTENT) was removed (2026-06-15) because it read as fidgety — a resting
+  face now holds still between these rare, deliberate glances.
+  (`resolve_ambient_pupil_drift` is gone; `update_wander` remains.)
+- **Breathing** — a faint, slow 1 px mouth/whisker lift that appears only
+  briefly (~18 % of a long 5.5–9 s cycle, slower when sleepy) and continues
+  while asleep; suppressed during reactions, transitions, and critical
+  battery. Deliberately subtle (reworked 2026-06-15 from the earlier, much
+  more active 2.8–5.2 s half-cycle bob). Reaction whisker-wiggles are
+  unaffected.
 - **Continuous context on the face** — mood sets the resting mouth/brow
   (droop when worn down, slight lift when content); arousal opens the eyes a
   touch, heavy sleepiness drops the lids; charging/low-battery/walking/
@@ -245,6 +251,23 @@ glance left/right when curious/observing, slow blink when resting.
 All face micro-life is suppressed exactly where it must be: during
 reactions, expression transitions, blinking (for gaze), battery-low/critical
 (wander, breathing on critical), and sleepy recipes wander only rarely.
+
+## 7a. Render-path robustness + host test
+
+- **A pupil swap must always complete.** `resolve_pupil_swap()` can defer an
+  eyeball change behind a blink (`ON_BLINK`) or a short settle (`SETTLE`) so
+  the change isn't jarring — but a recipe whose blink profile is disabled
+  never closes its eyes. OVERSTIMULATED (spiral pupils, blink disabled,
+  swap = `ON_BLINK`) therefore waited forever and never showed its spiral;
+  you saw the previous expression's pupils behind overstimulated eye-whites.
+  Fixed (2026-06-15): `ON_BLINK` falls back to `SETTLE` when the effective
+  blink profile is disabled, so the swap always resolves (~400 ms).
+- **Host test** (`tests/face_host/`, `bash tests/face_host/run.sh`): compiles
+  the real `face_runtime.c` + generated tables against small Zephyr shims and
+  drives every expression, transition and reaction, asserting plan validity
+  and that pupil swaps always complete — the permanent regression guard for
+  the bug above. Engine *selection* is covered separately by
+  `tools/appraisal_calibrate.py`; this covers face *rendering*.
 
 ## 8. Diagnostics
 

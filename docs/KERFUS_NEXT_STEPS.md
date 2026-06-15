@@ -10,6 +10,31 @@ affected files, priority, and status.
 
 ---
 
+## Session progress (updated 2026-06-15 — face fixes + render test harness)
+
+Focus: fix the faces and perfect the face/engine runtime (owner has not flashed
+yet; all changes traced + host-tested, not on-device-verified).
+
+- **Face bug fixed:** OVERSTIMULATED never showed its spiral pupils — a
+  `swap-on-blink` pupil swap on a recipe with blinking disabled deadlocked
+  forever. `resolve_pupil_swap()` now falls back to a time-based settle when
+  the blink profile is disabled. General invariant: a pupil swap always
+  resolves.
+- **Idle motion reworked (owner request):** removed the constant cyclic
+  up-right-down-left ambient pupil drift (`resolve_ambient_pupil_drift` deleted
+  + plumbing simplified); kept the occasional slow wander glance. Breathing bob
+  made much subtler (brief ~18 % lift over a 5.5–9 s cycle vs the old 50 % of
+  2.8–5.2 s). Reaction whisker-wiggles untouched; blinking untouched.
+- **Render test harness added:** `tests/face_host/` (host gcc, no Zephyr) drives
+  all 13 expressions × transitions × reactions through the real
+  `face_runtime.c` + generated tables — ~1.03M checks, all green; catches the
+  pupil-swap deadlock if reintroduced. Engine selection still green via
+  `tools/appraisal_calibrate.py`.
+- **Audit result:** OVERSTIMULATED was the only structural render defect; the
+  other 12 faces and all reactions pass the harness.
+- **Next (needs owner flash):** per-expression visual polish (layout/look
+  targets/whisker edge framing), then deeper engine/behavior tuning.
+
 ## Session progress (updated 2026-06-10)
 
 **Done this session (compiles clean per owner; OOM during one build was just a
@@ -129,7 +154,13 @@ MVP items already work.
 - **Affected:** new `tests/` tree with `testcase.yaml`; possibly small seams in
   `behavior_engine`/`kerfur_nearby` to allow injecting `now_ms`.
 - **Priority:** P1
-- **Status:** TODO
+- **Status:** IN PROGRESS (2026-06-15) — two off-target harnesses now exist and
+  pass: `tools/appraisal_calibrate.py` (engine selection: 20 scenarios + 7
+  stability checks) and `tests/face_host/` (face rendering: every
+  expression/transition/reaction through `face_runtime_step`, ~1.03M checks,
+  guards the pupil-swap deadlock). Remaining: `behavior_engine` event-sequence
+  tests and `kerfur_nearby` peer-state / RSSI-hysteresis tests; optional
+  ztest/twister integration so they run in CI alongside `west`.
 
 ### M4. Persistence / personality module
 - **Why:** `CLAUDE.md` §14. Survive reboot: device name, personality, affection,

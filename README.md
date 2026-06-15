@@ -141,7 +141,7 @@ If `motion0` is not present, the firmware still builds and the motion stack stay
 - [src/display/display_policy.c](src/display/display_policy.c) drives foreground, ambient, and off transitions.
 - [src/ui/ui_renderer.c](src/ui/ui_renderer.c) renders the face on an LVGL canvas and applies contrast / pixel shift policy.
 - [src/ui/face_runtime.c](src/ui/face_runtime.c) composes recipes, reactions, blink state, pupil movement, indicators, overlays, and effects.
-- Organic micro-life (Stage 5): emotion-aware randomized blink cadence with occasional double blinks and post-reaction settle blinks; wandering idle gaze (pupils drift to a random point, hold, return) plus recipe ambient drift when no real gaze input exists; a slow 1 px breathing bob on mouth/whiskers that continues during sleep; mood/arousal/sleepiness bias eye openness, brows, and mouth.
+- Organic micro-life (Stage 5): emotion-aware randomized blink cadence with occasional double blinks and post-reaction settle blinks; an occasional slow wandering idle gaze (pupils ease to a random point, hold, return) when there is no real gaze input — the only idle pupil motion, the old constant cyclic drift was removed; a faint, slow breathing lift on mouth/whiskers that continues during sleep; mood/arousal/sleepiness bias eye openness, brows, and mouth.
 - Face assets and recipes are generated during build from `assets/face/kerfur_faces.json` and the SVG sources in `assets/face/`.
 
 5. BLE and nearby
@@ -283,6 +283,20 @@ The generator runs automatically from CMake and writes:
 - [include/ui/generated/kerfur_face_recipes.h](include/ui/generated/kerfur_face_recipes.h)
 - [src/ui/generated/kerfur_face_assets.c](src/ui/generated/kerfur_face_assets.c)
 - [src/ui/generated/kerfur_face_recipes.c](src/ui/generated/kerfur_face_recipes.c)
+
+## Tests
+
+Two off-target test harnesses cover the two halves of the face/emotion runtime;
+both run on a desktop without the Zephyr toolchain or hardware:
+
+- **Engine selection** — [tools/appraisal_calibrate.py](tools/appraisal_calibrate.py)
+  mirrors the integer appraisal scoring and asserts 20 canonical emotional
+  scenarios + 7 anti-flapping stability checks. Run: `python tools/appraisal_calibrate.py`.
+- **Face rendering** — [tests/face_host/](tests/face_host/) compiles the real
+  `src/ui/face_runtime.c` + generated tables against small Zephyr shims and
+  drives every expression, transition, and micro-reaction through
+  `face_runtime_step()`, asserting render-plan validity and that pupil swaps
+  always complete (no deadlocks). Run: `bash tests/face_host/run.sh`.
 
 ## Android / Gadgetbridge Notes
 
