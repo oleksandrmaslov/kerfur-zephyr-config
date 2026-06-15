@@ -1717,28 +1717,6 @@ static void auth_cancel_cb(struct bt_conn *conn)
 	LOG_WRN("BLE pairing canceled for %s", addr);
 }
 
-static void auth_passkey_display_cb(struct bt_conn *conn, unsigned int passkey)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-	LOG_INF("BLE passkey for %s: %06u", addr, passkey);
-}
-
-static void auth_passkey_confirm_cb(struct bt_conn *conn, unsigned int passkey)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-	int err;
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-	LOG_INF("BLE passkey confirm %06u for %s (auto-accept)", passkey, addr);
-
-	err = bt_conn_auth_passkey_confirm(conn);
-	if (err != 0) {
-		LOG_WRN("bt_conn_auth_passkey_confirm failed (%d)", err);
-	}
-}
-
 static void auth_pairing_confirm_cb(struct bt_conn *conn)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
@@ -1753,9 +1731,12 @@ static void auth_pairing_confirm_cb(struct bt_conn *conn)
 	}
 }
 
+/* No passkey_display / passkey_confirm on purpose: registering neither gives
+ * the device IO capability NoInputNoOutput, so a no-display companion pairs via
+ * "Just Works" and iOS shows the simple "Bluetooth Pairing Request -> Pair"
+ * dialog. We only auto-accept the pairing (no MITM; CONFIG_BT_SMP_ENFORCE_MITM
+ * is n). This is the direct fix for the pairing prompt not appearing. */
 static struct bt_conn_auth_cb g_bt_auth_cb = {
-	.passkey_display = auth_passkey_display_cb,
-	.passkey_confirm = auth_passkey_confirm_cb,
 	.pairing_confirm = auth_pairing_confirm_cb,
 	.cancel = auth_cancel_cb,
 };
