@@ -837,6 +837,7 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 	case APP_EVENT_PEER_NEAR:
 		state->peer_nearby = true;
 		state->current_active_peer_id = event->payload.peer.ephemeral_id;
+		state->current_active_friend_index = event->payload.peer.friend_index;
 		state->peer_known_friend = event->payload.peer.is_friend;
 		state->curiosity += 5;
 		state->social_load += 1;
@@ -855,11 +856,18 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		}
 		break;
 
-	case APP_EVENT_PEER_LOST:
-		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
+	case APP_EVENT_PEER_LOST: {
+		const int8_t lost_friend_index = event->payload.peer.friend_index;
+		const bool same_peer =
+			(lost_friend_index >= 0) && (state->current_active_friend_index >= 0) ?
+				(state->current_active_friend_index == lost_friend_index) :
+				(state->current_active_peer_id == event->payload.peer.ephemeral_id);
+
+		if (same_peer) {
 			state->peer_nearby = false;
 			state->peer_known_friend = false;
 			state->current_active_peer_id = 0U;
+			state->current_active_friend_index = -1;
 		}
 		if (state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE ||
 		    state->social_indicator == (int16_t)KERFUR_FACE_INDICATOR_ICON_HEART_FILLED) {
@@ -867,10 +875,15 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 			state->social_indicator_until_ms = 0;
 		}
 		break;
+	}
 
-	case APP_EVENT_ENCOUNTER_START:
+	case APP_EVENT_ENCOUNTER_START: {
+		const bool familiar = event->payload.peer.is_friend ||
+				      (event->payload.peer.session_encounters > 0U);
+
 		state->peer_nearby = true;
 		state->current_active_peer_id = event->payload.peer.ephemeral_id;
+		state->current_active_friend_index = event->payload.peer.friend_index;
 		state->peer_known_friend = event->payload.peer.is_friend;
 		if (event->payload.peer.is_friend) {
 			state->attachment += 6;
@@ -879,6 +892,13 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_FILLED,
 					      event->timestamp_ms, 3000);
 			trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
+		} else if (familiar) {
+			state->curiosity += 4;
+			state->attachment += 3;
+			state->trust += 1;
+			show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+					      event->timestamp_ms, 3000);
+			trigger_reaction(state, REACTION_PET_BOW, event->timestamp_ms);
 		} else {
 			state->curiosity += 6;
 			state->attachment += 2;
@@ -888,20 +908,29 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		}
 		state->encounter_sync_pending = true;
 		break;
+	}
 
-	case APP_EVENT_ENCOUNTER_END:
+	case APP_EVENT_ENCOUNTER_END: {
+		const int8_t end_friend_index = event->payload.peer.friend_index;
+		const bool same_peer =
+			(end_friend_index >= 0) && (state->current_active_friend_index >= 0) ?
+				(state->current_active_friend_index == end_friend_index) :
+				(state->current_active_peer_id == event->payload.peer.ephemeral_id);
+
 		if (event->payload.peer.duration_s >= 30) {
 			state->boredom += 4;
 		}
-		if (state->current_active_peer_id == event->payload.peer.ephemeral_id) {
+		if (same_peer) {
 			state->peer_nearby = false;
 			state->peer_known_friend = false;
 			state->current_active_peer_id = 0U;
+			state->current_active_friend_index = -1;
 		}
 		state->social_indicator = 0;
 		state->social_indicator_until_ms = 0;
 		trigger_reaction(state, REACTION_GLANCE_RIGHT, event->timestamp_ms);
 		break;
+	}
 
 	case APP_EVENT_PEER_PLAY_INVITE:
 		state->arousal += 8;
@@ -917,6 +946,20 @@ static void apply_event_deltas(struct pet_state *state, const struct app_event *
 		state->boredom -= 3;
 		state->attachment += 2;
 		trigger_reaction(state, REACTION_HAPPY_BOUNCE, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_PEER_GREET:
+		state->curiosity += 3;
+		state->social_load += 1;
+		show_social_indicator(state, KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+				      event->timestamp_ms, 2500);
+		trigger_reaction(state, REACTION_PET_BOW, event->timestamp_ms);
+		break;
+
+	case APP_EVENT_PEER_GREET_ACK:
+		state->curiosity += 1;
+		state->attachment += 1;
+		trigger_reaction(state, REACTION_GLANCE_RIGHT, event->timestamp_ms);
 		break;
 
 	default:
@@ -1258,6 +1301,7 @@ void behavior_engine_init(struct pet_state *state, int64_t now_ms)
 
 	(void)memset(state, 0, sizeof(*state));
 	(void)memset(&g_runtime, 0, sizeof(g_runtime));
+	state->current_active_friend_index = -1;
 	g_runtime.forced_expression = PET_EXPR_CALM;
 	g_runtime.forced_expression_active = false;
 

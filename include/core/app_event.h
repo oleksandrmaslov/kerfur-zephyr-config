@@ -65,6 +65,8 @@ enum app_event_type {
 	APP_EVENT_ENCOUNTER_END,
 	APP_EVENT_PEER_PLAY_INVITE,
 	APP_EVENT_PEER_PLAY_ACK,
+	APP_EVENT_PEER_GREET,
+	APP_EVENT_PEER_GREET_ACK,
 
 	APP_EVENT_COUNT
 };
@@ -98,6 +100,8 @@ struct app_event_peer {
 	uint32_t encounter_id;       /* 0 if not applicable */
 	int8_t   rssi;
 	bool     is_friend;
+	int8_t   friend_index;       /* -1 if not a confirmed friend */
+	uint8_t  session_encounters; /* completed encounters with this peer this boot */
 	uint8_t  character_id;
 	uint8_t  mode_summary;
 	uint8_t  expression_summary;

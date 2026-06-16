@@ -34,7 +34,7 @@ void encounter_log_init(void)
 	LOG_INF("Encounter log init (size=%d)", ENCOUNTER_LOG_SIZE);
 }
 
-static ssize_t find_slot_locked(uint32_t encounter_id)
+static int find_slot_locked(uint32_t encounter_id)
 {
 	size_t i;
 
@@ -44,14 +44,15 @@ static ssize_t find_slot_locked(uint32_t encounter_id)
 
 	for (i = 0U; i < ENCOUNTER_LOG_SIZE; i++) {
 		if (g_records[i].encounter_id == encounter_id) {
-			return (ssize_t)i;
+			return (int)i;
 		}
 	}
 
 	return -1;
 }
 
-uint32_t encounter_log_begin(uint32_t ephemeral_id, uint8_t character_id, int64_t now_ms)
+uint32_t encounter_log_begin(uint32_t ephemeral_id, uint8_t character_id,
+			     int8_t friend_index, int64_t now_ms)
 {
 	struct encounter_record *rec;
 	uint32_t id;
@@ -71,6 +72,7 @@ uint32_t encounter_log_begin(uint32_t ephemeral_id, uint8_t character_id, int64_
 	rec->encounter_id = id;
 	rec->ephemeral_id = ephemeral_id;
 	rec->character_id = character_id;
+	rec->friend_index = friend_index;
 	rec->start_uptime_ms = now_ms;
 	rec->end_uptime_ms = 0;
 	rec->encounter_type = (uint8_t)KERFUR_ENCOUNTER_FIRST_CONTACT;
@@ -93,7 +95,7 @@ uint32_t encounter_log_begin(uint32_t ephemeral_id, uint8_t character_id, int64_
 
 void encounter_log_update(uint32_t encounter_id, int8_t rssi)
 {
-	ssize_t slot;
+	int slot;
 	struct encounter_record *rec;
 	int32_t sample;
 	int32_t avg;
@@ -131,7 +133,7 @@ void encounter_log_update(uint32_t encounter_id, int8_t rssi)
 
 void encounter_log_set_type(uint32_t encounter_id, enum kerfur_encounter_type type)
 {
-	ssize_t slot;
+	int slot;
 
 	k_mutex_lock(&g_log_mutex, K_FOREVER);
 	slot = find_slot_locked(encounter_id);
@@ -143,7 +145,7 @@ void encounter_log_set_type(uint32_t encounter_id, enum kerfur_encounter_type ty
 
 void encounter_log_mark_reaction(uint32_t encounter_id)
 {
-	ssize_t slot;
+	int slot;
 
 	k_mutex_lock(&g_log_mutex, K_FOREVER);
 	slot = find_slot_locked(encounter_id);
@@ -155,7 +157,7 @@ void encounter_log_mark_reaction(uint32_t encounter_id)
 
 void encounter_log_end(uint32_t encounter_id, int64_t now_ms)
 {
-	ssize_t slot;
+	int slot;
 
 	k_mutex_lock(&g_log_mutex, K_FOREVER);
 	slot = find_slot_locked(encounter_id);
@@ -191,7 +193,7 @@ size_t encounter_log_pending(struct encounter_record *out, size_t max)
 
 void encounter_log_mark_uploaded(uint32_t encounter_id)
 {
-	ssize_t slot;
+	int slot;
 
 	k_mutex_lock(&g_log_mutex, K_FOREVER);
 	slot = find_slot_locked(encounter_id);

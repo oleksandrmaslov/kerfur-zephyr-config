@@ -77,6 +77,8 @@ static const char *const g_event_names[APP_EVENT_COUNT] = {
 	[APP_EVENT_ENCOUNTER_END] = "ENCOUNTER_END",
 	[APP_EVENT_PEER_PLAY_INVITE] = "PEER_PLAY_INVITE",
 	[APP_EVENT_PEER_PLAY_ACK] = "PEER_PLAY_ACK",
+	[APP_EVENT_PEER_GREET] = "PEER_GREET",
+	[APP_EVENT_PEER_GREET_ACK] = "PEER_GREET_ACK",
 };
 
 static void log_event_payload(const struct app_event *event)

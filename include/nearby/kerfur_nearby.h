@@ -76,6 +76,17 @@ struct kerfur_peer {
 	bool     is_friend;
 	bool     play_invite_sent;
 	bool     play_ack_received;
+	/* Stable relationship identity: index into the persistent friend table.
+	 * -1 means this peer is not a confirmed friend.  Survives ephemeral ID
+	 * rotation within a session (nearby module updates ephemeral_id but keeps
+	 * this index) so the behavior engine always sees the right context. */
+	int8_t   friend_index;
+	/* How many complete encounters happened with this peer in the current
+	 * power cycle.  0 = first meeting (stranger); ≥1 = "familiar" — we have
+	 * met before this session.  Survives ephemeral ID rotation.  The peer
+	 * entry lingers after cooldown (in NONE state) so this context is
+	 * preserved across brief separations within a session. */
+	uint8_t  session_encounters;
 };
 
 struct kerfur_scan_candidate {
@@ -102,6 +113,34 @@ struct kerfur_pet_snapshot {
 	bool     social_overload;
 };
 
+/* ── Persistent friend record ──────────────────────────────────────────────
+ *
+ * Friends are recognized across reboots and ephemeral ID rotation via an
+ * IRK-style mechanism: confirmed friends share their device_secret (32 bytes)
+ * through the companion app.  The nearby module uses that key to predict the
+ * friend's ephemeral ID for any time slot, enabling autonomous recognition
+ * without any hidden tracking.
+ *
+ * Recognition requires both devices to have wall-clock time synced via the
+ * companion app (APP_EVENT_TIME_SYNC), so that their time slots align.
+ *
+ * Privacy guarantee: the friend_key is only stored on Kerfus; it is never
+ * broadcast over the air.  Ephemeral IDs remain the only over-the-air ID. */
+
+#define KERFUR_FRIEND_KEY_LEN      32   /* == device_secret length */
+#define KERFUR_FRIEND_NICKNAME_LEN 16   /* null-terminated; 15 chars + NUL */
+
+struct kerfur_friend_record {
+	bool     in_use;
+	int8_t   friend_index;                       /* slot [0..MAX_FRIENDS) */
+	uint8_t  peer_key[KERFUR_FRIEND_KEY_LEN];   /* peer device_secret */
+	char     nickname[KERFUR_FRIEND_NICKNAME_LEN];
+	uint32_t encounter_count;                    /* NVS-persisted */
+	int64_t  last_seen_uptime_ms;                /* session-only */
+};
+
+/* ── Core API ──────────────────────────────────────────────────────────── */
+
 int  kerfur_nearby_init(void);
 void kerfur_nearby_on_pet_tick(const struct pet_state *state);
 void kerfur_nearby_ingest_candidate(const struct kerfur_scan_candidate *candidate);
@@ -114,18 +153,60 @@ bool kerfur_nearby_parse_beacon(const uint8_t *data, size_t len,
 /* Builds the manufacturer data for the scan response. Returns bytes written. */
 size_t kerfur_nearby_build_beacon(uint8_t *out, size_t max_len);
 
-/* Called by the BLE manager to learn the currently-used ephemeral id bytes. */
+/* Set the social event (greet / play handshake) broadcast in the beacon for a
+ * short window; KFR_SOCIAL_NONE clears it early. The advertising payload must be
+ * rebuilt (an adv refresh) for a change to go out promptly — otherwise it rides
+ * out on the next scheduled beacon rebuild (e.g. ID rotation). */
+void kerfur_nearby_emit_social(uint8_t social_event);
+
+/* Returns true (once) when the advertising payload needs rebuilding because the
+ * broadcast social event changed or its window expired. The BLE layer polls this
+ * and triggers a rate-limited beacon refresh. Clears the pending flag. */
+bool kerfur_nearby_take_beacon_refresh(void);
+
+/* Called by the BLE manager to update the ephemeral ID.  When wall clock is
+ * valid the ID uses the wall-clock slot so friends can predict it; otherwise
+ * it falls back to the uptime slot (private but not cross-device resolvable). */
 void kerfur_nearby_rotate_ephemeral_id(int64_t now_ms);
 
-/* Friend list helpers. */
-void kerfur_nearby_set_friend(uint32_t ephemeral_id, bool is_friend);
-bool kerfur_nearby_is_friend(uint32_t ephemeral_id);
+/* Provide a wall-clock reference so friend resolution can align time slots.
+ * unix_s  : current Unix timestamp (seconds since epoch, must be >= 946684800).
+ * uptime_ms: k_uptime_get() value recorded at the same moment as unix_s.
+ * Triggers an immediate ephemeral ID rotation to the new wall-clock slot. */
+void kerfur_nearby_set_wall_clock(int64_t unix_s, int64_t uptime_ms);
 
-/* Debug / shell. */
-size_t kerfur_nearby_dump_peers(struct kerfur_peer *out, size_t max);
-void   kerfur_nearby_get_snapshot(struct kerfur_pet_snapshot *out);
+/* ── Friend management API ─────────────────────────────────────────────── */
+
+/* Add or update a confirmed friend.  peer_key must be KERFUR_FRIEND_KEY_LEN
+ * bytes (the friend's device_secret, shared via companion app).  nickname is
+ * optional (may be NULL).  Returns the slot index [0..MAX_FRIENDS) on success,
+ * negative errno on failure (-ENOMEM = table full, -EINVAL = bad key). */
+int kerfur_nearby_add_friend(const uint8_t *peer_key, const char *nickname,
+			     size_t nickname_len);
+
+/* Remove a confirmed friend by slot index.  Zeroes the NVS slot (tombstone).
+ * Returns 0 on success, -ENOENT if slot is not in use, -EINVAL if index bad. */
+int kerfur_nearby_remove_friend(uint8_t friend_index);
+
+/* Copy up to max records into out.  Returns number of records written.
+ * in_use slots only; friend_index field is filled with the slot position. */
+size_t kerfur_nearby_dump_friends(struct kerfur_friend_record *out, size_t max);
+
+/* Compute the current expected ephemeral ID for a stored friend (uses the
+ * wall-clock slot; returns 0 if wall clock not valid or index invalid). */
+uint32_t kerfur_nearby_friend_expected_id(uint8_t friend_index);
+
+/* Resolve an ephemeral ID to a friend slot.  Returns the friend_index
+ * [0..MAX_FRIENDS) if the ID matches any stored friend for the current slot
+ * (±1 for boundary tolerance), or -1 if unknown or wall clock not valid. */
+int8_t kerfur_nearby_resolve_ephemeral_id(uint32_t ephemeral_id);
+
+/* ── Debug / shell ─────────────────────────────────────────────────────── */
 
 /* Returns count of peers currently in NEAR or INTERACTING state. */
 size_t kerfur_nearby_active_peer_count(void);
+
+size_t kerfur_nearby_dump_peers(struct kerfur_peer *out, size_t max);
+void   kerfur_nearby_get_snapshot(struct kerfur_pet_snapshot *out);
 
 #endif /* KERFUR_NEARBY_H_ */

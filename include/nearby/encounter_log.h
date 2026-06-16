@@ -19,6 +19,7 @@ struct encounter_record {
 	int64_t  end_uptime_ms;        /* 0 if still active */
 	int8_t   rssi_avg;
 	int8_t   rssi_max;
+	int8_t   friend_index;         /* -1 = unknown; >=0 = slot in friend table */
 	uint8_t  character_id;
 	uint8_t  encounter_type;       /* enum kerfur_encounter_type */
 	bool     reaction_triggered;
@@ -27,7 +28,8 @@ struct encounter_record {
 };
 
 void encounter_log_init(void);
-uint32_t encounter_log_begin(uint32_t ephemeral_id, uint8_t character_id, int64_t now_ms);
+uint32_t encounter_log_begin(uint32_t ephemeral_id, uint8_t character_id,
+			     int8_t friend_index, int64_t now_ms);
 void encounter_log_update(uint32_t encounter_id, int8_t rssi);
 void encounter_log_set_type(uint32_t encounter_id, enum kerfur_encounter_type type);
 void encounter_log_mark_reaction(uint32_t encounter_id);

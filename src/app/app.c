@@ -49,6 +49,17 @@ static void app_handle_event(struct pet_state *pet, const struct app_event *even
 		kerfur_nearby_tick(event->timestamp_ms);
 		pet->social_overload = (kerfur_nearby_active_peer_count() > 3U);
 	}
+	if ((event->type == APP_EVENT_TIME_SYNC) && (event->param >= 946684800)) {
+		kerfur_nearby_set_wall_clock((int64_t)event->param, event->timestamp_ms);
+	}
+	if (event->type == APP_EVENT_ENCOUNTER_START) {
+		kerfur_nearby_emit_social((uint8_t)KFR_SOCIAL_GREET);
+	} else if (event->type == APP_EVENT_PEER_GREET) {
+		kerfur_nearby_emit_social((uint8_t)KFR_SOCIAL_GREET_ACK);
+	}
+	if (kerfur_nearby_take_beacon_refresh()) {
+		ble_manager_request_beacon_refresh();
+	}
 #endif
 
 	if (event->type == APP_EVENT_FACE_DEBUG_DUMP) {

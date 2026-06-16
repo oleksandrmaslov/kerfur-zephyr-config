@@ -103,6 +103,15 @@ config KERFUR_NEARBY_ID_ROTATE_S
 	range 60 86400
 	default 900
 
+config KERFUR_NEARBY_MAX_FRIENDS
+	int "Maximum confirmed-friend slots"
+	range 0 128
+	default 64
+	help
+	  Number of confirmed-friend relationships stored in settings and
+	  recognized across ephemeral ID rotation. Set to 0 to disable
+	  persistent friend recognition.
+
 endif
 
 config KERFUR_ENABLE_SHELL_CMDS
