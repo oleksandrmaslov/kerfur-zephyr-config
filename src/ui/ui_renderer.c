@@ -72,7 +72,7 @@ static void draw_bitmap(const struct kerfur_face_bitmap *bitmap, int16_t x, int1
 
 			if (((byte & bit) != 0U) && (dst_x >= 0) && (dst_y >= 0) &&
 			    (dst_x < g_ui.width) && (dst_y < g_ui.height)) {
-				lv_canvas_set_px_skip_invalidate(
+				lv_canvas_set_px(
 					g_ui.canvas,
 					dst_x,
 					dst_y,
@@ -469,6 +469,7 @@ void ui_renderer_render(struct pet_state *state, int64_t now_ms)
 {
 	const bool ambient = (state->current_display_state == DISPLAY_AMBIENT);
 	const struct face_runtime_plan *plan;
+	lv_display_t *disp;
 	lv_opa_t opa = ambient ? LV_OPA_50 : LV_OPA_COVER;
 
 	if ((g_ui.canvas == NULL) || g_ui.blanked || (state->current_display_state == DISPLAY_OFF)) {
@@ -481,6 +482,8 @@ void ui_renderer_render(struct pet_state *state, int64_t now_ms)
 				 g_ui.debug_dump_requested);
 	g_ui.debug_dump_requested = false;
 
+	disp = lv_obj_get_display(g_ui.canvas);
+	lv_display_enable_invalidation(disp, false);
 	lv_canvas_fill_bg(g_ui.canvas, lv_color_black(), LV_OPA_COVER);
 	lv_obj_add_flag(g_ui.overlay_label, LV_OBJ_FLAG_HIDDEN);
 
@@ -489,6 +492,7 @@ void ui_renderer_render(struct pet_state *state, int64_t now_ms)
 		update_overlay_label(plan);
 	}
 
+	lv_display_enable_invalidation(disp, true);
 	lv_obj_invalidate(g_ui.canvas);
 	lv_obj_invalidate(g_ui.overlay_label);
 	lv_timer_handler();
