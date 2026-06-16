@@ -65,6 +65,9 @@ struct kerfur_peer {
 	int64_t  cooldown_until_ms;
 	int64_t  near_since_ms;
 	int64_t  low_rssi_since_ms;
+	/* Last time a PEER_CHECKING event was published for this peer, so a
+	 * borderline peer (seen but below NEAR RSSI) doesn't spam one per beacon. */
+	int64_t  last_checking_ms;
 	uint8_t  character_id;
 	uint8_t  mode_summary;
 	uint8_t  expression_summary;

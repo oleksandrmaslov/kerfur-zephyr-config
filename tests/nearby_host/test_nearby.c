@@ -424,6 +424,49 @@ static void test_beacon_refresh_signal(void)
 	CHECK(kerfur_nearby_take_beacon_refresh() == false, "no further refresh once cleared");
 }
 
+static void test_near_after_seen_window(void)
+{
+	printf("\n-- a steadily-seen peer still reaches NEAR after the first 8 s --\n");
+	cap_reset();
+	g_seq = 0;
+
+	int64_t t = 1000000;
+	uint32_t id = 0xABCDEF01u;
+
+	/* Below NEAR for the first ~9 s — past PEER_SEEN_WINDOW_MS (8 s), so the
+	 * old first-contact window gate would lock this peer out of NEAR forever. */
+	feed(id, -82, t);
+	feed(id, -82, t + 1000);
+	feed(id, -82, t + 9000);
+	CHECK(cap_count(APP_EVENT_PEER_NEAR) == 0, "stays SEEN while far (past the 8 s window)");
+
+	/* Now genuinely close: it must still be able to reach NEAR. */
+	feed(id, -55, t + 9500);
+	feed(id, -55, t + 10000);
+	CHECK(cap_count(APP_EVENT_PEER_NEAR) == 1, "reaches NEAR once close, even past the window");
+}
+
+static void test_checking_throttle(void)
+{
+	printf("\n-- PEER_CHECKING is throttled, not emitted on every beacon --\n");
+	cap_reset();
+	g_seq = 0;
+
+	int64_t t = 1100000;
+	uint32_t id = 0x0BADBEEFu;
+
+	/* A far peer (below NEAR), seen rapidly: 12 beacons over ~1.1 s. Pre-fix
+	 * this published one PEER_CHECKING per beacon (~11); now it's throttled. */
+	for (int i = 0; i < 12; i++) {
+		feed(id, -85, t + i * 100);
+	}
+	CHECK(cap_count(APP_EVENT_PEER_CHECKING) == 1, "at most one CHECKING per throttle window");
+
+	/* After the throttle window (3 s), one more is allowed. */
+	feed(id, -85, t + 3500);
+	CHECK(cap_count(APP_EVENT_PEER_CHECKING) == 2, "a new CHECKING after the throttle window");
+}
+
 int main(void)
 {
 	printf("=== Kerfur nearby host test ===\n");
@@ -439,6 +482,8 @@ int main(void)
 	test_tx_social_emit();
 	test_rx_social_translation();
 	test_beacon_refresh_signal();
+	test_near_after_seen_window();
+	test_checking_throttle();
 
 	printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
 	if (g_failures != 0) {

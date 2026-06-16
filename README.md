@@ -1,6 +1,6 @@
 # Kerfur nRF52840 Firmware (Zephyr / NCS)
 
-Kerfur is an event-driven "smart pet" firmware base for nRF52840 boards running Zephyr/Nordic Connect SDK. The current codebase is no longer just a minimal display demo: it now includes a behavior engine, a generated face rendering pipeline, motion sensing, BLE phone integration, and Kerfur-to-Kerfur nearby detection.
+Kerfur is an event-driven "smart pet" firmware base for nRF52840 boards running Zephyr/Nordic Connect SDK. It includes a behavior engine, a generated face rendering pipeline, motion sensing, BLE phone integration, and Kerfur-to-Kerfur nearby detection.
 
 ## Current Capabilities
 
@@ -8,7 +8,7 @@ Kerfur is an event-driven "smart pet" firmware base for nRF52840 boards running 
 - Behavior engine with pet modes, a deterministic situation layer (resting / engaged / worn / charging / social), normalized table-driven expression appraisal, short-lived context/afterglow, micro-reactions, a slow mood axis, sleep inertia, idle micro-life, and personality profiles
 - Carry-context motion stack for a worn keychain: ON_SURFACE / IN_HAND / WORN resolution with swing-periodicity worn detection, grab-capture in-hand recognition, worn-gated shake events, and a low-power worn-watch sampling mode
 - Emotional memory: attachment / trust / mood / lifetime petting count / personality / worn style persist across reboots (settings/NVS)
-- Peer emotional contagion: reactions to other Kerfurs depend on the mode/expression carried in their beacon
+- Peer emotional contagion: reactions to other Kerfurs depend on the mode/expression carried in their beacon; meeting another Kerfur while both are walking adds shared-walk warmth
 - Modular face renderer driven by generated assets from `assets/face/kerfur_faces.json`
 - LVGL canvas renderer for SSD1306-style 128x64 monochrome displays
 - Display policy with foreground / ambient / off states, contrast changes, ambient pixel shift, and self-wake scheduling
@@ -19,13 +19,13 @@ Kerfur is an event-driven "smart pet" firmware base for nRF52840 boards running 
   - tilt-driven look target updates for dynamic pupils
   - shake / impact classification
 - BLE peripheral stack with:
-  - directed reconnect for bonded peers
+  - connectable-undirected advertising, Just Works pairing, and stale-bond self-healing reconnect
   - ANCS intake for iOS
   - ANS fallback discovery
   - optional custom companion channel for Android / Gadgetbridge
   - optional keyring profile services
   - optional Running Speed and Cadence service scaffold
-- Kerfur-to-Kerfur nearby beaconing and scanning with ephemeral IDs, encounter tracking, and behavior events
+- Kerfur-to-Kerfur nearby: ephemeral-ID beaconing and scanning, an encounter state machine, IRK-style friend recognition across ID rotation, encounter typing (first contact / greeting / play / walking-together), and a two-way greet/play handshake over the beacon — Kerfurs actually greet and answer each other, not just notice one another
 - USB shell commands for BLE maintenance, face debugging, and nearby-event injection
 
 ## Default Build Profile
@@ -127,7 +127,7 @@ If `motion0` is not present, the firmware still builds and the motion stack stay
 - Carry context (`ON_SURFACE` / `IN_HAND` / `WORN`) comes from the motion stack: worn keychains are detected by gait-band swing periodicity, stay sticky while the owner sits still, and recognize a grab through the dangle oscillation collapsing (see [src/drivers/in_hand_detector.c](src/drivers/in_hand_detector.c)). Worn style is configurable: quiet companion (default — screen rests in the pocket, steps and peers still count) or expressive (`kerfur emotion worn …`, `CONFIG_KERFUR_WORN_EXPRESSIVE`).
 - [src/behavior/emotion_memory.c](src/behavior/emotion_memory.c) persists the slow traits (attachment, trust, mood, lifetime pets, personality) in one settings/NVS record; saves are throttled (~30 min) plus on charger connect.
 - Personality profiles (balanced / curious / shy / playful / calm) scale how strongly touch, stress, social events, play, and tiredness land — selectable at runtime via `kerfur emotion personality <id>` and persisted.
-- Peer events carry the other Kerfur's mode/expression summary; the engine classifies the peer's "vibe" (resting / bright / strained) and greets accordingly: it doesn't bounce at a sleeping friend, lights up with a happy one, and shows concern for a strained or lonely one.
+- Peer events carry the other Kerfur's mode/expression summary; the engine classifies the peer's "vibe" (resting / bright / strained) and greets accordingly: it doesn't bounce at a sleeping friend, lights up with a happy one, and shows concern for a strained or lonely one. A received greet (`PEER_GREET`) earns a warm bow and a greet-back; meeting another Kerfur while both are walking adds shared-walk warmth.
 - Sleep inertia: leaving deep sleep keeps the pet groggy (sleepy expression bias, no happy-bounce) for 45 s (90 s at night).
 - Idle micro-life: when nothing is happening and the screen is on, the pet occasionally glances around (curious), peeks up (wants attention), or slow-blinks (resting), every ~25–70 s.
 - Expression transition routing: appraisal + hysteresis pick a stable target feeling, then the face walks toward it one emotional-adjacency hop at a time (CALM is the hub) so distant changes ease through intermediates instead of snapping — waking eases `ASLEEP → SLEEPY → …`, petting an angry pet soothes `ANNOYED → CALM → … → HAPPY`.
@@ -147,9 +147,10 @@ If `motion0` is not present, the firmware still builds and the motion stack stay
 - Face assets and recipes are generated during build from `assets/face/kerfur_faces.json` and the SVG sources in `assets/face/`.
 
 5. BLE and nearby
-- [src/ble/ble_manager.c](src/ble/ble_manager.c) owns advertising, connections, security, notification intake, and optional companion services.
-- [src/nearby/kerfur_nearby.c](src/nearby/kerfur_nearby.c) builds Kerfur manufacturer-data beacons, scans peers, rotates ephemeral IDs, and emits social encounter events.
-- [src/ble/ble_shell.c](src/ble/ble_shell.c) exposes the shell debug surface.
+- [src/ble/ble_manager.c](src/ble/ble_manager.c) owns advertising, connections, security, notification intake, and optional companion services. `ble_manager_request_beacon_refresh()` does a rate-limited rebuild of the advertising payload (reusing the advertising-restart path, no-op while connected) so a freshly emitted social event goes out promptly.
+- [src/nearby/kerfur_nearby.c](src/nearby/kerfur_nearby.c) builds Kerfur manufacturer-data beacons, scans peers, rotates ephemeral IDs, and runs the encounter state machine. The beacon carries a one-byte social-event field for the greet/play handshake: `kerfur_nearby_emit_social()` parks an outgoing event for a short broadcast window, and incoming social events are translated (rising-edge, de-duped per peer) into `APP_EVENT_PEER_GREET` / `_GREET_ACK` / `_PLAY_INVITE` / `_PLAY_ACK`.
+- [src/app/app.c](src/app/app.c) orchestrates the handshake: greet on `ENCOUNTER_START`, acknowledge a received greet, then poll the refresh signal. Two Kerfurs meeting both greet and both acknowledge (the exchange is symmetric).
+- [src/ble/ble_shell.c](src/ble/ble_shell.c) exposes the shell debug surface (including `kerfur nearby inject greet <id>` to see the greet reaction on a single device).
 
 ## Build
 

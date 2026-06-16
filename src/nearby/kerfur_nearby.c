@@ -28,6 +28,9 @@ LOG_MODULE_REGISTER(kerfur_nearby, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define PEER_SEEN_WINDOW_MS        8000
 #define PEER_LOST_IDLE_MS          12000
+/* Throttle PEER_CHECKING so a borderline peer (seen but below the NEAR RSSI)
+ * re-publishes at most this often instead of on every received beacon. */
+#define PEER_CHECKING_THROTTLE_MS  3000
 /* Familiar peers (session_encounters > 0) linger in NONE state longer so their
  * session context survives brief separations between encounter cycles. */
 #define PEER_FAMILIAR_LINGER_MS    (5 * 60 * 1000LL)
@@ -1179,11 +1182,20 @@ void kerfur_nearby_ingest_candidate(const struct kerfur_scan_candidate *cand)
 	if (peer->state == KERFUR_PEER_STATE_SEEN) {
 		int8_t rssi = rssi_from_avg(peer);
 
-		if ((peer->seen_count >= 2U) &&
-		    ((cand->timestamp_ms - peer->first_seen_ms) <= PEER_SEEN_WINDOW_MS) &&
-		    (rssi >= RSSI_NEAR_DBM)) {
+		/* Promote to NEAR as soon as the peer is confirmed (seen >= 2x) and
+		 * close (RSSI >= NEAR). This is NOT gated on how long ago first
+		 * contact was: a steadily-visible peer must still reach NEAR after
+		 * the first few seconds. The old `cand - first_seen <=
+		 * PEER_SEEN_WINDOW_MS` gate locked such peers in SEEN forever, where
+		 * they re-emitted PEER_CHECKING on every beacon and could never
+		 * become an encounter. */
+		if ((peer->seen_count >= 2U) && (rssi >= RSSI_NEAR_DBM)) {
 			transition_to_near_locked(peer, cand->timestamp_ms);
-		} else if (peer->seen_count >= 2U) {
+		} else if ((peer->seen_count >= 2U) &&
+			   ((peer->last_checking_ms == 0) ||
+			    ((cand->timestamp_ms - peer->last_checking_ms) >=
+			     PEER_CHECKING_THROTTLE_MS))) {
+			peer->last_checking_ms = cand->timestamp_ms;
 			publish_peer_event(APP_EVENT_PEER_CHECKING, peer, 0);
 		}
 	}
