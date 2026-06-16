@@ -61,6 +61,20 @@ static void app_handle_event(struct pet_state *pet, const struct app_event *even
 	if ((event->type == APP_EVENT_TIME_SYNC) && (event->param >= 946684800)) {
 		kerfur_nearby_set_wall_clock((int64_t)event->param, event->timestamp_ms);
 	}
+
+	/* Kerfur-to-Kerfur social handshake: greet when an encounter starts, and
+	 * acknowledge a greet we received from a peer. emit_social() sets the
+	 * beacon's social field; the refresh poll then triggers a rate-limited
+	 * advertising rebuild so it actually goes out (and clears it after its
+	 * window). The emotion engine reacts to the matching PEER_GREET events. */
+	if (event->type == APP_EVENT_ENCOUNTER_START) {
+		kerfur_nearby_emit_social((uint8_t)KFR_SOCIAL_GREET);
+	} else if (event->type == APP_EVENT_PEER_GREET) {
+		kerfur_nearby_emit_social((uint8_t)KFR_SOCIAL_GREET_ACK);
+	}
+	if (kerfur_nearby_take_beacon_refresh()) {
+		ble_manager_request_beacon_refresh();
+	}
 #endif
 
 	if (event->type == APP_EVENT_FACE_DEBUG_DUMP) {

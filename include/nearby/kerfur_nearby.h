@@ -153,6 +153,17 @@ bool kerfur_nearby_parse_beacon(const uint8_t *data, size_t len,
 /* Builds the manufacturer data for the scan response. Returns bytes written. */
 size_t kerfur_nearby_build_beacon(uint8_t *out, size_t max_len);
 
+/* Set the social event (greet / play handshake) broadcast in the beacon for a
+ * short window; KFR_SOCIAL_NONE clears it early. The advertising payload must be
+ * rebuilt (an adv refresh) for a change to go out promptly — otherwise it rides
+ * out on the next scheduled beacon rebuild (e.g. ID rotation). */
+void kerfur_nearby_emit_social(uint8_t social_event);
+
+/* Returns true (once) when the advertising payload needs rebuilding because the
+ * broadcast social event changed or its window expired. The BLE layer polls this
+ * and triggers a rate-limited beacon refresh. Clears the pending flag. */
+bool kerfur_nearby_take_beacon_refresh(void);
+
 /* Called by the BLE manager to update the ephemeral ID.  When wall clock is
  * valid the ID uses the wall-clock slot so friends can predict it; otherwise
  * it falls back to the uptime slot (private but not cross-device resolvable). */

@@ -257,6 +257,7 @@ Nearby debugging:
 - `kerfur nearby inject unknown <id> [expr]`
 - `kerfur nearby inject play_invite <id>`
 - `kerfur nearby inject play_ack <id>`
+- `kerfur nearby inject greet <id>` (peer says hi — Kerfur bows and greets back)
 - `kerfur nearby inject lost <id>`
 - `kerfur nearby end <id> [duration_s]`
 
@@ -288,8 +289,8 @@ The generator runs automatically from CMake and writes:
 
 ## Tests
 
-Two off-target test harnesses cover the two halves of the face/emotion runtime;
-both run on a desktop without the Zephyr toolchain or hardware:
+Three off-target test harnesses cover the face/emotion runtime and the nearby
+state machine; all run on a desktop without the Zephyr toolchain or hardware:
 
 - **Engine selection** — [tools/appraisal_calibrate.py](tools/appraisal_calibrate.py)
   mirrors the integer appraisal scoring and asserts 20 canonical emotional
@@ -299,6 +300,13 @@ both run on a desktop without the Zephyr toolchain or hardware:
   drives every expression, transition, and micro-reaction through
   `face_runtime_step()`, asserting render-plan validity and that pupil swaps
   always complete (no deadlocks). Run: `bash tests/face_host/run.sh`.
+- **Nearby peer state machine** — [tests/nearby_host/](tests/nearby_host/)
+  compiles the real `src/nearby/kerfur_nearby.c` + `encounter_log.c` against
+  small Zephyr shims, captures the app events the module publishes, and drives
+  synthetic scan candidates + ticks to pin the `SEEN → NEAR → INTERACTING →
+  COOLDOWN` transitions, RSSI/idle hysteresis, own-beacon echo rejection, the
+  active-encounter prune, and WALK_TOGETHER encounter typing. Run:
+  `bash tests/nearby_host/run.sh`.
 
 ## Android / Gadgetbridge Notes
 

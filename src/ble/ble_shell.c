@@ -1032,6 +1032,36 @@ static int cmd_nearby_inject_play_ack(const struct shell *shell, size_t argc, ch
 	return 0;
 }
 
+static int cmd_nearby_inject_greet(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_event_peer peer = {0};
+	uint32_t id;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby inject greet <ephemeral_id>");
+		return -EINVAL;
+	}
+
+	err = parse_u32_arg(argv[1], &id);
+	if (err != 0) {
+		shell_error(shell, "invalid ephemeral_id: %s", argv[1]);
+		return err;
+	}
+
+	peer.ephemeral_id = id;
+	peer.rssi = -55;
+
+	err = app_event_publish_peer(APP_EVENT_PEER_GREET, &peer);
+	if (err != 0) {
+		shell_error(shell, "PEER_GREET publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "PEER_GREET queued id=0x%08x (Kerfur should bow + greet back)", id);
+	return 0;
+}
+
 static int cmd_nearby_inject_lost(const struct shell *shell, size_t argc, char **argv)
 {
 	struct app_event_peer peer = {0};
@@ -1492,6 +1522,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_nearby_inject,
 	SHELL_CMD(unknown, NULL, "Inject ENCOUNTER_START as unknown <id> [expr]", cmd_nearby_inject_unknown),
 	SHELL_CMD(play_invite, NULL, "Inject PEER_PLAY_INVITE <id>", cmd_nearby_inject_play_invite),
 	SHELL_CMD(play_ack, NULL, "Inject PEER_PLAY_ACK <id>", cmd_nearby_inject_play_ack),
+	SHELL_CMD(greet, NULL, "Inject PEER_GREET <id> (peer says hi)", cmd_nearby_inject_greet),
 	SHELL_CMD(lost, NULL, "Inject PEER_LOST <id>", cmd_nearby_inject_lost),
 	SHELL_SUBCMD_SET_END
 );

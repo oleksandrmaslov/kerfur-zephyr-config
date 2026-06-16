@@ -13,4 +13,9 @@ bool ble_manager_is_companion_subscribed(void);
 int ble_manager_companion_send_test_notification(uint8_t category_id);
 int ble_manager_rsc_notify(uint16_t speed_256ms, uint8_t cadence_spm, bool running);
 
+/* Trigger a rate-limited rebuild of the advertising payload so a freshly emitted
+ * nearby social event (greet/play handshake) is broadcast promptly. Reuses the
+ * advertising-restart path; no-ops while a central is connected. */
+void ble_manager_request_beacon_refresh(void);
+
 #endif /* KERFUR_BLE_MANAGER_H_ */

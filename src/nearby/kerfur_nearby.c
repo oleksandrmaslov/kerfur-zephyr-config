@@ -38,6 +38,11 @@ LOG_MODULE_REGISTER(kerfur_nearby, CONFIG_LOG_DEFAULT_LEVEL);
  * NOT the social-overload signal (which comes from the emotion engine's drives). */
 #define MAX_ACTIVE_ENCOUNTERS      5
 
+/* How long an emitted social event (greet/play handshake) stays in the broadcast
+ * beacon — long enough for a duty-cycled peer scanner to catch it, short enough
+ * not to linger as a stale "hello". */
+#define KFR_SOCIAL_TX_TTL_MS       4000
+
 #define DEVICE_SECRET_LEN   32
 #define SETTINGS_SUBTREE    "kerfur/nearby"
 #define SETTINGS_KEY_SECRET "secret"
@@ -89,6 +94,16 @@ static int64_t  g_wallclock_uptime_ms;/* uptime_ms recorded alongside unix_s */
 static uint8_t  g_current_ephemeral_bytes[4];
 static uint32_t g_current_ephemeral_id;
 static uint8_t  g_beacon_sequence;
+
+/* Pending outgoing social event (greet/play handshake): broadcast in the beacon
+ * until g_tx_social_until_ms (uptime ms).  Guarded by g_snapshot_mutex (read in
+ * build_beacon, written by kerfur_nearby_emit_social). */
+static uint8_t  g_tx_social_event;
+static int64_t  g_tx_social_until_ms;
+/* Set when the broadcast beacon's social field needs to change (a fresh emit, or
+ * an expired window): the BLE layer polls kerfur_nearby_take_beacon_refresh()
+ * and rebuilds the advertising payload. */
+static bool     g_beacon_refresh_due;
 
 static bool g_initialized;
 
@@ -584,6 +599,9 @@ int kerfur_nearby_init(void)
 	}
 	memset(&g_snapshot, 0, sizeof(g_snapshot));
 	g_beacon_sequence = 0U;
+	g_tx_social_event = (uint8_t)KFR_SOCIAL_NONE;
+	g_tx_social_until_ms = 0;
+	g_beacon_refresh_due = false;
 	g_current_ephemeral_id = 0U;
 	memset(g_current_ephemeral_bytes, 0, sizeof(g_current_ephemeral_bytes));
 	g_pending_friend_count_mask = 0U;
@@ -698,6 +716,8 @@ size_t kerfur_nearby_build_beacon(uint8_t *out, size_t max_len)
 {
 	struct kerfur_beacon_v1 beacon;
 	struct kerfur_pet_snapshot snap;
+	int64_t now = k_uptime_get();
+	uint8_t social_out;
 
 	if ((out == NULL) || (max_len < sizeof(beacon))) {
 		return 0U;
@@ -706,6 +726,10 @@ size_t kerfur_nearby_build_beacon(uint8_t *out, size_t max_len)
 	k_mutex_lock(&g_snapshot_mutex, K_FOREVER);
 	snap = g_snapshot;
 	memcpy(beacon.ephemeral_id, g_current_ephemeral_bytes, sizeof(beacon.ephemeral_id));
+	social_out = ((g_tx_social_event != (uint8_t)KFR_SOCIAL_NONE) &&
+		      (now < g_tx_social_until_ms))
+			     ? g_tx_social_event
+			     : (uint8_t)KFR_SOCIAL_NONE;
 	k_mutex_unlock(&g_snapshot_mutex);
 
 	beacon.company_id = sys_cpu_to_le16(KERFUR_BEACON_COMPANY_ID);
@@ -716,11 +740,46 @@ size_t kerfur_nearby_build_beacon(uint8_t *out, size_t max_len)
 	beacon.character_id = snap.character_id;
 	beacon.mode_expr = (uint8_t)(((snap.mode & 0x0FU) << 4) | (snap.expression & 0x0FU));
 	beacon.status_flags = snap.status_flags;
-	beacon.social_event = (uint8_t)KFR_SOCIAL_NONE;
+	beacon.social_event = social_out;
 	beacon.sequence = g_beacon_sequence++;
 
 	memcpy(out, &beacon, sizeof(beacon));
 	return sizeof(beacon);
+}
+
+void kerfur_nearby_emit_social(uint8_t social_event)
+{
+	int64_t now = k_uptime_get();
+
+	k_mutex_lock(&g_snapshot_mutex, K_FOREVER);
+	g_tx_social_event = social_event;
+	g_tx_social_until_ms = (social_event == (uint8_t)KFR_SOCIAL_NONE)
+				       ? 0
+				       : (now + KFR_SOCIAL_TX_TTL_MS);
+	g_beacon_refresh_due = true;
+	k_mutex_unlock(&g_snapshot_mutex);
+
+	LOG_DBG("emit social %u", social_event);
+}
+
+bool kerfur_nearby_take_beacon_refresh(void)
+{
+	bool due;
+	int64_t now = k_uptime_get();
+
+	k_mutex_lock(&g_snapshot_mutex, K_FOREVER);
+	/* Expiry edge: a social event whose window has passed must be cleared from
+	 * the broadcast, which needs a fresh build. */
+	if ((g_tx_social_event != (uint8_t)KFR_SOCIAL_NONE) &&
+	    (now >= g_tx_social_until_ms)) {
+		g_tx_social_event = (uint8_t)KFR_SOCIAL_NONE;
+		g_beacon_refresh_due = true;
+	}
+	due = g_beacon_refresh_due;
+	g_beacon_refresh_due = false;
+	k_mutex_unlock(&g_snapshot_mutex);
+
+	return due;
 }
 
 bool kerfur_nearby_parse_beacon(const uint8_t *data, size_t len,
@@ -1068,7 +1127,46 @@ void kerfur_nearby_ingest_candidate(const struct kerfur_scan_candidate *cand)
 		return;
 	}
 
-	peer_apply_candidate_locked(peer, cand);
+	{
+		/* Social-event rising edge: the peer's beacon carries a greet/play
+		 * handshake signal.  The same event repeats across several beacons
+		 * while the sender's window is open, so translate it into an engine
+		 * event only when it first appears (differs from what we last saw)
+		 * to avoid re-triggering on every packet. */
+		uint8_t prev_social = peer->last_social_event;
+
+		peer_apply_candidate_locked(peer, cand);
+
+		if ((cand->social_event != (uint8_t)KFR_SOCIAL_NONE) &&
+		    (cand->social_event != prev_social)) {
+			enum app_event_type sev = APP_EVENT_PEER_GREET;
+			bool have_event = true;
+
+			switch (cand->social_event) {
+			case KFR_SOCIAL_GREET:
+				sev = APP_EVENT_PEER_GREET;
+				break;
+			case KFR_SOCIAL_GREET_ACK:
+				sev = APP_EVENT_PEER_GREET_ACK;
+				break;
+			case KFR_SOCIAL_PLAY_INVITE:
+				sev = APP_EVENT_PEER_PLAY_INVITE;
+				break;
+			case KFR_SOCIAL_PLAY_ACK:
+				sev = APP_EVENT_PEER_PLAY_ACK;
+				break;
+			default:
+				have_event = false;
+				break;
+			}
+
+			if (have_event) {
+				LOG_INF("peer 0x%08x social=%u", peer->ephemeral_id,
+					cand->social_event);
+				publish_peer_event(sev, peer, 0);
+			}
+		}
+	}
 
 	if (peer->state == KERFUR_PEER_STATE_NONE) {
 		peer->state = KERFUR_PEER_STATE_SEEN;
@@ -1107,6 +1205,18 @@ void kerfur_nearby_ingest_candidate(const struct kerfur_scan_candidate *cand)
 
 	if (peer->state == KERFUR_PEER_STATE_INTERACTING) {
 		encounter_log_update(peer->encounter_id, cand->rssi);
+
+		/* Classify "walking together": both this Kerfur and the peer report
+		 * walking during the encounter — the shared-walk story ("then people
+		 * meet each other").  This is detectable from beacon status alone, so
+		 * it lives here on the nearby side and is sticky once observed.
+		 * GREETING / PLAY typing arrives with the social handshake (Track 2)
+		 * and will take priority over WALK_TOGETHER. */
+		if (snap.walking_active &&
+		    ((peer->status_flags & KFR_STATUS_WALKING) != 0U)) {
+			encounter_log_set_type(peer->encounter_id,
+					       KERFUR_ENCOUNTER_WALK_TOGETHER);
+		}
 	}
 
 	k_mutex_unlock(&g_peer_mutex);

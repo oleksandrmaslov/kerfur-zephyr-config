@@ -167,7 +167,9 @@ back up toward overstimulation; symmetric adjacency is enough for routing.
   mood believable no matter how spammy the inputs are.
 - Positive: petting (+4/+5), holds (+2), taps (+1), friend encounters (+8,
   +4 more if the friend is visibly happy), unknown peers (+3), play invites
-  (+3), real walks (+2), shared walks with a peer (+1 per glance), charging
+  (+3), real walks (+2), shared walks with a peer (+2 at encounter start when
+  this Kerfur and the peer are both walking — the peer's broadcast mode says
+  so; the nearby side logs that encounter as WALK_TOGETHER), charging
   (+2), long encounters ending (+2).
 - Negative: rough shaking (−8/−10), impacts (−6), notification overload (−4),
   2 h+ of loneliness (−2 per 30 min).
@@ -245,6 +247,35 @@ an IDLE/CALM peer so existing flows are unchanged.
 
 Privacy note: contagion uses only the already-broadcast anonymous summary;
 nothing new is transmitted or stored per peer.
+
+## 5a. Greet handshake (Kerfur↔Kerfur "talk", 2026-06-16)
+
+Contagion is one-way (each Kerfur reads the other's broadcast vibe). The greet
+handshake adds a real two-way exchange over the beacon's `social_event` byte
+(which had been hardcoded to `NONE` — defined but never transmitted):
+
+- **Emit** (`kerfur_nearby.c`): `kerfur_nearby_emit_social()` parks a social event
+  in the beacon for a 4 s window (`KFR_SOCIAL_TX_TTL_MS`); `build_beacon()` emits
+  it; `kerfur_nearby_take_beacon_refresh()` tells the BLE layer when to rebuild
+  the advertising payload (a fresh emit, or the window expiring).
+- **Receive** (`kerfur_nearby.c`): ingest fires on a social-event *rising edge*
+  (de-duped per peer, since the sender repeats it across beacons) and publishes
+  `APP_EVENT_PEER_GREET` / `_GREET_ACK` / `_PLAY_INVITE` / `_PLAY_ACK`.
+- **Orchestration** (`app.c`): greet on `ENCOUNTER_START`, acknowledge a received
+  `PEER_GREET`; then poll the refresh signal → `ble_manager_request_beacon_refresh()`.
+- **Refresh** (`ble_manager.c`): rate-limited (1.5 s, `KERFUR_BEACON_REFRESH_MIN_MS`)
+  reuse of the `g_adv_restart_work` advertising-restart path so a handshake flurry
+  can't churn the radio; the restart no-ops while a phone is connected.
+- **Engine**: `PEER_GREET` → warmth + a bow; `PEER_GREET_ACK` → shared warmth,
+  bouncing if already playful. Reuses existing reactions — no new face art.
+
+Two Kerfurs meeting both greet and both acknowledge (the exchange is symmetric).
+Privacy is unchanged: the social byte is ephemeral and carries no identity beyond
+the already-broadcast rotating ephemeral ID. Single-device test:
+`kerfur nearby inject greet <id>`. The nearby-side TX/RX/refresh logic is covered
+by `tests/nearby_host/`; the `app.c`/`ble_manager.c`/engine wiring is traced, not
+yet on-device-verified (the refresh touches the advertising path — verify on two
+units). Tuning: `KFR_SOCIAL_TX_TTL_MS`, `KERFUR_BEACON_REFRESH_MIN_MS`.
 
 ## 6. Sleep inertia and night awareness
 

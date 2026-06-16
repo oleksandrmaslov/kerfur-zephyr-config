@@ -1864,6 +1864,20 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 			trigger_reaction(state, hello, now);
 		}
 
+		/* Walking together: this Kerfur is out walking and the peer's beacon
+		 * says it is too — the shared-walk beat ("then people meet each
+		 * other").  A little extra warmth/mood on top of the greeting, for
+		 * any relationship.  Reads the peer's broadcast mode (already used for
+		 * vibe), so the engine stays decoupled from the nearby driver; the
+		 * nearby side logs the encounter as WALK_TOGETHER from the precise
+		 * status flag. */
+		if (state->walking_active &&
+		    (event->payload.peer.mode_summary == (uint8_t)PET_MODE_WALK_AWAKE)) {
+			g_runtime.ctx.social_warmth += scale_pct(8, personality()->social_pct);
+			state->attachment += 2;
+			nudge_mood(2);
+		}
+
 		LOG_INF("Encounter start: %s peer vibe=%s",
 			is_friend ? "friend" : "unknown", peer_vibe_str(vibe));
 		state->encounter_sync_pending = true;
@@ -1935,6 +1949,35 @@ static void apply_event(struct pet_state *state, const struct app_event *event)
 		state->attachment += 2;
 		nudge_mood(3);
 		trigger_reaction(state, REACTION_HAPPY_BOUNCE, now);
+		break;
+
+	case APP_EVENT_PEER_GREET:
+		/* A nearby Kerfur said hello (its beacon carried a greet). Warm,
+		 * attentive acknowledgement — a little social warmth and a bow.
+		 * The reply (GREET_ACK) is sent by the social TX layer; here we
+		 * only register the feeling. */
+		g_runtime.ctx.social_warmth += scale_pct(10, personality()->social_pct);
+		state->curiosity += 3;
+		nudge_mood(1);
+		show_social_indicator(state,
+				      event->payload.peer.is_friend
+					      ? KERFUR_FACE_INDICATOR_ICON_HEART_FILLED
+					      : KERFUR_FACE_INDICATOR_ICON_HEART_OUTLINE,
+				      now, 2500);
+		trigger_reaction(state, REACTION_PET_BOW, now);
+		break;
+
+	case APP_EVENT_PEER_GREET_ACK:
+		/* The peer answered our hello — the handshake completed. Shared
+		 * warmth; brighten into a bounce if we were already feeling playful. */
+		g_runtime.ctx.social_warmth += scale_pct(8, personality()->social_pct);
+		state->attachment += 1;
+		nudge_mood(2);
+		trigger_reaction(state,
+				 (g_runtime.intent == PET_INTENT_PLAY)
+					 ? REACTION_HAPPY_BOUNCE
+					 : REACTION_PET_BOW,
+				 now);
 		break;
 
 	/* ── System / lifecycle events ───────────────────────────────── */

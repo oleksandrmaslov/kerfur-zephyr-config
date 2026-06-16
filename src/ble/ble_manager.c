@@ -68,6 +68,9 @@ LOG_MODULE_REGISTER(ble_manager, CONFIG_LOG_DEFAULT_LEVEL);
 #define KERFUR_ADV_RESTART_INITIAL_DELAY K_MSEC(120)
 #define KERFUR_ADV_RESTART_RETRY_DELAY K_MSEC(300)
 #define KERFUR_ADV_RESTART_MAX_RETRIES 8U
+/* Min spacing between social-handshake-triggered beacon refreshes (adv restarts)
+ * so a flurry of greet/ack emits coalesces instead of churning the radio. */
+#define KERFUR_BEACON_REFRESH_MIN_MS 1500
 #define KERFUR_NOTIFY_DISCOVERY_RETRY_DELAY K_SECONDS(2)
 #define KERFUR_NOTIFY_DISCOVERY_MAX_RETRIES 5U
 
@@ -1961,6 +1964,29 @@ static void kerfur_rotate_work_handler(struct k_work *work)
 	(void)k_work_reschedule(&g_adv_restart_work, KERFUR_ADV_RESTART_INITIAL_DELAY);
 	(void)k_work_reschedule(&g_kerfur_rotate_work,
 				K_SECONDS(CONFIG_KERFUR_NEARBY_ID_ROTATE_S));
+}
+
+/* Rate-limited beacon refresh: reuse the proven advertising-restart path so a
+ * freshly emitted social event (greet/play) goes out within ~1 s. Requests
+ * coalesce (>= KERFUR_BEACON_REFRESH_MIN_MS apart) so a handshake flurry can't
+ * churn the radio; the restart handler no-ops while a central is connected. */
+static int64_t g_last_beacon_refresh_ms;
+
+void ble_manager_request_beacon_refresh(void)
+{
+	int64_t now = k_uptime_get();
+	int64_t earliest = g_last_beacon_refresh_ms + KERFUR_BEACON_REFRESH_MIN_MS;
+	int64_t delay_ms;
+
+	if (now >= earliest) {
+		delay_ms = 0;
+		g_last_beacon_refresh_ms = now;
+	} else {
+		delay_ms = earliest - now;
+		g_last_beacon_refresh_ms = earliest;
+	}
+
+	(void)k_work_reschedule(&g_adv_restart_work, K_MSEC(delay_ms));
 }
 
 /* -- Kerfur scan path ------------------------------------------------------ */

@@ -10,6 +10,51 @@ affected files, priority, and status.
 
 ---
 
+## Session progress (updated 2026-06-15/16 — nearby social depth + handshake)
+
+Focus: deepen Kerfur↔Kerfur social behavior. Verified true state in code first —
+the contagion/greeting/vibe layer is genuinely rich; the gaps below are real.
+
+- **New off-target harness** `tests/nearby_host/` (`bash tests/nearby_host/run.sh`):
+  compiles the real `kerfur_nearby.c` + `encounter_log.c` against Zephyr shims,
+  captures published app events, and golden-masters the peer state machine
+  (SEEN→NEAR→INTERACTING→COOLDOWN, RSSI near/lost + idle hysteresis, own-beacon
+  echo reject, active-encounter prune). 26 checks, green. The `kerfur_nearby`
+  half of M3.
+- **Encounter typing (nearby side):** `encounter_log_set_type()` was defined but
+  **never called** — every encounter logged as FIRST_CONTACT. Now typed
+  `WALK_TOGETHER` when this Kerfur and the peer both report walking during it.
+  Host-tested (with a non-walking control). GREETING/PLAY typing deferred to the
+  handshake (Track 2).
+- **Walking-together contagion (engine side):** `behavior_engine.c`
+  ENCOUNTER_START adds warmth/attachment/mood (+2) when both are walking — the
+  shared-walk beat. Reads the peer's broadcast mode (stays decoupled from the
+  nearby driver). Traced, **not flashed** (owner builds). Corrects a doc/code
+  drift in `KERFUS_EMOTION_RUNTIME.md` §2 (a shared-walk mood input that was
+  documented but unimplemented).
+- **Kerfur↔Kerfur greet handshake (Track 2 — built, owner chose rate-limited
+  adv-restart refresh):** the social handshake was inert — `build_beacon()`
+  hardcoded `KFR_SOCIAL_NONE` and a received `social_event` was never turned
+  into an engine event. Now:
+  - **TX:** `kerfur_nearby_emit_social()` sets a pending social event broadcast
+    for a `KFR_SOCIAL_TX_TTL_MS` (4 s) window; `build_beacon()` emits it.
+    `kerfur_nearby_take_beacon_refresh()` signals when the payload must be
+    rebuilt (fresh emit or expired window). **Host-tested.**
+  - **RX:** ingest detects a social-event *rising edge* (de-duped per peer) and
+    publishes `PEER_GREET` / `PEER_GREET_ACK` / `PEER_PLAY_INVITE` / `_ACK`.
+    **Host-tested.** New `APP_EVENT_PEER_GREET[_ACK]` events.
+  - **Orchestration (`app.c`):** greet on `ENCOUNTER_START`, ack on `PEER_GREET`,
+    then poll the refresh signal → `ble_manager_request_beacon_refresh()`.
+  - **Refresh (`ble_manager.c`):** rate-limited (`KERFUR_BEACON_REFRESH_MIN_MS`
+    1.5 s) reuse of the proven `g_adv_restart_work` path; no-ops while connected.
+    **Touches the adv path — needs two-device verification + a flash.**
+  - **Engine:** reacts to received greet/greet-ack (warmth + bow, bounce if
+    playful). Traced.
+  - **Single-device demo:** `kerfur nearby inject greet <id>`.
+  - **Still TODO:** GREETING/PLAY encounter-type classification on a completed
+    handshake; engine-initiated play invites (escalation); two-device on-air
+    verification of the refresh churn.
+
 ## Session progress (updated 2026-06-15 — BLE connect/pairing rework)
 
 Focus: fix the phone-connect bug (BT icon then freeze, no pairing prompt, ANCS
@@ -188,13 +233,13 @@ MVP items already work.
 - **Affected:** new `tests/` tree with `testcase.yaml`; possibly small seams in
   `behavior_engine`/`kerfur_nearby` to allow injecting `now_ms`.
 - **Priority:** P1
-- **Status:** IN PROGRESS (2026-06-15) — two off-target harnesses now exist and
-  pass: `tools/appraisal_calibrate.py` (engine selection: 20 scenarios + 7
-  stability checks) and `tests/face_host/` (face rendering: every
-  expression/transition/reaction through `face_runtime_step`, ~1.03M checks,
-  guards the pupil-swap deadlock). Remaining: `behavior_engine` event-sequence
-  tests and `kerfur_nearby` peer-state / RSSI-hysteresis tests; optional
-  ztest/twister integration so they run in CI alongside `west`.
+- **Status:** IN PROGRESS (2026-06-15) — three off-target harnesses now exist
+  and pass: `tools/appraisal_calibrate.py` (engine selection: 20 scenarios + 7
+  stability checks), `tests/face_host/` (face rendering, ~2.25M checks, guards
+  the pupil-swap deadlock), and `tests/nearby_host/` (the `kerfur_nearby`
+  peer-state / RSSI-hysteresis / prune / encounter-typing machine, 26 checks).
+  Remaining: `behavior_engine` event-sequence tests; optional ztest/twister
+  integration so they run in CI alongside `west`.
 
 ### M4. Persistence / personality module
 - **Why:** `CLAUDE.md` §14. Survive reboot: device name, personality, affection,
