@@ -261,6 +261,8 @@ Nearby debugging:
 - `kerfur nearby inject greet <id>` (peer says hi — Kerfur bows and greets back)
 - `kerfur nearby inject lost <id>`
 - `kerfur nearby end <id> [duration_s]`
+- `kerfur nearby secret` (dev/test: print this unit's device key, to pair two units)
+- `kerfur nearby set_time <unix_s>` (dev/test: set wall clock so paired friends survive ID rotation)
 
 The optional `expr` argument (a `pet_expression` id, 0–12) simulates the peer's
 broadcast expression so emotional contagion can be tested: e.g. `5` (SLEEPY)

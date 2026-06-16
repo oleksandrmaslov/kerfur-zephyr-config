@@ -582,6 +582,23 @@ int8_t kerfur_nearby_resolve_ephemeral_id(uint32_t ephemeral_id)
 	return resolve_friend_id(ephemeral_id, k_uptime_get());
 }
 
+size_t kerfur_nearby_get_secret(uint8_t *out, size_t max)
+{
+	if ((out == NULL) || (max < (size_t)DEVICE_SECRET_LEN)) {
+		return 0U;
+	}
+
+	k_mutex_lock(&g_secret_mutex, K_FOREVER);
+	if (!g_device_secret_valid) {
+		k_mutex_unlock(&g_secret_mutex);
+		return 0U;
+	}
+	memcpy(out, g_device_secret, DEVICE_SECRET_LEN);
+	k_mutex_unlock(&g_secret_mutex);
+
+	return (size_t)DEVICE_SECRET_LEN;
+}
+
 /* ── Init ────────────────────────────────────────────────────────────── */
 
 int kerfur_nearby_init(void)

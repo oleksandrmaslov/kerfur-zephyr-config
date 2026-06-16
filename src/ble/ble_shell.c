@@ -1291,6 +1291,67 @@ static int cmd_nearby_friends_add(const struct shell *shell, size_t argc, char *
 	return 0;
 }
 
+static int cmd_nearby_secret(const struct shell *shell, size_t argc, char **argv)
+{
+	static const char hexd[] = "0123456789abcdef";
+	uint8_t secret[KERFUR_FRIEND_KEY_LEN];
+	char hex[KERFUR_FRIEND_KEY_LEN * 2U + 1U];
+	size_t i;
+	size_t n;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	n = kerfur_nearby_get_secret(secret, sizeof(secret));
+	if (n != (size_t)KERFUR_FRIEND_KEY_LEN) {
+		shell_error(shell, "device secret not available yet");
+		return -EIO;
+	}
+
+	for (i = 0U; i < n; i++) {
+		hex[i * 2U] = hexd[(secret[i] >> 4) & 0x0FU];
+		hex[i * 2U + 1U] = hexd[secret[i] & 0x0FU];
+	}
+	hex[n * 2U] = '\0';
+
+	shell_print(shell, "This unit's device key (DEV/TEST — add it as a friend on the OTHER unit):");
+	shell_print(shell, "%s", hex);
+	return 0;
+}
+
+static int cmd_nearby_set_time(const struct shell *shell, size_t argc, char **argv)
+{
+	char *endptr;
+	unsigned long unix_s;
+	int err;
+
+	if (argc != 2U) {
+		shell_error(shell, "usage: kerfur nearby set_time <unix_seconds>");
+		return -EINVAL;
+	}
+
+	unix_s = strtoul(argv[1], &endptr, 10);
+	if (*endptr != '\0') {
+		shell_error(shell, "invalid unix time: %s", argv[1]);
+		return -EINVAL;
+	}
+	if (unix_s < 946684800UL) {
+		shell_error(shell, "unix time must be >= 946684800 (year 2000)");
+		return -EINVAL;
+	}
+
+	err = app_event_publish(APP_EVENT_TIME_SYNC, (int32_t)unix_s);
+	if (err != 0) {
+		shell_error(shell, "TIME_SYNC publish failed (%d)", err);
+		return err;
+	}
+
+	shell_print(shell, "TIME_SYNC queued (unix=%lu) — run the same on the other unit", unix_s);
+	shell_print(shell, "  (within ~%d min) to enable cross-rotation friend recognition.",
+		    CONFIG_KERFUR_NEARBY_ID_ROTATE_S / 60);
+	return 0;
+}
+
 static int cmd_nearby_friends_remove(const struct shell *shell, size_t argc, char **argv)
 {
 	uint8_t idx;
@@ -1540,6 +1601,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kerfur_nearby,
 	SHELL_CMD(inject, &sub_kerfur_nearby_inject, "Inject nearby/encounter events", NULL),
 	SHELL_CMD(end, NULL, "Force ENCOUNTER_END <id> [duration_s]", cmd_nearby_end),
 	SHELL_CMD(peers, NULL, "Dump live peer table", cmd_nearby_peers_dump),
+	SHELL_CMD(secret, NULL, "Print this unit's device key (dev: pair two units as friends)",
+		  cmd_nearby_secret),
+	SHELL_CMD(set_time, NULL, "Set wall clock <unix_s> (enables friend recognition)",
+		  cmd_nearby_set_time),
 	SHELL_CMD(friends, &sub_kerfur_nearby_friends, "Confirmed friend management", NULL),
 	SHELL_SUBCMD_SET_END
 );

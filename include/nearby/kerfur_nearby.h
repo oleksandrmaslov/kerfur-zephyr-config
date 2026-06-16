@@ -204,6 +204,12 @@ uint32_t kerfur_nearby_friend_expected_id(uint8_t friend_index);
  * (±1 for boundary tolerance), or -1 if unknown or wall clock not valid. */
 int8_t kerfur_nearby_resolve_ephemeral_id(uint32_t ephemeral_id);
 
+/* Copy this unit's own device_secret into out (needs out >= KERFUR_FRIEND_KEY_LEN
+ * bytes).  Returns bytes written (KERFUR_FRIEND_KEY_LEN) or 0 if unavailable.
+ * DEV/TEST ONLY: the secret is normally private (never broadcast); this exists so
+ * two units can be paired as friends on the bench without the companion app. */
+size_t kerfur_nearby_get_secret(uint8_t *out, size_t max);
+
 /* ── Debug / shell ─────────────────────────────────────────────────────── */
 
 /* Returns count of peers currently in NEAR or INTERACTING state. */

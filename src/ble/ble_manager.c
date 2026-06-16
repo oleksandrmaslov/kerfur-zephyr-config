@@ -1994,9 +1994,10 @@ void ble_manager_request_beacon_refresh(void)
 #define KERFUR_SCAN_Q_LEN 16
 
 struct kerfur_scan_params {
-	uint16_t window_ms;
-	uint16_t interval_ms;
-	uint16_t period_ms;
+	uint16_t window_ms;   /* radio listen window within the burst */
+	uint16_t interval_ms; /* radio scan interval */
+	uint16_t burst_ms;    /* how long the scan stays on each cycle */
+	uint16_t period_ms;   /* time between the start of successive bursts */
 	bool     enabled;
 };
 
@@ -2012,8 +2013,15 @@ static struct kerfur_scan_params g_kerfur_scan_params;
 static struct kerfur_scan_params kerfur_select_scan_params(
 	const struct kerfur_pet_snapshot *snap)
 {
+	/* burst_ms is how long each scan burst stays on. It MUST span a peer's
+	 * advertising interval (slow adv is ~1.0–1.2 s, BT_GAP_ADV_SLOW_INT) or the
+	 * ACTIVE scan rarely catches the scan-response beacon — which made close,
+	 * still peers flap SEEN/NEAR/LOST every few seconds. burst_ms < period_ms
+	 * always (active modes use a shorter burst but a much shorter period, so
+	 * bursts come often enough to catch within ~1–2 cycles). */
 	struct kerfur_scan_params p = { .window_ms = 60, .interval_ms = 80,
-					.period_ms = 3000, .enabled = true };
+					.burst_ms = 1200, .period_ms = 3000,
+					.enabled = true };
 
 	if (snap->battery_critical) {
 		p.enabled = false;
@@ -2023,25 +2031,25 @@ static struct kerfur_scan_params kerfur_select_scan_params(
 	switch (snap->mode) {
 	case PET_MODE_ASLEEP:
 	case PET_MODE_DROWSY:
-		p.window_ms = 30; p.interval_ms = 60; p.period_ms = 8000;
+		p.window_ms = 30; p.interval_ms = 60; p.burst_ms = 1200; p.period_ms = 8000;
 		break;
 	case PET_MODE_IDLE:
-		p.window_ms = 60; p.interval_ms = 80; p.period_ms = 3000;
+		p.window_ms = 60; p.interval_ms = 80; p.burst_ms = 1200; p.period_ms = 3000;
 		break;
 	case PET_MODE_WALK_AWAKE:
-		p.window_ms = 120; p.interval_ms = 160; p.period_ms = 1000;
+		p.window_ms = 120; p.interval_ms = 160; p.burst_ms = 800; p.period_ms = 1000;
 		break;
 	case PET_MODE_INTERACTING:
-		p.window_ms = 100; p.interval_ms = 120; p.period_ms = 800;
+		p.window_ms = 100; p.interval_ms = 120; p.burst_ms = 700; p.period_ms = 800;
 		break;
 	case PET_MODE_CHARGING:
-		p.window_ms = 100; p.interval_ms = 120; p.period_ms = 2000;
+		p.window_ms = 100; p.interval_ms = 120; p.burst_ms = 1200; p.period_ms = 2000;
 		break;
 	case PET_MODE_LOW_POWER:
-		p.window_ms = 30; p.interval_ms = 80; p.period_ms = 10000;
+		p.window_ms = 30; p.interval_ms = 80; p.burst_ms = 1200; p.period_ms = 10000;
 		break;
 	default:
-		p.window_ms = 60; p.interval_ms = 80; p.period_ms = 3000;
+		p.window_ms = 60; p.interval_ms = 80; p.burst_ms = 1200; p.period_ms = 3000;
 		break;
 	}
 
@@ -2161,7 +2169,7 @@ static void kerfur_scan_start_work_handler(struct k_work *work)
 	err = bt_le_scan_start(&scan_param, kerfur_scan_adv_cb);
 	if (err == 0) {
 		g_kerfur_scan_active = true;
-		(void)k_work_reschedule(&g_kerfur_scan_stop_work, K_MSEC(params.window_ms));
+		(void)k_work_reschedule(&g_kerfur_scan_stop_work, K_MSEC(params.burst_ms));
 	} else if (err != -EALREADY) {
 		LOG_WRN("bt_le_scan_start err=%d (window=%ums interval=%ums)", err,
 			params.window_ms, params.interval_ms);

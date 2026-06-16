@@ -458,12 +458,39 @@ while holding the peer lock.
 
 ```
 kerfur nearby peers           -- live peer table (state, rssi, friend_index)
+kerfur nearby secret          -- dev/test: print THIS unit's device key (64 hex)
+kerfur nearby set_time <unix>  -- dev/test: set wall clock (enables friend recognition)
 kerfur nearby friends dump    -- stored friends (slot, nickname, encounters, expected_id)
 kerfur nearby friends resolve <id>  -- resolve an observed ID → friend slot
 kerfur nearby friends add <64hex> [nick]  -- dev/test: add a friend by key
 kerfur nearby friends remove <slot>       -- remove + NVS tombstone
 kerfur nearby friends test_rotate [slot]  -- inject expected ID, verify resolve works
 ```
+
+### Pairing two units on the bench (no companion app)
+
+Two un-paired Kerfurs lose each other every rotation (~15 min) — each new
+ephemeral ID looks like a fresh stranger. Pairing them as friends makes
+recognition survive rotation (and reboots). Without the app, use the shell:
+
+```
+# On unit A:
+kerfur nearby secret                 # copy A's 64-hex key
+# On unit B:
+kerfur nearby friends add <A_key> A  # B now knows A
+kerfur nearby secret                 # copy B's 64-hex key
+# On unit A:
+kerfur nearby friends add <B_key> B  # A now knows B
+# On BOTH (any unix timestamp, e.g. `date +%s`; the ±1 slot / ~15 min
+# tolerance means they don't have to match closely):
+kerfur nearby set_time 1766000000
+```
+
+They now recognize each other across rotation: filled-heart friends, encounter
+count climbs, no more lose+refind. **Reboot caveat:** the friend keys persist
+(NVS), but the wall clock is RAM-only (no battery-backed RTC), so re-run
+`set_time` on each unit after a reboot until the companion app syncs the clock
+on connect. The keys do **not** need re-adding.
 
 ### Limitations / known gaps
 

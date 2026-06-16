@@ -467,6 +467,53 @@ static void test_checking_throttle(void)
 	CHECK(cap_count(APP_EVENT_PEER_CHECKING) == 2, "a new CHECKING after the throttle window");
 }
 
+static void test_friend_recognition(void)
+{
+	printf("\n-- friend recognized across an ID rotation (the pairing path) --\n");
+
+	/* get_secret returns this unit's 32-byte key (what `nearby secret` prints). */
+	uint8_t my_secret[KERFUR_FRIEND_KEY_LEN];
+
+	CHECK(kerfur_nearby_get_secret(my_secret, sizeof(my_secret)) ==
+		      (size_t)KERFUR_FRIEND_KEY_LEN,
+	      "kerfur_nearby_get_secret returns the 32-byte device key");
+
+	/* Sync a wall clock so ephemeral-ID time slots are defined. */
+	kerfur_host_now_ms = 50000;
+	kerfur_nearby_set_wall_clock(1700000000LL, kerfur_host_now_ms);
+
+	/* Register a friend with a known key (what `friends add <hex>` does). */
+	uint8_t friend_key[KERFUR_FRIEND_KEY_LEN];
+
+	for (int i = 0; i < KERFUR_FRIEND_KEY_LEN; i++) {
+		friend_key[i] = (uint8_t)(0x10 + i);
+	}
+	int fi = kerfur_nearby_add_friend(friend_key, "buddy", 5);
+
+	CHECK(fi >= 0, "friend added to the table");
+
+	/* The friend's current expected ephemeral ID resolves back to that friend. */
+	uint32_t id_now = kerfur_nearby_friend_expected_id((uint8_t)fi);
+
+	CHECK(id_now != 0U, "expected friend id computed for the current slot");
+	CHECK(kerfur_nearby_resolve_ephemeral_id(id_now) == (int8_t)fi,
+	      "friend's current id resolves to the friend");
+
+	/* Advance past one rotation period: the friend's broadcast id changes, but
+	 * it must still resolve to the SAME friend — this is what stops two paired
+	 * Kerfurs from losing each other every rotation. */
+	kerfur_host_now_ms += (int64_t)CONFIG_KERFUR_NEARBY_ID_ROTATE_S * 1000 + 1000;
+	uint32_t id_next = kerfur_nearby_friend_expected_id((uint8_t)fi);
+
+	CHECK((id_next != 0U) && (id_next != id_now), "the friend's id rotated to a new value");
+	CHECK(kerfur_nearby_resolve_ephemeral_id(id_next) == (int8_t)fi,
+	      "the rotated id still resolves to the same friend");
+
+	/* A stranger's id must not resolve to any friend. */
+	CHECK(kerfur_nearby_resolve_ephemeral_id(0x12345678u) < 0,
+	      "an unknown id resolves to no friend");
+}
+
 int main(void)
 {
 	printf("=== Kerfur nearby host test ===\n");
@@ -484,6 +531,7 @@ int main(void)
 	test_beacon_refresh_signal();
 	test_near_after_seen_window();
 	test_checking_throttle();
+	test_friend_recognition();
 
 	printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
 	if (g_failures != 0) {
